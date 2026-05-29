@@ -26,8 +26,10 @@ pub mod endpoint;
 pub mod error;
 pub mod handshake;
 pub mod identity;
+pub mod stream;
 
 pub use alpn::ALPN;
 pub use endpoint::Endpoint;
 pub use error::{Result, TransportError};
 pub use handshake::{do_handshake, HelloMsg, RejectMsg};
+pub use stream::{recv_envelope, send_envelope, MAX_ENVELOPE_BYTES};
