@@ -1,0 +1,31 @@
+[package]
+name = "agent-mesh-discovery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "LAN discovery for agent-mesh via mDNS"
+
+[dependencies]
+agent-mesh-core.workspace = true
+mdns-sd.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+hex.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tests-common.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

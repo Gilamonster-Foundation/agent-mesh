@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "agent-mesh-core",
     "agent-mesh-cli",
+    "agent-mesh-discovery",
     "tests/common",
 ]
 
@@ -48,8 +49,15 @@ ssh-key = { version = "0.6", features = ["ed25519"] }
 # Filesystem
 dirs = "5"
 
+# LAN discovery
+mdns-sd = "0.13"
+
+# Timestamps (RFC 3339, used as audit claims, not coordination primitives)
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
 # Internal crates
 agent-mesh-core = { path = "agent-mesh-core", version = "=0.5.20260528" }
+agent-mesh-discovery = { path = "agent-mesh-discovery", version = "=0.5.20260528" }
 tests-common = { path = "tests/common" }
 
 # Test deps
