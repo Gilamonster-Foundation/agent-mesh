@@ -33,7 +33,16 @@ tracing-subscriber.workspace = true
 # The bus itself is broker-free; this dep exists solely so the example
 # under examples/nats_dispatch.rs compiles.
 async-nats.workspace = true
+bytes.workspace = true
 tokio = { workspace = true, features = ["test-util", "macros"] }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "bus_dispatch"
+path = "examples/bus_dispatch.rs"
+
+[[example]]
+name = "nats_dispatch"
+path = "examples/nats_dispatch.rs"

@@ -47,6 +47,7 @@ dependencies = [
  "anyhow",
  "async-nats",
  "async-trait",
+ "bytes",
  "futures",
  "hex",
  "rand 0.8.6",
