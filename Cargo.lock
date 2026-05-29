@@ -43,6 +43,7 @@ version = "0.5.20260528"
 dependencies = [
  "agent-mesh-core",
  "agent-mesh-discovery",
+ "agent-mesh-transport",
  "anyhow",
  "assert_cmd",
  "chrono",

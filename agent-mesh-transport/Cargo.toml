@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Authenticated QUIC transport for agent-mesh (iroh-net based)."
+description = "Authenticated QUIC transport for agent-mesh (built on iroh)."
 readme = "../README.md"
 
 [dependencies]

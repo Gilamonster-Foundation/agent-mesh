@@ -11,7 +11,9 @@ use std::path::PathBuf;
 mod announce;
 mod bind;
 mod keygen;
+mod listen;
 mod peers;
+mod send;
 mod util;
 mod verify;
 mod whoami;
@@ -79,6 +81,33 @@ pub enum Command {
         #[arg(long)]
         same_user: bool,
     },
+    /// Send a signed envelope to a peer discovered on the LAN.
+    ///
+    /// `peer_fp` is the 64-char hex of the peer's ed25519 pubkey
+    /// (which is also its BLAKE3 fingerprint preimage). The peer
+    /// must be running `amesh listen` so its TXT record carries
+    /// both the pubkey and a real UDP port.
+    Send {
+        /// Peer agent pubkey fingerprint (64-char hex).
+        peer_fp: String,
+        /// Payload as a JSON-shaped string (sent verbatim as UTF-8).
+        #[arg(long)]
+        payload: String,
+        /// How long to wait for the peer to appear in discovery.
+        #[arg(long, default_value = "10s")]
+        timeout: String,
+    },
+    /// Bind a QUIC endpoint, announce it on mDNS, accept envelopes.
+    ///
+    /// This is `amesh announce` + transport listener in one. Use
+    /// it (instead of plain `announce`) when you want peers to be
+    /// able to dial you and send envelopes.
+    Listen {
+        /// How long to listen, e.g. `30s`, `5m`. Defaults to
+        /// forever (until Ctrl-C).
+        #[arg(long)]
+        duration: Option<String>,
+    },
 }
 
 /// External key systems an agent-mesh identity can be bound to.
@@ -116,6 +145,12 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             duration,
         } => announce::run(home, capabilities, role, host, duration).await,
         Command::Peers { listen, same_user } => peers::run(home, listen, same_user).await,
+        Command::Send {
+            peer_fp,
+            payload,
+            timeout,
+        } => send::run(home, peer_fp, payload, timeout).await,
+        Command::Listen { duration } => listen::run(home, duration).await,
     }
 }
 
@@ -268,6 +303,66 @@ mod tests {
                 assert_eq!(listen, "10s");
                 assert!(same_user);
             }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_send_with_required_args() {
+        let cli = Cli::try_parse_from([
+            "amesh",
+            "send",
+            "deadbeef",
+            "--payload",
+            "{\"hello\":\"world\"}",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Send {
+                peer_fp,
+                payload,
+                timeout,
+            } => {
+                assert_eq!(peer_fp, "deadbeef");
+                assert_eq!(payload, "{\"hello\":\"world\"}");
+                assert_eq!(timeout, "10s");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_send_with_custom_timeout() {
+        let cli = Cli::try_parse_from([
+            "amesh",
+            "send",
+            "fpfp",
+            "--payload",
+            "x",
+            "--timeout",
+            "30s",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Send { timeout, .. } => assert_eq!(timeout, "30s"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_listen_with_defaults() {
+        let cli = Cli::try_parse_from(["amesh", "listen"]).unwrap();
+        match cli.command {
+            Command::Listen { duration } => assert!(duration.is_none()),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_listen_with_duration() {
+        let cli = Cli::try_parse_from(["amesh", "listen", "--duration", "5m"]).unwrap();
+        match cli.command {
+            Command::Listen { duration } => assert_eq!(duration.as_deref(), Some("5m")),
             _ => panic!("wrong variant"),
         }
     }

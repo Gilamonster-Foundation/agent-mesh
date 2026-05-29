@@ -35,3 +35,12 @@ pub use error::{Result, TransportError};
 pub use handshake::{do_handshake, HelloMsg, RejectMsg};
 pub use resolver::{PeerResolver, ResolverHandle};
 pub use stream::{recv_envelope, send_envelope, MAX_ENVELOPE_BYTES};
+
+/// Re-exports from `iroh` that callers regularly need but shouldn't
+/// have to add iroh as a direct dep for. Keep this list minimal — if
+/// a caller starts reaching into `iroh::*` directly the right answer
+/// is usually a new wrapper in this crate.
+pub mod iroh_reexports {
+    pub use iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
+    pub use iroh::PublicKey;
+}
