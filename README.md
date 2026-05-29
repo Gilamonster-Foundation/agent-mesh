@@ -1,11 +1,27 @@
-# agent-mesh
+<div align="center">
+  <img src="docs/logo/agent-mesh-256.png" alt="agent-mesh" width="160" height="160">
 
-Cryptographic peer-to-peer agent coordination.
+  # agent-mesh
+
+  **Cryptographic peer-to-peer agent coordination.**
+
+  *No broker. No scp'd tokens. No centralized configuration.*
+
+  [![CI](https://github.com/Gilamonster-Foundation/agent-mesh/actions/workflows/ci.yml/badge.svg)](https://github.com/Gilamonster-Foundation/agent-mesh/actions/workflows/ci.yml)
+  [![PyPI](https://img.shields.io/pypi/v/agent-mesh.svg)](https://pypi.org/project/agent-mesh/)
+  [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+</div>
+
+---
 
 A small Rust workspace that gives multi-agent systems a shared root of
 trust (ed25519 user key, cross-signed by your existing GitHub SSH key)
-and direct, verifiable peer messaging — no broker, no scp'd tokens,
-no centralized configuration.
+and direct, verifiable peer messaging.
+
+Two agents that share a user identity discover each other on the LAN,
+authenticate via cert chain at the QUIC handshake, and exchange signed
+envelopes — without a broker in the middle and without scp'ing tokens
+around.
 
 CLI: `amesh` (workspace member `agent-mesh-cli`).
 Libraries:
