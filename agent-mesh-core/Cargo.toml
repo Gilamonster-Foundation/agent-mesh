@@ -22,6 +22,14 @@ zeroize.workspace = true
 ssh-key.workspace = true
 tracing.workspace = true
 
+# Optional PyO3 bindings. The umbrella crate `agent-mesh-py` enables
+# this feature; default builds remain Python-free.
+pyo3 = { workspace = true, optional = true }
+
+[features]
+default = []
+pyo3 = ["dep:pyo3"]
+
 [dev-dependencies]
 tempfile.workspace = true
 
