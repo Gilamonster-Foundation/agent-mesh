@@ -43,7 +43,7 @@ fn mesh_err_to_py(e: MeshError) -> PyErr {
 )]
 #[derive(Clone)]
 pub struct PyFingerprint {
-    pub(crate) inner: Fingerprint,
+    pub inner: Fingerprint,
 }
 
 #[pymethods]
@@ -121,7 +121,7 @@ impl PyFingerprint {
 )]
 #[derive(Clone)]
 pub struct PyUserPublic {
-    pub(crate) inner: UserPublic,
+    pub inner: UserPublic,
 }
 
 #[pymethods]
@@ -159,7 +159,7 @@ impl PyUserPublic {
 /// User-level ed25519 keypair. Root of trust for an agent mesh.
 #[pyclass(name = "UserKey", module = "agent_mesh._agent_mesh.core")]
 pub struct PyUserKey {
-    pub(crate) inner: UserKey,
+    pub inner: UserKey,
 }
 
 #[pymethods]
@@ -218,7 +218,7 @@ impl PyUserKey {
 )]
 #[derive(Clone)]
 pub struct PyAgentMetadata {
-    pub(crate) inner: AgentMetadata,
+    pub inner: AgentMetadata,
 }
 
 #[pymethods]
@@ -280,7 +280,7 @@ impl PyAgentMetadata {
 )]
 #[derive(Clone)]
 pub struct PyCertChain {
-    pub(crate) inner: CertChain,
+    pub inner: CertChain,
 }
 
 #[pymethods]
@@ -310,7 +310,7 @@ impl PyCertChain {
 /// Short-lived per-agent ed25519 keypair, signed by a `UserKey`.
 #[pyclass(name = "AgentKey", module = "agent_mesh._agent_mesh.core")]
 pub struct PyAgentKey {
-    pub(crate) inner: AgentKey,
+    pub inner: AgentKey,
 }
 
 #[pymethods]
@@ -363,7 +363,7 @@ impl PyAgentKey {
 )]
 #[derive(Clone)]
 pub struct PyRecipient {
-    pub(crate) inner: Recipient,
+    pub inner: Recipient,
 }
 
 #[pymethods]
@@ -414,7 +414,7 @@ impl PyRecipient {
 )]
 #[derive(Clone)]
 pub struct PySignedEnvelope {
-    pub(crate) inner: SignedEnvelope,
+    pub inner: SignedEnvelope,
 }
 
 #[pymethods]
@@ -468,7 +468,7 @@ impl PySignedEnvelope {
 )]
 #[derive(Clone)]
 pub struct PyGitHubBinding {
-    pub(crate) inner: GitHubBinding,
+    pub inner: GitHubBinding,
 }
 
 #[pymethods]

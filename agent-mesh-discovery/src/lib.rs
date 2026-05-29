@@ -31,6 +31,9 @@ pub mod announce;
 pub mod browse;
 pub mod peer;
 
+#[cfg(feature = "pyo3")]
+pub mod pyo3_module;
+
 pub use announce::{AnnounceConfig, Announcer, AnnouncerHandle};
 pub use browse::{Browser, BrowserEvent, BrowserHandle};
 pub use peer::PeerInfo;
