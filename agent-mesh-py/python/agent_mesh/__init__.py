@@ -6,11 +6,22 @@ Submodules
 - ``agent_mesh.discovery``  mDNS-based LAN discovery
 - ``agent_mesh.transport``  authenticated QUIC transport via iroh
 - ``agent_mesh.bus``        high-level pub/sub + request/reply
-- ``agent_mesh.cli``        wrapper for the bundled ``amesh`` binary
+- ``agent_mesh.cli``        native-Python ``amesh`` CLI dispatcher
+- ``agent_mesh.amesh``      per-subcommand handlers (keygen, whoami, ...)
 
 Install: ``pip install agent-mesh``
 
-A short example::
+The install also drops an ``amesh`` script on ``$PATH`` (registered
+via ``[project.scripts]`` in ``pyproject.toml``) so the CLI is
+usable directly from the shell:
+
+.. code-block:: sh
+
+    amesh keygen
+    amesh whoami
+    amesh announce --capability ollama --role demo
+
+A short library example::
 
     import agent_mesh.core as core
 
