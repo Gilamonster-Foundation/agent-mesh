@@ -60,8 +60,17 @@ cov:
 # Floor: 75% workspace-wide. Ratchet UP only, never down. Each PR that
 # adds tests should bump this threshold higher; each PR that adds
 # untested code will fail the gate.
+#
+# The `pyo3_module.rs` files in each crate are cfg-gated behind the
+# `pyo3` cargo feature (default-off), so they don't compile into the
+# default-feature test build llvm-cov uses. Excluding them keeps the
+# floor honest. The `agent-mesh-py` umbrella crate is similarly
+# excluded — its surface is exercised by the Python pytest suite at
+# `agent-mesh-py/tests/`.
 cov-ci:
-    cargo llvm-cov --workspace --lcov --output-path lcov.info --fail-under-lines 75
+    cargo llvm-cov --workspace --lcov --output-path lcov.info \
+        --ignore-filename-regex 'pyo3_module\.rs|agent-mesh-py/' \
+        --fail-under-lines 75
 
 # --- Hook installation ---
 

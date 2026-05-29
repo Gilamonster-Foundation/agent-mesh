@@ -13,8 +13,21 @@ Libraries:
 - `agent-mesh-core` — identity types, signed envelopes.
 - `agent-mesh-discovery` — LAN discovery via mDNS.
 - `agent-mesh-transport` — authenticated QUIC transport via iroh.
+- `agent-mesh-bus` — high-level pub/sub + request/reply.
+- `agent-mesh-py` — Python bindings (PyPI package `agent-mesh`).
 
 License: Apache-2.0.
+
+## Python install
+
+```sh
+pip install agent-mesh
+```
+
+This installs the Python package `agent_mesh` with submodules
+`.core`, `.discovery`, `.transport`, `.bus`. The `amesh` CLI binary
+ships separately — install it with `cargo install --path agent-mesh-cli`
+if you want it on `$PATH`.
 
 ## Discovery (Phase 1)
 
@@ -91,3 +104,83 @@ amesh send <fp-from-terminal-A> --payload '{"hello":"world"}'
 If you point `amesh send` at a peer that belongs to a different
 user, the handshake closes the connection cleanly and both sides
 report `auto-team check failed: ...`.
+
+## Python Usage
+
+Install the wheel:
+
+```sh
+pip install agent-mesh
+```
+
+Identity round-trip — no network required:
+
+```python
+import agent_mesh.core as core
+
+# Generate a user key (root of trust).
+user = core.UserKey.generate()
+print("user fp:", user.fingerprint().hex())
+
+# Issue an agent key signed by that user.
+meta = core.AgentMetadata(
+    role="my-agent",
+    host="my-machine",
+    capabilities=["inference"],
+    issued_at="2026-05-29T00:00:00Z",
+)
+agent = core.AgentKey.issue(user, meta)
+print("agent fp:", agent.fingerprint().hex())
+
+# Build and verify a signed envelope.
+recipient = core.Recipient.topic("hello/world")
+env = core.SignedEnvelope(agent, recipient, sequence=1, payload=b"hi")
+env.verify()  # raises core.MeshError on tamper
+```
+
+Request/reply over an authenticated mesh — needs mDNS on the LAN:
+
+```python
+import asyncio
+import agent_mesh.core as core
+import agent_mesh.bus as bus
+
+
+async def main() -> None:
+    user = core.UserKey.generate()
+    meta = core.AgentMetadata(
+        role="echo",
+        host="localhost",
+        capabilities=["test"],
+        issued_at="2026-05-29T00:00:00Z",
+    )
+    server_agent = core.AgentKey.issue(user, meta)
+    client_agent = core.AgentKey.issue(user, meta)
+
+    server_bus = await bus.Bus.bind(user, server_agent, 0)
+    client_bus = await bus.Bus.bind(user, client_agent, 0)
+
+    topic = bus.Topic(user.fingerprint(), "echo")
+    server_bus.handle_requests(topic, lambda body: b"echo: " + body)
+
+    # Let mDNS settle.
+    await asyncio.sleep(0.5)
+
+    reply = await client_bus.request(
+        server_bus.agent_fingerprint(),
+        topic,
+        b"hi",
+        timeout_ms=5000,
+    )
+    print(reply)  # b'echo: hi'
+
+    await server_bus.close()
+    await client_bus.close()
+
+
+asyncio.run(main())
+```
+
+The handler must return `bytes` directly. Async handlers (callables
+that return a coroutine) are recognized and rejected in this release;
+wrap any async work in `asyncio.run(...)` inside the sync handler.

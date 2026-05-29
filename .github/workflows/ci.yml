@@ -58,9 +58,16 @@ jobs:
           tool: cargo-llvm-cov
 
       # The gate floor matches `just cov-ci` in the justfile. Keep them
-      # in lock-step — PIPELINE PARITY.
+      # in lock-step — PIPELINE PARITY. The pyo3_module.rs files and
+      # the agent-mesh-py umbrella crate are excluded: they're
+      # cfg-gated behind the `pyo3` feature (default off) and
+      # exercised by the Python pytest suite, not the Rust default
+      # test build.
       - name: Coverage with floor
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info --fail-under-lines 75
+        run: |
+          cargo llvm-cov --workspace --lcov --output-path lcov.info \
+            --ignore-filename-regex 'pyo3_module\.rs|agent-mesh-py/' \
+            --fail-under-lines 75
 
       - name: Summary
         if: always()
