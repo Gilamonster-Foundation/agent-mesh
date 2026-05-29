@@ -8,8 +8,11 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+mod announce;
 mod bind;
 mod keygen;
+mod peers;
+mod util;
 mod verify;
 mod whoami;
 
@@ -50,6 +53,32 @@ pub enum Command {
         #[arg(long)]
         github_user: String,
     },
+    /// Announce this agent on the LAN via mDNS.
+    Announce {
+        /// Capabilities to advertise (repeatable, e.g.
+        /// `--capability ollama --capability vllm`).
+        #[arg(long = "capability")]
+        capabilities: Vec<String>,
+        /// Role to claim (defaults to `amesh-cli`).
+        #[arg(long, default_value = "amesh-cli")]
+        role: String,
+        /// Host hint (defaults to the system hostname).
+        #[arg(long)]
+        host: Option<String>,
+        /// How long to keep announcing, e.g. `30s`, `5m`. Defaults
+        /// to forever (until Ctrl-C).
+        #[arg(long)]
+        duration: Option<String>,
+    },
+    /// List peers seen on the LAN via mDNS.
+    Peers {
+        /// How long to listen for peers before listing, e.g. `5s`.
+        #[arg(long, default_value = "5s")]
+        listen: String,
+        /// Only show peers that match our user fingerprint.
+        #[arg(long)]
+        same_user: bool,
+    },
 }
 
 /// External key systems an agent-mesh identity can be bound to.
@@ -80,6 +109,13 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             binding,
             github_user,
         } => verify::run(binding, github_user).await,
+        Command::Announce {
+            capabilities,
+            role,
+            host,
+            duration,
+        } => announce::run(home, capabilities, role, host, duration).await,
+        Command::Peers { listen, same_user } => peers::run(home, listen, same_user).await,
     }
 }
 
@@ -154,6 +190,83 @@ mod tests {
             } => {
                 assert_eq!(binding, PathBuf::from("/tmp/b.json"));
                 assert_eq!(github_user, "bob");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_announce_with_capabilities() {
+        let cli = Cli::try_parse_from([
+            "amesh",
+            "announce",
+            "--capability",
+            "ollama",
+            "--capability",
+            "vllm",
+            "--role",
+            "worker",
+            "--host",
+            "myhost",
+            "--duration",
+            "30s",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Announce {
+                capabilities,
+                role,
+                host,
+                duration,
+            } => {
+                assert_eq!(capabilities, vec!["ollama", "vllm"]);
+                assert_eq!(role, "worker");
+                assert_eq!(host.as_deref(), Some("myhost"));
+                assert_eq!(duration.as_deref(), Some("30s"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_announce_with_defaults() {
+        let cli = Cli::try_parse_from(["amesh", "announce"]).unwrap();
+        match cli.command {
+            Command::Announce {
+                capabilities,
+                role,
+                host,
+                duration,
+            } => {
+                assert!(capabilities.is_empty());
+                assert_eq!(role, "amesh-cli");
+                assert!(host.is_none());
+                assert!(duration.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_peers_with_defaults() {
+        let cli = Cli::try_parse_from(["amesh", "peers"]).unwrap();
+        match cli.command {
+            Command::Peers { listen, same_user } => {
+                assert_eq!(listen, "5s");
+                assert!(!same_user);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_peers_with_flags() {
+        let cli =
+            Cli::try_parse_from(["amesh", "peers", "--listen", "10s", "--same-user"]).unwrap();
+        match cli.command {
+            Command::Peers { listen, same_user } => {
+                assert_eq!(listen, "10s");
+                assert!(same_user);
             }
             _ => panic!("wrong variant"),
         }
