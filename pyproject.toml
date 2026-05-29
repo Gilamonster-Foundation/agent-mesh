@@ -42,6 +42,13 @@ Homepage = "https://github.com/Gilamonster-Foundation/agent-mesh"
 Repository = "https://github.com/Gilamonster-Foundation/agent-mesh"
 Documentation = "https://github.com/Gilamonster-Foundation/agent-mesh#readme"
 
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["agent-mesh-py/tests"]
+markers = [
+    "network: tests that exercise real UDP/mDNS/QUIC",
+]
+
 [tool.maturin]
 # Build the PyO3 cdylib in this package and lay it out alongside the
 # pure-Python sources in `agent-mesh-py/python/`.

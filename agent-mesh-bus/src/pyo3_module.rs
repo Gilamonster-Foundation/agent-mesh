@@ -1,19 +1,25 @@
 //! Python bindings for `agent-mesh-bus`.
 //!
 //! Exposes the high-level Bus surface to Python: bind, request,
-//! handle_requests (with sync OR async Python callbacks), publish_to,
-//! subscribe, close. Topic + CorrelationId come along for the ride
-//! since they're the natural arguments to those methods.
+//! handle_requests (sync Python callback), publish_to, subscribe,
+//! close. Topic + CorrelationId come along for the ride since they're
+//! the natural arguments to those methods.
 //!
 //! All async-returning methods produce Python awaitables via
 //! `pyo3_async_runtimes::tokio`. Driving them from CPython requires
 //! the asyncio runtime to be initialized — pytest-asyncio or
 //! `asyncio.run(...)` are the normal entry points.
+//!
+//! Async handlers (handler callables that return a Python coroutine)
+//! are NOT supported in this release: the bus dispatch loop runs on
+//! a tokio task that doesn't share an asyncio event loop with the
+//! caller, so a returned coroutine has nowhere to run. Wrap async
+//! work in `asyncio.run(...)` inside a sync handler if you need it.
 
 use crate::{bus::Bus, reply::CorrelationId, topic::Topic, BusError, Result as BusResult};
 use agent_mesh_core::pyo3_module::{PyAgentKey, PyFingerprint, PyUserKey};
 use agent_mesh_core::AgentKey;
-use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule, PyType};
 use pyo3::Py;
@@ -314,12 +320,17 @@ impl PyBus {
         })
     }
 
-    /// Register a handler for `topic`. The callback gets called with
-    /// the request body (bytes) and must return either bytes (sync
-    /// handler) or an awaitable resolving to bytes (async handler).
+    /// Register a sync handler for `topic`. The callback gets called
+    /// with the request body (bytes) and must return bytes.
     ///
-    /// The handler is registered eagerly — it doesn't return an
-    /// awaitable, just `None`.
+    /// Async handlers (callables that return a coroutine) are
+    /// recognized and rejected with a clear error rather than
+    /// silently hanging — see the implementation notes on
+    /// `invoke_py_handler` for the underlying constraint. Wrap async
+    /// work in ``asyncio.run(...)`` inside a sync handler if needed.
+    ///
+    /// The handler is registered eagerly — this method returns
+    /// `None`, not an awaitable.
     fn handle_requests(&self, topic: &PyTopic, callback: PyAnyObj) -> PyResult<()> {
         let inner = self.inner.clone();
         let topic = topic.inner.clone();
@@ -362,59 +373,36 @@ impl PyBus {
     }
 }
 
-/// Call into a Python handler (sync or async) and return its body as
-/// `Vec<u8>`. The callback may:
+/// Call into a Python handler and return its reply body as `Vec<u8>`.
 ///
-/// * Return bytes directly (sync handler).
-/// * Return an awaitable / coroutine resolving to bytes (async handler).
+/// The handler is expected to be a **sync** Python callable — it
+/// receives the request body as `bytes` and returns `bytes`.
+///
+/// Async handlers (callables that return a coroutine) are recognized
+/// and rejected with a clear error rather than silently hanging. The
+/// reason: the bus dispatches incoming envelopes on a tokio task that
+/// doesn't share an asyncio event loop with the caller, so a Python
+/// coroutine returned by the handler has nowhere to run. Resolving
+/// this cleanly requires either a per-bus event-loop reference or a
+/// `run_coroutine_threadsafe` bridge; both are non-trivial enough to
+/// defer to a follow-up. Wrap async work in `asyncio.run(...)`
+/// internally if you need it from a sync handler.
 async fn invoke_py_handler(callback: Arc<PyAnyObj>, body: Vec<u8>) -> BusResult<Vec<u8>> {
-    // First, call the Python callback with the body and capture
-    // whatever it returns. If it returned an awaitable, hand it to
-    // pyo3_async_runtimes so we can await it from Rust. If it
-    // returned plain bytes, we're already done.
-    let coro_or_value: PyResult<PyAnyObj> = Python::attach(|py| {
+    let result: PyResult<Vec<u8>> = Python::attach(|py| {
         let args = (PyBytes::new(py, &body),);
-        let result = callback.call1(py, args)?;
-        Ok(result)
-    });
-    let value =
-        coro_or_value.map_err(|e| BusError::Transport(transport_err(format!("handler: {e}"))))?;
-
-    // Now: is it a coroutine, or is it bytes?
-    let awaitable_or_bytes: PyResult<Either> = Python::attach(|py| {
+        let value = callback.call1(py, args)?;
         let bound = value.bind(py);
-        if let Ok(coro) = pyo3_async_runtimes::tokio::into_future(bound.clone()) {
-            Ok(Either::Future(Box::pin(coro)))
-        } else {
-            let bytes: Vec<u8> = bound
-                .extract()
-                .map_err(|e| PyValueError::new_err(format!("handler must return bytes: {e}")))?;
-            Ok(Either::Bytes(bytes))
+        // Reject coroutines explicitly — we can't run them here.
+        if bound.hasattr("__await__").unwrap_or(false) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "async handlers are not supported in this release — \
+                 handler must return bytes directly. Wrap async work \
+                 in asyncio.run() inside the handler if needed.",
+            ));
         }
+        value.extract::<Vec<u8>>(py)
     });
-
-    match awaitable_or_bytes {
-        Ok(Either::Bytes(b)) => Ok(b),
-        Ok(Either::Future(fut)) => {
-            let result = fut.await.map_err(|e| {
-                BusError::Transport(transport_err(format!("handler coro raised: {e}")))
-            })?;
-            let bytes: Vec<u8> = Python::attach(|py| result.extract(py)).map_err(|e| {
-                BusError::Transport(transport_err(format!(
-                    "handler coro must resolve to bytes: {e}"
-                )))
-            })?;
-            Ok(bytes)
-        }
-        Err(e) => Err(BusError::Transport(transport_err(format!(
-            "handler dispatch: {e}"
-        )))),
-    }
-}
-
-enum Either {
-    Bytes(Vec<u8>),
-    Future(std::pin::Pin<Box<dyn std::future::Future<Output = PyResult<PyAnyObj>> + Send>>),
+    result.map_err(|e| BusError::Transport(transport_err(format!("handler: {e}"))))
 }
 
 fn transport_err(msg: String) -> agent_mesh_transport::TransportError {
