@@ -82,6 +82,25 @@ impl AgentKey {
     pub fn signing_key_bytes(&self) -> [u8; 32] {
         self.signing.to_bytes()
     }
+
+    /// Reconstruct an `AgentKey` from a 32-byte ed25519 seed and an
+    /// existing cert chain.
+    ///
+    /// Mirror of [`signing_key_bytes`](Self::signing_key_bytes): used
+    /// by the PyO3 bindings (and any FFI consumer) to ship an
+    /// `AgentKey` across a tokio-spawn boundary without forcing
+    /// `Clone` on the underlying ed25519 signing key. Returns
+    /// [`MeshError::BadSignature`] if the seed produces a public key
+    /// that doesn't match the cert chain's `agent_pubkey` — i.e.
+    /// rejects a forged pairing.
+    pub fn from_seed_and_cert(seed: &[u8; 32], cert: CertChain) -> Result<Self> {
+        let signing = ed25519_dalek::SigningKey::from_bytes(seed);
+        let derived_pub: [u8; 32] = *signing.verifying_key().as_bytes();
+        if derived_pub != cert.agent_pubkey {
+            return Err(MeshError::BadSignature);
+        }
+        Ok(Self { signing, cert })
+    }
 }
 
 /// Metadata claimed by an agent at certificate-issue time. These
@@ -89,9 +108,9 @@ impl AgentKey {
 /// without invalidating the cert.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentMetadata {
-    /// Role label — e.g. `"newt-worker"`, `"drake-foreman"`.
+    /// Role label — e.g. `"inference-worker"`, `"orchestrator"`.
     pub role: String,
-    /// Host hint — e.g. `"geforcenuc"`, `"nuc1"`.
+    /// Host hint — e.g. `"host-a"`, `"host-b"`.
     pub host: String,
     /// Capabilities advertised to the mesh — e.g. `["ollama", "vllm"]`.
     pub capabilities: Vec<String>,
@@ -276,6 +295,33 @@ mod tests {
         let from_agent = agent.sign(msg);
         let from_rebuilt = rebuilt.sign(msg);
         assert_eq!(from_agent.to_bytes(), from_rebuilt.to_bytes());
+    }
+
+    #[test]
+    fn from_seed_and_cert_roundtrips() {
+        let user = UserKey::generate();
+        let agent = AgentKey::issue(&user, fixture_metadata("worker"));
+        let seed = agent.signing_key_bytes();
+        let cert = agent.cert().clone();
+        let rebuilt = AgentKey::from_seed_and_cert(&seed, cert).expect("seed+cert valid");
+        assert_eq!(rebuilt.fingerprint(), agent.fingerprint());
+        // And the rebuilt key signs identically (seed roundtrip).
+        let msg = b"rebuild-test";
+        assert_eq!(rebuilt.sign(msg).to_bytes(), agent.sign(msg).to_bytes());
+    }
+
+    #[test]
+    fn from_seed_and_cert_rejects_mismatched_pairing() {
+        let user = UserKey::generate();
+        let agent_a = AgentKey::issue(&user, fixture_metadata("a"));
+        let agent_b = AgentKey::issue(&user, fixture_metadata("b"));
+        // Pair B's seed with A's cert — must be rejected.
+        let res =
+            AgentKey::from_seed_and_cert(&agent_b.signing_key_bytes(), agent_a.cert().clone());
+        match res {
+            Ok(_) => panic!("mismatched pairing must reject"),
+            Err(e) => assert!(matches!(e, MeshError::BadSignature)),
+        }
     }
 
     #[test]

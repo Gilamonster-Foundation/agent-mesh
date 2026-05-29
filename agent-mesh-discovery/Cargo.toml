@@ -21,6 +21,13 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 hex.workspace = true
 base64.workspace = true
 
+# Optional PyO3 bindings.
+pyo3 = { workspace = true, optional = true }
+
+[features]
+default = []
+pyo3 = ["dep:pyo3", "agent-mesh-core/pyo3"]
+
 [dev-dependencies]
 tempfile.workspace = true
 tests-common.workspace = true

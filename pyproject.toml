@@ -1,0 +1,63 @@
+# PyPI distribution for agent-mesh.
+#
+# Build with: `maturin build --release` (or `maturin develop` for an
+# editable install inside a venv). One wheel ships the native PyO3
+# extension module + the bundled `amesh` CLI binary.
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "agent-mesh"
+description = "Cryptographic peer-to-peer agent coordination"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Shawn Hartsock", email = "hartsock@users.noreply.github.com" },
+]
+keywords = ["agent-mesh", "p2p", "mesh", "ed25519", "blake3", "quic", "iroh"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: System :: Networking",
+    "Topic :: Security :: Cryptography",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+test = ["pytest>=7", "pytest-asyncio>=0.21"]
+
+[project.urls]
+Homepage = "https://github.com/Gilamonster-Foundation/agent-mesh"
+Repository = "https://github.com/Gilamonster-Foundation/agent-mesh"
+Documentation = "https://github.com/Gilamonster-Foundation/agent-mesh#readme"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["agent-mesh-py/tests"]
+markers = [
+    "network: tests that exercise real UDP/mDNS/QUIC",
+]
+
+[tool.maturin]
+# Build the PyO3 cdylib in this package and lay it out alongside the
+# pure-Python sources in `agent-mesh-py/python/`.
+manifest-path = "agent-mesh-py/Cargo.toml"
+python-source = "agent-mesh-py/python"
+module-name = "agent_mesh._agent_mesh"
+# Also build the `amesh` CLI binary from agent-mesh-cli and pack it
+# into the wheel's scripts dir so `pip install agent-mesh` puts it on
+# `$PATH`. If maturin can't bundle it on a given platform, callers
+# can still `cargo install --path agent-mesh-cli` separately.
+bindings = "pyo3"
+features = ["pyo3/extension-module"]

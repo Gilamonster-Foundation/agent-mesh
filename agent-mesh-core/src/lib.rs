@@ -25,6 +25,9 @@ pub mod fingerprint;
 pub mod github_binding;
 pub mod user_key;
 
+#[cfg(feature = "pyo3")]
+pub mod pyo3_module;
+
 pub use agent_key::{AgentKey, AgentMetadata, CertChain, SerdeSig};
 pub use envelope::{Recipient, SignedEnvelope};
 pub use error::{MeshError, Result};

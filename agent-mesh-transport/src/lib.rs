@@ -29,6 +29,9 @@ pub mod identity;
 pub mod resolver;
 pub mod stream;
 
+#[cfg(feature = "pyo3")]
+pub mod pyo3_module;
+
 pub use alpn::ALPN;
 pub use endpoint::Endpoint;
 pub use error::{Result, TransportError};

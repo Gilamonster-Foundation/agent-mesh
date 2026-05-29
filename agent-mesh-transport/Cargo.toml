@@ -27,6 +27,19 @@ serde_json.workspace = true
 
 tracing.workspace = true
 
+# Optional PyO3 bindings.
+pyo3 = { workspace = true, optional = true }
+pyo3-async-runtimes = { workspace = true, optional = true }
+
+[features]
+default = []
+pyo3 = [
+    "dep:pyo3",
+    "dep:pyo3-async-runtimes",
+    "agent-mesh-core/pyo3",
+    "agent-mesh-discovery/pyo3",
+]
+
 [dev-dependencies]
 tests-common.workspace = true
 tempfile.workspace = true

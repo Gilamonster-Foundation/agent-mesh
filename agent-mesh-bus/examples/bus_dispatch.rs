@@ -1,4 +1,4 @@
-//! Phase-3 gate-1 reference: drake-foreman dispatch over agent-mesh-bus.
+//! Phase-3 gate-1 reference: dispatch foreman over agent-mesh-bus.
 //!
 //! Companion to `examples/nats_dispatch.rs` — same shape, same wire
 //! types, different transport. Both examples are referenced from
@@ -33,7 +33,7 @@ fn agent(user: &UserKey, role: &str) -> AgentKey {
         AgentMetadata {
             role: role.into(),
             host: "localhost".into(),
-            capabilities: vec!["drake-worker".into()],
+            capabilities: vec!["dispatch-worker".into()],
             issued_at: "2026-05-28T00:00:00Z".into(),
             expires_at: None,
         },
@@ -49,14 +49,14 @@ async fn main() -> Result<()> {
 
     // Trust root: one user, two agents (auto-team).
     let user = UserKey::generate();
-    let foreman = agent(&user, "drake-foreman");
-    let worker = agent(&user, "drake-worker");
+    let foreman = agent(&user, "dispatch-foreman");
+    let worker = agent(&user, "dispatch-worker");
     let worker_fp = worker.fingerprint();
 
     let foreman_bus = Bus::bind(&user, foreman, 0).await?;
     let worker_bus = Bus::bind(&user, worker, 0).await?;
 
-    let topic = Topic::new(user.fingerprint(), "drake/jobs");
+    let topic = Topic::new(user.fingerprint(), "dispatch/jobs");
 
     // Worker side: register a handler that "runs" the job.
     worker_bus.handle_requests(topic.clone(), |body| async move {

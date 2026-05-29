@@ -7,7 +7,7 @@
 //! - `agent_fp` — BLAKE3 fingerprint of the agent's pubkey (hex)
 //! - `user_fp`  — BLAKE3 fingerprint of the user's pubkey (hex)
 //! - `caps`     — comma-separated capability list
-//! - `role`     — agent role (e.g. `"newt-worker"`)
+//! - `role`     — agent role (e.g. `"inference-worker"`)
 //! - `host`     — agent host hint
 //!
 //! mDNS TXT records are tiny (~255 bytes per key, ~9 KB aggregate); we
@@ -30,6 +30,9 @@
 pub mod announce;
 pub mod browse;
 pub mod peer;
+
+#[cfg(feature = "pyo3")]
+pub mod pyo3_module;
 
 pub use announce::{AnnounceConfig, Announcer, AnnouncerHandle};
 pub use browse::{Browser, BrowserEvent, BrowserHandle};

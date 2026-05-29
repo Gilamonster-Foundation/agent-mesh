@@ -1,4 +1,4 @@
-//! Phase-3 gate-1 reference: drake-foreman dispatch over async-nats.
+//! Phase-3 gate-1 reference: dispatch foreman over async-nats.
 //!
 //! Companion to `examples/bus_dispatch.rs`. Same scenario, same wire
 //! types, different transport. Referenced by
@@ -36,7 +36,7 @@ struct TaskReply {
     model_id: String,
 }
 
-const SUBJECT: &str = "drake.foreman.jobs";
+const SUBJECT: &str = "dispatch.foreman.jobs";
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {

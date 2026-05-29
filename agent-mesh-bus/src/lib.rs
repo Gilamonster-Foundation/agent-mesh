@@ -22,6 +22,9 @@ pub mod replay;
 pub mod reply;
 pub mod topic;
 
+#[cfg(feature = "pyo3")]
+pub mod pyo3_module;
+
 pub use bus::Bus;
 pub use error::{BusError, Result};
 pub use inbox::{BusMessage, Inbox, OutgoingReply};

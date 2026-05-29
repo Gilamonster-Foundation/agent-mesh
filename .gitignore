@@ -17,3 +17,14 @@ lcov.info
 # Local IDE configs
 .idea/
 .vscode/
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Maturin / wheel outputs
+dist/

@@ -5,6 +5,7 @@ members = [
     "agent-mesh-bus",
     "agent-mesh-cli",
     "agent-mesh-discovery",
+    "agent-mesh-py",
     "agent-mesh-transport",
     "tests/common",
 ]
@@ -81,6 +82,13 @@ tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
 wiremock = "0.6"
+
+# Python bindings (optional, opt-in per-crate via `pyo3` feature).
+# The umbrella crate `agent-mesh-py` is the only consumer that turns
+# these on; default-feature builds of the rest of the workspace stay
+# Python-free.
+pyo3 = { version = "0.28", default-features = false, features = ["macros"] }
+pyo3-async-runtimes = { version = "0.28", default-features = false, features = ["tokio-runtime"] }
 
 # Comparison-only dep (Phase 3 gate-1 doc — `agent-mesh-bus` example).
 # Not wired into the bus itself; the bus is broker-free by design.
