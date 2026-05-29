@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-bus"
-version = "0.5.20260528"
+version = "0.5.20260530"
 dependencies = [
  "agent-mesh-core",
  "agent-mesh-discovery",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-cli"
-version = "0.5.20260528"
+version = "0.5.20260530"
 dependencies = [
  "agent-mesh-core",
  "agent-mesh-discovery",
@@ -92,7 +92,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-core"
-version = "0.5.20260528"
+version = "0.5.20260530"
 dependencies = [
  "blake3",
  "ed25519-dalek 2.2.0",
@@ -111,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-discovery"
-version = "0.5.20260528"
+version = "0.5.20260530"
 dependencies = [
  "agent-mesh-core",
  "anyhow",
@@ -131,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-py"
-version = "0.5.20260528"
+version = "0.5.20260530"
 dependencies = [
  "agent-mesh-bus",
  "agent-mesh-core",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-transport"
-version = "0.5.20260528"
+version = "0.5.20260530"
 dependencies = [
  "agent-mesh-core",
  "agent-mesh-discovery",
@@ -4207,7 +4207,7 @@ checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 
 [[package]]
 name = "tests-common"
-version = "0.5.20260528"
+version = "0.5.20260530"
 dependencies = [
  "agent-mesh-core",
  "tempfile",
