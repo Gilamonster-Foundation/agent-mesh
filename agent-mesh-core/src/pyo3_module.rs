@@ -21,7 +21,7 @@ use ed25519_dalek::Signature;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyModule, PyType};
+use pyo3::types::{PyBytes, PyModule, PyString, PyType};
 use ssh_key::PrivateKey as SshPrivateKey;
 use std::path::PathBuf;
 
@@ -503,6 +503,81 @@ impl PyGitHubBinding {
         arr.copy_from_slice(candidate_ssh_pubkey);
         self.inner.verify(&arr).map_err(mesh_err_to_py)
     }
+
+    /// The bound user's public key.
+    fn user_public(&self) -> PyUserPublic {
+        PyUserPublic {
+            inner: self.inner.user_pubkey.clone(),
+        }
+    }
+
+    /// Raw 32-byte SSH ed25519 public key the binding asserts, as a
+    /// hex string (64 chars). The bind subcommand prints the first
+    /// 16 chars as a visual confirmation hint.
+    fn ssh_pubkey_hex(&self) -> String {
+        hex_encode(&self.inner.ssh_pubkey)
+    }
+
+    /// Optional GitHub username hint, if one was supplied at
+    /// `sign()` time.
+    #[getter]
+    fn github_username(&self) -> Option<String> {
+        self.inner.github_username.clone()
+    }
+
+    /// Serialize the binding to a Python dict suitable for
+    /// `json.dumps(..., indent=2)`. The dict layout matches the
+    /// `serde_json` representation of `GitHubBinding` — that's the
+    /// on-disk wire format `amesh bind github` writes.
+    fn to_json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let s = serde_json::to_string(&self.inner)
+            .map_err(|e| PyMeshError::new_err(format!("encode binding: {e}")))?;
+        let json_mod = py.import("json")?;
+        json_mod.getattr("loads")?.call1((PyString::new(py, &s),))
+    }
+
+    /// Parse a binding back from JSON. Accepts either a dict (as
+    /// produced by :meth:`to_json`) or a JSON-encoded string.
+    #[classmethod]
+    fn from_json(_cls: &Bound<'_, PyType>, data: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let py = data.py();
+        // Accept str directly; otherwise json.dumps the input.
+        let json_str: String = if let Ok(s) = data.cast::<PyString>() {
+            s.to_str()?.to_string()
+        } else {
+            let json_mod = py.import("json")?;
+            let dumped = json_mod.getattr("dumps")?.call1((data,))?;
+            dumped.extract::<String>()?
+        };
+        let inner: GitHubBinding = serde_json::from_str(&json_str)
+            .map_err(|e| PyMeshError::new_err(format!("decode binding: {e}")))?;
+        Ok(Self { inner })
+    }
+
+    /// Try one `ssh-ed25519 …` line from a GitHub `<u>.keys` response.
+    /// Returns `True` if the line parses as ed25519 *and* verifies the
+    /// binding, `False` otherwise. Errors that aren't a verification
+    /// failure (e.g. an unparseable line, an RSA line) are squashed
+    /// into a quiet `False` so the caller can keep walking the key
+    /// list — `verify.rs` (and the Python mirror) use this in a loop.
+    fn try_verify_ssh_line(&self, line: &str) -> bool {
+        let Ok(pub_key) = ssh_key::PublicKey::from_openssh(line.trim()) else {
+            return false;
+        };
+        let Ok(bytes) = ssh_pubkey_ed25519_bytes(&pub_key) else {
+            return false;
+        };
+        self.inner.verify(&bytes).is_ok()
+    }
+}
+
+/// Lowercase-hex encoder. We avoid a `hex` crate dep just for this.
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 
 /// Helper: extract the raw 32-byte ed25519 public key from an OpenSSH
