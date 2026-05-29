@@ -115,6 +115,16 @@ fn peer_from_service_info(info: &mdns_sd::ServiceInfo) -> Option<PeerInfo> {
     let user_fp_str = props.get_property_val_str("user_fp")?;
     let agent_fp = Fingerprint::from_str(agent_fp_str).ok()?;
     let user_fp = Fingerprint::from_str(user_fp_str).ok()?;
+    let agent_pubkey = props.get_property_val_str("agent_pub").and_then(|s| {
+        let bytes = hex::decode(s).ok()?;
+        if bytes.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            Some(arr)
+        } else {
+            None
+        }
+    });
     let caps_str = props.get_property_val_str("caps").unwrap_or("");
     let capabilities: Vec<String> = caps_str
         .split(',')
@@ -130,6 +140,7 @@ fn peer_from_service_info(info: &mdns_sd::ServiceInfo) -> Option<PeerInfo> {
 
     Some(PeerInfo {
         agent_fp,
+        agent_pubkey,
         user_fp,
         capabilities,
         role,
@@ -207,6 +218,50 @@ mod tests {
         );
         assert_eq!(peer.agent_fp.hex(), agent_hex);
         assert_eq!(peer.user_fp.hex(), user_hex);
+    }
+
+    #[test]
+    fn peer_from_service_info_extracts_agent_pubkey_when_present() {
+        let agent_hex = "11".repeat(32);
+        let user_hex = "22".repeat(32);
+        let pub_hex = "ab".repeat(32);
+        let props: Vec<(&str, &str)> = vec![
+            ("agent_fp", agent_hex.as_str()),
+            ("user_fp", user_hex.as_str()),
+            ("agent_pub", pub_hex.as_str()),
+            ("caps", "ollama"),
+            ("role", "newt-worker"),
+            ("host", "h"),
+        ];
+        let info =
+            mdns_sd::ServiceInfo::new(SERVICE_TYPE, "am-pubkey", "h.local.", "", 4242, &props[..])
+                .expect("build info");
+        let peer = peer_from_service_info(&info).expect("parse peer");
+        let mut expected = [0u8; 32];
+        expected.copy_from_slice(&hex::decode(&pub_hex).unwrap());
+        assert_eq!(peer.agent_pubkey, Some(expected));
+    }
+
+    #[test]
+    fn peer_from_service_info_drops_invalid_pubkey() {
+        // An `agent_pub` TXT entry that isn't valid hex / wrong
+        // length is silently ignored — the peer is still returned,
+        // just with `agent_pubkey: None`. Phase 2 callers will fail
+        // closed at dial time.
+        let agent_hex = "11".repeat(32);
+        let user_hex = "22".repeat(32);
+        let props: Vec<(&str, &str)> = vec![
+            ("agent_fp", agent_hex.as_str()),
+            ("user_fp", user_hex.as_str()),
+            ("agent_pub", "not-hex"),
+            ("role", "r"),
+            ("host", "h"),
+        ];
+        let info =
+            mdns_sd::ServiceInfo::new(SERVICE_TYPE, "am-badpub", "h.local.", "", 0, &props[..])
+                .expect("build info");
+        let peer = peer_from_service_info(&info).expect("parse peer");
+        assert!(peer.agent_pubkey.is_none());
     }
 
     #[test]
