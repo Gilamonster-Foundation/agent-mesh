@@ -9,7 +9,7 @@ Submodules
 - ``agent_mesh.cli``        native-Python ``amesh`` CLI dispatcher
 - ``agent_mesh.amesh``      per-subcommand handlers (keygen, whoami, ...)
 
-Install: ``pip install agent-mesh``
+Install: ``pip install newt-agent-mesh``
 
 The install also drops an ``amesh`` script on ``$PATH`` (registered
 via ``[project.scripts]`` in ``pyproject.toml``) so the CLI is

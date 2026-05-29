@@ -1,6 +1,6 @@
 """Native Python implementation of the ``amesh`` CLI.
 
-The ``amesh`` entry point installed by ``pip install agent-mesh``
+The ``amesh`` entry point installed by ``pip install newt-agent-mesh``
 points here. The dispatcher uses :mod:`argparse` (stdlib only — no
 click/typer dependency in the wheel) and delegates each subcommand to
 a handler in :mod:`agent_mesh.amesh`.
