@@ -1,0 +1,48 @@
+[package]
+name = "agent-mesh-bus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "High-level pub/sub + request-reply API for agent-mesh"
+
+[dependencies]
+agent-mesh-core.workspace = true
+agent-mesh-transport.workspace = true
+agent-mesh-discovery.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_bytes.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+tracing.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+hex.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+tests-common.workspace = true
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+# Comparison-only dep (Phase 3 gate-1 doc — example does not run in CI).
+# The bus itself is broker-free; this dep exists solely so the example
+# under examples/nats_dispatch.rs compiles.
+async-nats.workspace = true
+bytes.workspace = true
+tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[lints]
+workspace = true
+
+[[example]]
+name = "bus_dispatch"
+path = "examples/bus_dispatch.rs"
+
+[[example]]
+name = "nats_dispatch"
+path = "examples/nats_dispatch.rs"

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "agent-mesh-core",
+    "agent-mesh-bus",
     "agent-mesh-cli",
     "agent-mesh-discovery",
     "agent-mesh-transport",
@@ -70,6 +71,7 @@ futures = "0.3"
 
 # Internal crates
 agent-mesh-core = { path = "agent-mesh-core", version = "=0.5.20260528" }
+agent-mesh-bus = { path = "agent-mesh-bus", version = "=0.5.20260528" }
 agent-mesh-discovery = { path = "agent-mesh-discovery", version = "=0.5.20260528" }
 agent-mesh-transport = { path = "agent-mesh-transport", version = "=0.5.20260528" }
 tests-common = { path = "tests/common" }
@@ -79,6 +81,10 @@ tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
 wiremock = "0.6"
+
+# Comparison-only dep (Phase 3 gate-1 doc — `agent-mesh-bus` example).
+# Not wired into the bus itself; the bus is broker-free by design.
+async-nats = "0.49"
 
 [workspace.lints.clippy]
 explicit_iter_loop            = "warn"
