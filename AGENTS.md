@@ -12,7 +12,7 @@ for end-users; everything here is plumbing to make that CLI honest.
 
 ## Versioning
 
-This workspace uses **kyln-style versioning**: `0.{month}.{YYYYMMDD}`.
+This workspace uses **date-based versioning**: `0.{month}.{YYYYMMDD}`.
 All workspace members share the same version, pinned via
 `workspace.package.version`. Bump it in the same PR that ships the
 change.

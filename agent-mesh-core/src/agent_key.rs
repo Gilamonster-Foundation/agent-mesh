@@ -89,9 +89,9 @@ impl AgentKey {
 /// without invalidating the cert.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentMetadata {
-    /// Role label — e.g. `"newt-worker"`, `"drake-foreman"`.
+    /// Role label — e.g. `"inference-worker"`, `"orchestrator"`.
     pub role: String,
-    /// Host hint — e.g. `"geforcenuc"`, `"nuc1"`.
+    /// Host hint — e.g. `"host-a"`, `"host-b"`.
     pub host: String,
     /// Capabilities advertised to the mesh — e.g. `["ollama", "vllm"]`.
     pub capabilities: Vec<String>,

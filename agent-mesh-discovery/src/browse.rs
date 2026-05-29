@@ -196,21 +196,15 @@ mod tests {
             ("agent_fp", agent_hex.as_str()),
             ("user_fp", user_hex.as_str()),
             ("caps", "ollama,vllm"),
-            ("role", "newt-worker"),
-            ("host", "geforcenuc"),
+            ("role", "inference-worker"),
+            ("host", "host-a"),
         ];
-        let info = mdns_sd::ServiceInfo::new(
-            SERVICE_TYPE,
-            "am-test",
-            "geforcenuc.local.",
-            "",
-            42,
-            &props[..],
-        )
-        .expect("build info");
+        let info =
+            mdns_sd::ServiceInfo::new(SERVICE_TYPE, "am-test", "host-a.local.", "", 42, &props[..])
+                .expect("build info");
         let peer = peer_from_service_info(&info).expect("parse peer");
-        assert_eq!(peer.role, "newt-worker");
-        assert_eq!(peer.host, "geforcenuc");
+        assert_eq!(peer.role, "inference-worker");
+        assert_eq!(peer.host, "host-a");
         assert_eq!(peer.port, 42);
         assert_eq!(
             peer.capabilities,
@@ -230,7 +224,7 @@ mod tests {
             ("user_fp", user_hex.as_str()),
             ("agent_pub", pub_hex.as_str()),
             ("caps", "ollama"),
-            ("role", "newt-worker"),
+            ("role", "inference-worker"),
             ("host", "h"),
         ];
         let info =

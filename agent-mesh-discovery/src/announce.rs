@@ -26,7 +26,7 @@ pub struct AnnounceConfig {
     pub user_fp: Fingerprint,
     /// Capabilities to advertise (e.g. `["ollama", "vllm"]`).
     pub capabilities: Vec<String>,
-    /// Role (e.g. `"newt-worker"`, `"drake-foreman"`).
+    /// Role (e.g. `"inference-worker"`, `"orchestrator"`).
     pub role: String,
     /// Host hint (typically the system hostname).
     pub host: String,

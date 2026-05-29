@@ -24,9 +24,9 @@ sees there, with no broker or central registry. Service type:
 
 ```sh
 # Terminal A — announce this agent for 5 minutes, advertising
-# `ollama` and `vllm` capabilities under the role `newt-worker`.
+# `ollama` and `vllm` capabilities under the role `inference-worker`.
 amesh announce --capability ollama --capability vllm \
-                --role newt-worker --duration 5m
+                --role inference-worker --duration 5m
 
 # Terminal B — list everyone on the LAN for the next 5 seconds.
 amesh peers --listen 5s
@@ -42,9 +42,9 @@ listening for peers for 5s...
 
 discovered 2 peer(s):
 
-AGENT          SAME?  ROLE@HOST                PORT   CAPABILITIES
-abcd12345678   yes    newt-worker@geforcenuc   0      ollama,vllm
-ef9876543210   no     drake-foreman@gnuc       0      orchestrator
+AGENT          SAME?  ROLE@HOST                     PORT   CAPABILITIES
+abcd12345678   yes    inference-worker@host-a       0      ollama,vllm
+ef9876543210   no     orchestrator@host-b           0      orchestrator
 ```
 
 The fingerprints in mDNS TXT records are *claims*; verification

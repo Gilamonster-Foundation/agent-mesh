@@ -2,24 +2,24 @@
 
 **Status:** decided
 **Date:** 2026-05-28 (Phase 3 close)
-**Verdict:** **GO** — proceed to Phase 4 (newt-mesh integration).
+**Verdict:** **GO** — proceed to Phase 4 (consumer integration).
 
 ## Why this document exists
 
 Phase 3 of agent-mesh ships a working high-level pub/sub +
 request-reply API (`agent-mesh-bus`). Before we invest in Phase 4
-— wiring the bus into newt-mesh as the dispatch backbone — we owe
-ourselves an honest comparison against the incumbent we'd otherwise
-adopt: `async-nats` + a running `nats-server`. If async-nats turns
-out to be the better tool for the drake-foreman dispatch loop, the
-right answer is to halt this effort and reinvest in fixing NATS
+— wiring the bus into a downstream consumer as the dispatch backbone
+— we owe ourselves an honest comparison against the incumbent we'd
+otherwise adopt: `async-nats` + a running `nats-server`. If async-nats
+turns out to be the better tool for the dispatch foreman dispatch loop,
+the right answer is to halt this effort and reinvest in fixing NATS
 pain points directly. If the bus is genuinely better for our
 shape of problem, Phase 4 proceeds.
 
 The two reference implementations are companion `[[example]]`
 binaries in `agent-mesh-bus`:
 
-* `examples/bus_dispatch.rs` — drake-foreman shape over agent-mesh-bus
+* `examples/bus_dispatch.rs` — dispatch foreman shape over agent-mesh-bus
 * `examples/nats_dispatch.rs` — same shape over async-nats
 
 Both must compile (`cargo build --example bus_dispatch -p agent-mesh-bus`,
@@ -37,7 +37,7 @@ Worker:  receives the offer, processes it, returns TaskReply {diff, model_id}
 Foreman: prints the diff
 ```
 
-This is intentionally the simplest drake-foreman shape — one job,
+This is intentionally the simplest dispatch foreman shape — one job,
 one worker, one reply. Both reference impls model the request as a
 typed `TaskRequest` and the reply as a typed `TaskReply`, JSON-
 encoded across the wire. The implementations live in
@@ -85,12 +85,13 @@ that the example silently assumes.
 This isn't theoretical. The pain that motivated agent-mesh in
 the first place came from exactly this gap:
 
-* NATS NKey duplication (gilabot#1334) — long-running tech debt
-* NATS broker bootstrap on NUC k3s — port-allocation churn,
-  service-account configs, `pipeline-secrets` Vault role missing
-* Inter-machine credential plumbing — drake-codex-keys never landed
-  cleanly because cred rotation across the NATS broker fanned out
-  across three repos and a Vault scope.
+* NATS NKey duplication (internal issue tracker reference removed) —
+  long-running tech debt
+* NATS broker bootstrap on a k3s cluster — port-allocation churn,
+  service-account configs, Vault role missing
+* Inter-machine credential plumbing never landed cleanly because cred
+  rotation across the NATS broker fanned out across multiple repos
+  and a Vault scope.
 
 ## Side-by-side: the dispatch loop itself
 
@@ -124,7 +125,7 @@ The bus is not strictly better. Real costs:
 2. **No durability or queue semantics.** If a worker is offline
    when the foreman publishes, the message is gone. NATS JetStream
    gives us ack-tracked, persisted, replayable streams; the bus
-   does not. For drake-foreman this is acceptable because workers
+   does not. For the dispatch foreman this is acceptable because workers
    pull jobs (the foreman waits for a present worker via mDNS),
    but it's a real difference.
 
@@ -168,7 +169,7 @@ These map directly to the original NATS pain points:
    matching NATS user/JWT for a new worker is multi-step and
    often fails silently in production.
 
-5. **Operational footprint matches the problem.** drake-foreman
+5. **Operational footprint matches the problem.** A dispatch foreman
    runs N small worker processes on a handful of machines; the
    bus is N processes that find each other and talk. NATS is N
    processes plus a broker plus the broker's credentials plus the
@@ -176,7 +177,7 @@ These map directly to the original NATS pain points:
 
 ## Verdict: GO
 
-**Phase 4 (newt-mesh integration) proceeds.**
+**Phase 4 (consumer integration) proceeds.**
 
 Reasoning:
 
@@ -193,4 +194,4 @@ The dispatch loop compiles and runs against `agent-mesh-bus` with
 zero external services. That is the bar. Everything past it is
 Phase 4 work.
 
-Proceeding to Phase 4 (newt-mesh integration).
+Proceeding to Phase 4 (consumer integration).

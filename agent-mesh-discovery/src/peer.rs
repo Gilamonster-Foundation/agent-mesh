@@ -24,9 +24,9 @@ pub struct PeerInfo {
     pub user_fp: Fingerprint,
     /// Capabilities the agent claims (e.g. `["ollama", "vllm"]`).
     pub capabilities: Vec<String>,
-    /// Agent role hint (e.g. `"newt-worker"`).
+    /// Agent role hint (e.g. `"inference-worker"`).
     pub role: String,
-    /// Host hint (e.g. `"geforcenuc"`).
+    /// Host hint (e.g. `"host-a"`).
     pub host: String,
     /// Resolved IP addresses for the peer.
     pub addrs: Vec<IpAddr>,
@@ -59,7 +59,7 @@ mod tests {
             agent_pubkey: None,
             user_fp,
             capabilities: vec!["ollama".into()],
-            role: "newt-worker".into(),
+            role: "inference-worker".into(),
             host: "test".into(),
             addrs: vec![],
             port: 0,
@@ -87,8 +87,8 @@ mod tests {
             agent_pubkey: Some([7u8; 32]),
             user_fp: fp_of(2),
             capabilities: vec!["ollama".into(), "vllm".into()],
-            role: "newt-worker".into(),
-            host: "geforcenuc".into(),
+            role: "inference-worker".into(),
+            host: "host-a".into(),
             addrs: vec!["127.0.0.1".parse().unwrap()],
             port: 11434,
             instance: "test._agent-mesh._udp.local.".into(),
