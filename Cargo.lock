@@ -50,6 +50,8 @@ dependencies = [
  "bytes",
  "futures",
  "hex",
+ "pyo3",
+ "pyo3-async-runtimes",
  "rand 0.8.6",
  "serde",
  "serde_bytes",
