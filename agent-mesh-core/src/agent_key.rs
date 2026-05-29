@@ -69,6 +69,19 @@ impl AgentKey {
     pub fn public_bytes(&self) -> [u8; 32] {
         self.cert.agent_pubkey
     }
+
+    /// Expose the raw 32-byte ed25519 signing key bytes.
+    ///
+    /// This is the ONLY method that surfaces an agent's private bytes.
+    /// It exists for one reason: the transport layer
+    /// (`agent-mesh-transport`) needs to construct an `iroh` `SecretKey`
+    /// from the same ed25519 seed so the agent's pubkey doubles as its
+    /// iroh `EndpointId`. Callers must NOT persist or transmit these
+    /// bytes — the agent key is ephemeral by design.
+    #[must_use]
+    pub fn signing_key_bytes(&self) -> [u8; 32] {
+        self.signing.to_bytes()
+    }
 }
 
 /// Metadata claimed by an agent at certificate-issue time. These
@@ -247,6 +260,22 @@ mod tests {
         let agent_sig = agent.sign(b"x");
         // distinct keys produce distinct signatures
         assert_ne!(user_sig.to_bytes(), agent_sig.to_bytes());
+    }
+
+    #[test]
+    fn signing_key_bytes_roundtrip_signs_identically() {
+        use ed25519_dalek::Signer;
+        let user = UserKey::generate();
+        let agent = AgentKey::issue(&user, fixture_metadata("worker"));
+        let bytes = agent.signing_key_bytes();
+        assert_eq!(bytes.len(), 32);
+        // Rebuilding a SigningKey from those bytes must produce the
+        // same signature byte-for-byte — i.e. the seed roundtrips.
+        let rebuilt = ed25519_dalek::SigningKey::from_bytes(&bytes);
+        let msg = b"transport-layer-handshake";
+        let from_agent = agent.sign(msg);
+        let from_rebuilt = rebuilt.sign(msg);
+        assert_eq!(from_agent.to_bytes(), from_rebuilt.to_bytes());
     }
 
     #[test]
