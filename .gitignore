@@ -28,3 +28,5 @@ venv/
 
 # Maturin / wheel outputs
 dist/
+# Native extension dropped in-place by `maturin develop`.
+agent-mesh-py/python/agent_mesh/*.so
