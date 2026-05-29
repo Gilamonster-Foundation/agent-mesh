@@ -37,8 +37,13 @@ License: Apache-2.0.
 ## Python install
 
 ```sh
-pip install agent-mesh
+pip install newt-agent-mesh
 ```
+
+(The PyPI distribution name is `newt-agent-mesh` because `agent-mesh`
+is blocked by PyPI's similarity check — see the note in
+`pyproject.toml`. The Python import path is unchanged:
+`import agent_mesh.core`.)
 
 This installs the Python package `agent_mesh` with submodules
 `.core`, `.discovery`, `.transport`, `.bus`. The `amesh` CLI binary
@@ -126,8 +131,11 @@ report `auto-team check failed: ...`.
 Install the wheel:
 
 ```sh
-pip install agent-mesh
+pip install newt-agent-mesh
 ```
+
+(See the install section above for why the distribution name is
+`newt-agent-mesh` and not `agent-mesh`. The import path is unchanged.)
 
 Identity round-trip — no network required:
 

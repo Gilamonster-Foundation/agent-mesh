@@ -1,4 +1,10 @@
-# PyPI distribution for agent-mesh.
+# PyPI distribution for agent-mesh, published as `newt-agent-mesh`.
+#
+# Why the PyPI name differs from the GitHub repo name: someone else
+# took `agentmesh` (no hyphen) on PyPI in Nov 2024 as their own name
+# reservation, and PyPI's similarity check blocks `agent-mesh` as too
+# close. The python import path is unaffected — it stays
+# `agent_mesh.core` etc. Only the `pip install <name>` differs.
 #
 # Build with: `maturin build --release` (or `maturin develop` for an
 # editable install inside a venv). One wheel ships the native PyO3
@@ -9,8 +15,8 @@ requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "agent-mesh"
-description = "Cryptographic peer-to-peer agent coordination"
+name = "newt-agent-mesh"
+description = "Cryptographic peer-to-peer agent coordination (Python bindings for agent-mesh)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
@@ -38,7 +44,7 @@ dynamic = ["version"]
 test = ["pytest>=7", "pytest-asyncio>=0.21"]
 
 [project.scripts]
-# `pip install agent-mesh` lays an `amesh` script down on PATH that
+# `pip install newt-agent-mesh` lays an `amesh` script down on PATH that
 # dispatches to the native-Python CLI in `agent_mesh.cli`. The
 # script wraps the same dispatcher the Rust `amesh` binary uses for
 # its subcommands — both honor the same flags + on-disk layout.
