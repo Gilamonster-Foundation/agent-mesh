@@ -4,6 +4,7 @@ members = [
     "agent-mesh-core",
     "agent-mesh-cli",
     "agent-mesh-discovery",
+    "agent-mesh-transport",
     "tests/common",
 ]
 
@@ -55,9 +56,22 @@ mdns-sd = "0.13"
 # Timestamps (RFC 3339, used as audit claims, not coordination primitives)
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
+# QUIC transport (Phase 2)
+#
+# We deliberately disable default features and re-opt-in to only what the
+# transport layer actually exercises. `default-features = false` drops
+# `metrics`, `portmapper`, and `fast-apple-datapath` — the workspace doesn't
+# need them and they pull in extra deps. `tls-ring` is mandatory (one of the
+# two TLS backends must be enabled).
+iroh = { version = "0.98", default-features = false, features = ["tls-ring"] }
+async-trait = "0.1"
+bytes = "1"
+futures = "0.3"
+
 # Internal crates
 agent-mesh-core = { path = "agent-mesh-core", version = "=0.5.20260528" }
 agent-mesh-discovery = { path = "agent-mesh-discovery", version = "=0.5.20260528" }
+agent-mesh-transport = { path = "agent-mesh-transport", version = "=0.5.20260528" }
 tests-common = { path = "tests/common" }
 
 # Test deps
