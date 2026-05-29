@@ -1,0 +1,16 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# Secrets and signatures (never commit private material)
+*.key
+*.sig
+
+# Editor/OS junk
+.DS_Store
+*.swp
+*.swo
+
+# Local IDE configs
+.idea/
+.vscode/
