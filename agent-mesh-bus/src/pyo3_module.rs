@@ -17,8 +17,8 @@
 //! work in `asyncio.run(...)` inside a sync handler if you need it.
 
 use crate::{bus::Bus, reply::CorrelationId, topic::Topic, BusError, Result as BusResult};
-use agent_mesh_core::pyo3_module::{PyAgentKey, PyFingerprint, PyUserKey};
-use agent_mesh_core::AgentKey;
+use agent_mesh_protocol::pyo3_module::{PyAgentKey, PyFingerprint, PyUserKey};
+use agent_mesh_protocol::AgentKey;
 use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule, PyType};
@@ -219,7 +219,7 @@ impl PyBus {
         let agent_cert = agent.inner.cert().clone();
 
         future_into_py(py, async move {
-            let user = agent_mesh_core::UserKey::load(&user_path)
+            let user = agent_mesh_protocol::UserKey::load(&user_path)
                 .map_err(|e| PyRuntimeError::new_err(format!("user load: {e}")))?;
             let agent = AgentKey::from_seed_and_cert(&agent_seed, agent_cert)
                 .map_err(|e| PyRuntimeError::new_err(format!("agent rebuild: {e}")))?;

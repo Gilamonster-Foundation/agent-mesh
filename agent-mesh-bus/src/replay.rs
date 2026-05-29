@@ -17,7 +17,7 @@
 //! Neither check uses wall-clock time. Both are per-process and
 //! best-effort — they raise the bar but don't claim perfection.
 
-use agent_mesh_core::Fingerprint;
+use agent_mesh_protocol::Fingerprint;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 

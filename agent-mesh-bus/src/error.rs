@@ -56,10 +56,10 @@ pub enum BusError {
     #[error("transport: {0}")]
     Transport(#[from] agent_mesh_transport::TransportError),
 
-    /// Anything bubbling up from agent-mesh-core (cert verify,
+    /// Anything bubbling up from agent-mesh-protocol (cert verify,
     /// envelope decode, etc.).
     #[error("core: {0}")]
-    Core(#[from] agent_mesh_core::MeshError),
+    Core(#[from] agent_mesh_protocol::MeshError),
 
     /// JSON encode/decode failure on the bus's `BusMessage` framing.
     #[error("json: {0}")]
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn core_error_converts_via_from() {
-        let c = agent_mesh_core::MeshError::BadSignature;
+        let c = agent_mesh_protocol::MeshError::BadSignature;
         let e: BusError = c.into();
         assert!(matches!(e, BusError::Core(_)));
     }

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "agent-mesh-core",
+    "agent-mesh-protocol",
     "agent-mesh-bus",
     "agent-mesh-cli",
     "agent-mesh-discovery",
@@ -71,7 +71,7 @@ bytes = "1"
 futures = "0.3"
 
 # Internal crates
-agent-mesh-core = { path = "agent-mesh-core", version = "=0.5.20260530" }
+agent-mesh-protocol = { path = "agent-mesh-protocol", version = "=0.5.20260530" }
 agent-mesh-bus = { path = "agent-mesh-bus", version = "=0.5.20260530" }
 agent-mesh-discovery = { path = "agent-mesh-discovery", version = "=0.5.20260530" }
 agent-mesh-transport = { path = "agent-mesh-transport", version = "=0.5.20260530" }

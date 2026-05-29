@@ -1,7 +1,7 @@
 //! `amesh bind github` — cross-sign the user key with a GitHub SSH
 //! ed25519 key.
 
-use agent_mesh_core::{GitHubBinding, UserKey};
+use agent_mesh_protocol::{GitHubBinding, UserKey};
 use anyhow::{Context, Result};
 use ssh_key::PrivateKey as SshPrivateKey;
 use std::path::PathBuf;

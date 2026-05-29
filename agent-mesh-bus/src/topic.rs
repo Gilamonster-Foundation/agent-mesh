@@ -8,7 +8,7 @@
 //! foo" from a peer outside our user can never address a topic foo
 //! we've subscribed to.
 
-use agent_mesh_core::Fingerprint;
+use agent_mesh_protocol::Fingerprint;
 use std::fmt;
 use std::str::FromStr;
 

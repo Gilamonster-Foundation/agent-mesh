@@ -4,7 +4,7 @@
 //! one reply over real loopback UDP via QUIC + mDNS.
 
 use agent_mesh_bus::{Bus, Topic};
-use agent_mesh_core::{AgentKey, AgentMetadata, UserKey};
+use agent_mesh_protocol::{AgentKey, AgentMetadata, UserKey};
 use std::time::Duration;
 
 fn agent(user: &UserKey, role: &str) -> AgentKey {

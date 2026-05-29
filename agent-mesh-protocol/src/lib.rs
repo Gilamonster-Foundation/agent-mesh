@@ -16,7 +16,7 @@
 //! `AgentMetadata::issued_at`), never as a coordination primitive.
 //! See the project `CLAUDE.md` for the rationale.
 
-#![doc(html_root_url = "https://docs.rs/agent-mesh-core")]
+#![doc(html_root_url = "https://docs.rs/agent-mesh-protocol")]
 
 pub mod agent_key;
 pub mod envelope;

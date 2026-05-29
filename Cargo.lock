@@ -41,8 +41,8 @@ dependencies = [
 name = "agent-mesh-bus"
 version = "0.5.20260530"
 dependencies = [
- "agent-mesh-core",
  "agent-mesh-discovery",
+ "agent-mesh-protocol",
  "agent-mesh-transport",
  "anyhow",
  "async-nats",
@@ -68,8 +68,8 @@ dependencies = [
 name = "agent-mesh-cli"
 version = "0.5.20260530"
 dependencies = [
- "agent-mesh-core",
  "agent-mesh-discovery",
+ "agent-mesh-protocol",
  "agent-mesh-transport",
  "anyhow",
  "assert_cmd",
@@ -91,7 +91,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent-mesh-core"
+name = "agent-mesh-discovery"
+version = "0.5.20260530"
+dependencies = [
+ "agent-mesh-protocol",
+ "anyhow",
+ "base64",
+ "hex",
+ "mdns-sd",
+ "pyo3",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tests-common",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "agent-mesh-protocol"
 version = "0.5.20260530"
 dependencies = [
  "blake3",
@@ -110,32 +130,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent-mesh-discovery"
-version = "0.5.20260530"
-dependencies = [
- "agent-mesh-core",
- "anyhow",
- "base64",
- "hex",
- "mdns-sd",
- "pyo3",
- "serde",
- "serde_json",
- "tempfile",
- "tests-common",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "agent-mesh-py"
 version = "0.5.20260530"
 dependencies = [
  "agent-mesh-bus",
- "agent-mesh-core",
  "agent-mesh-discovery",
+ "agent-mesh-protocol",
  "agent-mesh-transport",
  "pyo3",
  "pyo3-async-runtimes",
@@ -146,8 +146,8 @@ dependencies = [
 name = "agent-mesh-transport"
 version = "0.5.20260530"
 dependencies = [
- "agent-mesh-core",
  "agent-mesh-discovery",
+ "agent-mesh-protocol",
  "anyhow",
  "async-trait",
  "bytes",
@@ -4209,7 +4209,7 @@ checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 name = "tests-common"
 version = "0.5.20260530"
 dependencies = [
- "agent-mesh-core",
+ "agent-mesh-protocol",
  "tempfile",
 ]
 

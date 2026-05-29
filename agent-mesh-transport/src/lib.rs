@@ -8,11 +8,11 @@
 //!    fingerprint already knows enough to address your iroh endpoint
 //!    (see [`identity`]).
 //! 2. **App-level handshake** — after ALPN negotiation, both ends
-//!    exchange [`agent_mesh_core::CertChain`]s and enforce the
+//!    exchange [`agent_mesh_protocol::CertChain`]s and enforce the
 //!    auto-team rule: same `user_pubkey` → trust, else refuse with
 //!    a clear error (see [`handshake`]).
 //! 3. **Envelope framing** — once trusted, each direction is a stream
-//!    of length-prefixed [`agent_mesh_core::SignedEnvelope`]s,
+//!    of length-prefixed [`agent_mesh_protocol::SignedEnvelope`]s,
 //!    verified on receipt (see [`stream`]).
 //!
 //! [`PeerResolver`] bridges Phase 1 mDNS discovery to this layer so

@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::util;
-use agent_mesh_core::{AgentKey, AgentMetadata, CertChain, UserKey};
 use agent_mesh_discovery::{AnnounceConfig, Announcer};
+use agent_mesh_protocol::{AgentKey, AgentMetadata, CertChain, UserKey};
 use agent_mesh_transport::{do_handshake, iroh_reexports::Incoming, recv_envelope, Endpoint};
 use anyhow::{Context, Result};
 use serde::Serialize;

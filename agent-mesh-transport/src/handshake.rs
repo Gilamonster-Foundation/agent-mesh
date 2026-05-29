@@ -29,7 +29,7 @@
 //! envelope framing module.
 
 use crate::error::{Result, TransportError};
-use agent_mesh_core::CertChain;
+use agent_mesh_protocol::CertChain;
 use iroh::endpoint::{RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
 
@@ -118,7 +118,7 @@ pub async fn do_handshake(
 /// Verify the peer's cert chain and enforce the auto-team rule.
 fn ensure_trustable(
     peer_cert: &CertChain,
-    our_user_fp: &agent_mesh_core::Fingerprint,
+    our_user_fp: &agent_mesh_protocol::Fingerprint,
 ) -> Result<()> {
     peer_cert
         .verify()
@@ -205,7 +205,7 @@ async fn read_frame_raw(recv: &mut RecvStream) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_mesh_core::{AgentKey, AgentMetadata, UserKey};
+    use agent_mesh_protocol::{AgentKey, AgentMetadata, UserKey};
 
     fn fixture_cert(user: &UserKey, role: &str) -> CertChain {
         AgentKey::issue(

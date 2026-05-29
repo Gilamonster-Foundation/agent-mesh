@@ -1,5 +1,5 @@
 [package]
-name = "agent-mesh-core"
+name = "agent-mesh-protocol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

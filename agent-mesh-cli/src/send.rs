@@ -18,7 +18,9 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use crate::util;
-use agent_mesh_core::{AgentKey, AgentMetadata, Fingerprint, Recipient, SignedEnvelope, UserKey};
+use agent_mesh_protocol::{
+    AgentKey, AgentMetadata, Fingerprint, Recipient, SignedEnvelope, UserKey,
+};
 use agent_mesh_transport::{
     do_handshake, identity::agent_pubkey_to_iroh, send_envelope, Endpoint, PeerResolver,
 };

@@ -7,8 +7,8 @@
 //! GitHub Actions images), this test will time out; that's a real
 //! failure to investigate, not a flake to silence.
 
-use agent_mesh_core::Fingerprint;
 use agent_mesh_discovery::{AnnounceConfig, Announcer, Browser, BrowserEvent};
+use agent_mesh_protocol::Fingerprint;
 use std::time::Duration;
 
 fn fp_of(seed: u8) -> Fingerprint {

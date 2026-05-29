@@ -1,6 +1,6 @@
 //! `amesh keygen` — generate a fresh user key.
 
-use agent_mesh_core::UserKey;
+use agent_mesh_protocol::UserKey;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 

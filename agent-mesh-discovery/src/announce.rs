@@ -7,7 +7,7 @@
 //! `Drop` sends an mDNS "goodbye" before shutting the daemon down.
 
 use crate::{DEFAULT_PORT, SERVICE_TYPE};
-use agent_mesh_core::Fingerprint;
+use agent_mesh_protocol::Fingerprint;
 use anyhow::{Context, Result};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 
@@ -122,7 +122,7 @@ impl Drop for AnnouncerHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_mesh_core::Fingerprint;
+    use agent_mesh_protocol::Fingerprint;
 
     fn fp_of(seed: u8) -> Fingerprint {
         Fingerprint([seed; 32])

@@ -7,7 +7,7 @@
 //! stops the browse and shuts the daemon down.
 
 use crate::{PeerInfo, SERVICE_TYPE};
-use agent_mesh_core::Fingerprint;
+use agent_mesh_protocol::Fingerprint;
 use anyhow::{Context, Result};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use std::str::FromStr;

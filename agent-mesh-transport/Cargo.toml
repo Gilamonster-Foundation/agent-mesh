@@ -11,7 +11,7 @@ description = "Authenticated QUIC transport for agent-mesh (built on iroh)."
 readme = "../README.md"
 
 [dependencies]
-agent-mesh-core.workspace = true
+agent-mesh-protocol.workspace = true
 agent-mesh-discovery.workspace = true
 
 iroh.workspace = true
@@ -36,7 +36,7 @@ default = []
 pyo3 = [
     "dep:pyo3",
     "dep:pyo3-async-runtimes",
-    "agent-mesh-core/pyo3",
+    "agent-mesh-protocol/pyo3",
     "agent-mesh-discovery/pyo3",
 ]
 

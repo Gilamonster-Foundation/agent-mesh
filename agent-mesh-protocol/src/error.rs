@@ -1,4 +1,4 @@
-//! Crate-wide error type for `agent-mesh-core`.
+//! Crate-wide error type for `agent-mesh-protocol`.
 //!
 //! Every fallible operation in this crate returns [`Result<T>`] (an
 //! alias for `Result<T, MeshError>`). The variants are deliberately

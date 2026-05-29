@@ -6,8 +6,8 @@
 //! `--duration` is supplied) or until the user hits Ctrl-C.
 
 use crate::util;
-use agent_mesh_core::{AgentKey, AgentMetadata, UserKey};
 use agent_mesh_discovery::{AnnounceConfig, Announcer};
+use agent_mesh_protocol::{AgentKey, AgentMetadata, UserKey};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 

@@ -1,6 +1,6 @@
 //! `amesh whoami` — print the local user identity.
 
-use agent_mesh_core::UserKey;
+use agent_mesh_protocol::UserKey;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
@@ -17,7 +17,7 @@ pub fn run(home: PathBuf) -> Result<()> {
     let binding_path = home.join("user.github.sig");
     if binding_path.exists() {
         let json = std::fs::read_to_string(&binding_path)?;
-        let binding: agent_mesh_core::GitHubBinding = serde_json::from_str(&json)?;
+        let binding: agent_mesh_protocol::GitHubBinding = serde_json::from_str(&json)?;
         match binding.github_username.as_deref() {
             Some(u) => println!("github binding:   {u} (hint)"),
             None => println!("github binding:   (no username hint)"),

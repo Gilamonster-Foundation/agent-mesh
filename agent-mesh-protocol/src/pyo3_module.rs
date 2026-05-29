@@ -1,4 +1,4 @@
-//! Python bindings for `agent-mesh-core`.
+//! Python bindings for `agent-mesh-protocol`.
 //!
 //! Compiled only when the `pyo3` cargo feature is on; the rest of the
 //! crate has no Python dependencies. The umbrella `agent-mesh-py`

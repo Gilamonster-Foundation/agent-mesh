@@ -18,7 +18,7 @@ name = "agent_mesh_cli"
 path = "src/lib.rs"
 
 [dependencies]
-agent-mesh-core.workspace = true
+agent-mesh-protocol.workspace = true
 agent-mesh-discovery.workspace = true
 agent-mesh-transport.workspace = true
 anyhow.workspace = true

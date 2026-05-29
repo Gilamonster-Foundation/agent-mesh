@@ -15,7 +15,7 @@ name = "_agent_mesh"
 crate-type = ["cdylib"]
 
 [dependencies]
-agent-mesh-core = { workspace = true, features = ["pyo3"] }
+agent-mesh-protocol = { workspace = true, features = ["pyo3"] }
 agent-mesh-discovery = { workspace = true, features = ["pyo3"] }
 agent-mesh-transport = { workspace = true, features = ["pyo3"] }
 agent-mesh-bus = { workspace = true, features = ["pyo3"] }
