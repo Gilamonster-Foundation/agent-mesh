@@ -1,0 +1,75 @@
+[workspace]
+resolver = "2"
+members = [
+    "agent-mesh-core",
+    "agent-mesh-cli",
+    "tests/common",
+]
+
+[workspace.package]
+version = "0.5.20260528"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+repository = "https://github.com/Gilamonster-Foundation/agent-mesh"
+homepage = "https://github.com/Gilamonster-Foundation/agent-mesh"
+authors = ["Shawn Hartsock <hartsock@users.noreply.github.com>"]
+
+[workspace.dependencies]
+# Core
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_bytes = "0.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Crypto
+ed25519-dalek = { version = "2", features = ["rand_core", "serde", "pkcs8", "pem"] }
+blake3 = "1"
+rand = "0.8"
+hex = "0.4"
+base64 = "0.22"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# HTTP (used by `amesh verify` to fetch github.com/<user>.keys)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# SSH key parsing (for github cross-sign and verify)
+ssh-key = { version = "0.6", features = ["ed25519"] }
+
+# Filesystem
+dirs = "5"
+
+# Internal crates
+agent-mesh-core = { path = "agent-mesh-core", version = "=0.5.20260528" }
+tests-common = { path = "tests/common" }
+
+# Test deps
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
+wiremock = "0.6"
+
+[workspace.lints.clippy]
+explicit_iter_loop            = "warn"
+flat_map_option               = "warn"
+implicit_clone                = "warn"
+needless_for_each             = "warn"
+semicolon_if_nothing_returned = "warn"
+uninlined_format_args         = "warn"
+useless_conversion            = "warn"
+use_self                      = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

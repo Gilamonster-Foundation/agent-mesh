@@ -2,6 +2,9 @@
 target/
 **/*.rs.bk
 
+# Coverage output
+lcov.info
+
 # Secrets and signatures (never commit private material)
 *.key
 *.sig

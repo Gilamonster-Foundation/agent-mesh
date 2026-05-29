@@ -1,0 +1,42 @@
+[package]
+name = "agent-mesh-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Command-line interface for agent-mesh."
+
+[[bin]]
+name = "amesh"
+path = "src/main.rs"
+
+[lib]
+name = "agent_mesh_cli"
+path = "src/lib.rs"
+
+[dependencies]
+agent-mesh-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dirs.workspace = true
+ssh-key.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+assert_cmd.workspace = true
+predicates.workspace = true
+wiremock.workspace = true
+rand.workspace = true
+
+[lints]
+workspace = true

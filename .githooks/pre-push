@@ -1,0 +1,40 @@
+#!/bin/bash
+#
+# Pre-push hook for agent-mesh
+#
+# Runs the same lint + test + coverage gates that CI runs, locally,
+# before any push reaches origin. If this passes, CI should pass too —
+# and if it doesn't, fix the issue here instead of burning a CI run.
+#
+# Install: `just install-hooks` (or `git config core.hooksPath .githooks`)
+#
+# PIPELINE PARITY: This hook mirrors .github/workflows/ci.yml and the
+# `check` / `cov-ci` recipes in justfile. When editing this hook, audit
+# the workflow + justfile in the same PR.
+#
+# Do NOT skip this hook with `--no-verify`. If a check fails, fix the
+# issue — bypassing only moves the failure to the remote.
+
+set -e
+
+cd "$(git rev-parse --show-toplevel)"
+
+if ! command -v just >/dev/null 2>&1; then
+    echo "pre-push: 'just' not found in PATH"
+    echo "          install via: cargo install just"
+    exit 1
+fi
+
+if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
+    echo "pre-push: 'cargo-llvm-cov' not found in PATH"
+    echo "          install via: cargo install cargo-llvm-cov"
+    exit 1
+fi
+
+echo "[pre-push] running just check..."
+just check
+
+echo "[pre-push] running just cov-ci..."
+just cov-ci
+
+echo "[pre-push] OK"
