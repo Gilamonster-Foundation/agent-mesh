@@ -4,7 +4,7 @@
 //! here. Today that's a temp-dir factory and a deterministic
 //! `AgentMetadata` fixture.
 
-use agent_mesh_core::{AgentKey, AgentMetadata, UserKey};
+use agent_mesh_protocol::{AgentKey, AgentMetadata, UserKey};
 
 /// Spawn a temporary directory bounded to the caller's scope.
 ///

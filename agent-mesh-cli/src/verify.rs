@@ -1,7 +1,7 @@
 //! `amesh verify` — fetch a GitHub user's public keys and check that
 //! one of them validates a binding file.
 
-use agent_mesh_core::{ssh_pubkey_ed25519_bytes, GitHubBinding};
+use agent_mesh_protocol::{ssh_pubkey_ed25519_bytes, GitHubBinding};
 use anyhow::{Context, Result};
 use ssh_key::PublicKey as SshPublicKey;
 use std::path::PathBuf;

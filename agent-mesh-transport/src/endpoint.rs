@@ -14,7 +14,7 @@
 
 use crate::alpn::ALPN;
 use crate::error::{Result, TransportError};
-use agent_mesh_core::AgentKey;
+use agent_mesh_protocol::AgentKey;
 use iroh::endpoint::{presets, Connection, Incoming};
 use iroh::{Endpoint as IrohEndpoint, EndpointAddr, PublicKey, SecretKey};
 use std::net::SocketAddr;
@@ -126,7 +126,7 @@ impl Endpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_mesh_core::{AgentMetadata, UserKey};
+    use agent_mesh_protocol::{AgentMetadata, UserKey};
 
     fn fixture_agent(role: &str) -> AgentKey {
         let user = UserKey::generate();

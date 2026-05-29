@@ -54,10 +54,10 @@ pub enum TransportError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
-    /// An error bubbled up from `agent-mesh-core` (cert verify,
+    /// An error bubbled up from `agent-mesh-protocol` (cert verify,
     /// envelope decode).
     #[error("core error: {0}")]
-    Core(#[from] agent_mesh_core::MeshError),
+    Core(#[from] agent_mesh_protocol::MeshError),
 }
 
 /// Convenience alias for the crate's `Result` type.
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn core_error_converts_via_from() {
-        let core_err = agent_mesh_core::MeshError::BadSignature;
+        let core_err = agent_mesh_protocol::MeshError::BadSignature;
         let e: TransportError = core_err.into();
         assert!(matches!(e, TransportError::Core(_)));
     }

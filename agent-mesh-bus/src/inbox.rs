@@ -14,7 +14,7 @@ use crate::replay::{NonceCache, SequenceTracker};
 use crate::reply::{CorrelationId, ReplyWaiter};
 use crate::topic::Topic;
 use crate::{BusError, Result};
-use agent_mesh_core::{Fingerprint, SignedEnvelope};
+use agent_mesh_protocol::{Fingerprint, SignedEnvelope};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -284,7 +284,7 @@ impl Default for Inbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_mesh_core::{AgentKey, AgentMetadata, Recipient, SignedEnvelope, UserKey};
+    use agent_mesh_protocol::{AgentKey, AgentMetadata, Recipient, SignedEnvelope, UserKey};
 
     fn agent(user: &UserKey, role: &str) -> AgentKey {
         AgentKey::issue(

@@ -10,7 +10,7 @@ authors.workspace = true
 description = "High-level pub/sub + request-reply API for agent-mesh"
 
 [dependencies]
-agent-mesh-core.workspace = true
+agent-mesh-protocol.workspace = true
 agent-mesh-transport.workspace = true
 agent-mesh-discovery.workspace = true
 anyhow.workspace = true
@@ -36,7 +36,7 @@ pyo3 = [
     "dep:pyo3",
     "dep:pyo3-async-runtimes",
     "dep:tempfile",
-    "agent-mesh-core/pyo3",
+    "agent-mesh-protocol/pyo3",
     "agent-mesh-discovery/pyo3",
     "agent-mesh-transport/pyo3",
 ]

@@ -7,7 +7,9 @@
 
 use std::time::Duration;
 
-use agent_mesh_core::{AgentKey, AgentMetadata, Fingerprint, Recipient, SignedEnvelope, UserKey};
+use agent_mesh_protocol::{
+    AgentKey, AgentMetadata, Fingerprint, Recipient, SignedEnvelope, UserKey,
+};
 use agent_mesh_transport::{
     do_handshake, identity::agent_pubkey_to_iroh, recv_envelope, send_envelope, Endpoint,
     TransportError,

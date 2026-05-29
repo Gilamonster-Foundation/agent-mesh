@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 
 #[pymodule]
 fn _agent_mesh(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    agent_mesh_core::pyo3_module::register(py, m)?;
+    agent_mesh_protocol::pyo3_module::register(py, m)?;
     agent_mesh_discovery::pyo3_module::register(py, m)?;
     agent_mesh_transport::pyo3_module::register(py, m)?;
     agent_mesh_bus::pyo3_module::register(py, m)?;

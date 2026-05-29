@@ -7,8 +7,8 @@
 //! `RwLock`-protected map keyed by `Fingerprint`.
 
 use crate::error::{Result, TransportError};
-use agent_mesh_core::Fingerprint;
 use agent_mesh_discovery::{Browser, BrowserEvent, BrowserHandle, PeerInfo};
+use agent_mesh_protocol::Fingerprint;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;

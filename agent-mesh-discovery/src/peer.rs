@@ -5,7 +5,7 @@
 //! Phase 2 will fetch the peer's actual public key and check the
 //! fingerprint against `agent_fp`.
 
-use agent_mesh_core::Fingerprint;
+use agent_mesh_protocol::Fingerprint;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
@@ -47,7 +47,7 @@ impl PeerInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_mesh_core::Fingerprint;
+    use agent_mesh_protocol::Fingerprint;
 
     fn fp_of(seed: u8) -> Fingerprint {
         Fingerprint([seed; 32])

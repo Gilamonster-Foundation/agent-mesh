@@ -23,8 +23,8 @@
 use crate::inbox::{BusMessage, Inbox, OutgoingReply};
 use crate::reply::CorrelationId;
 use crate::{BusError, Result, Topic};
-use agent_mesh_core::{AgentKey, CertChain, Fingerprint, Recipient, SignedEnvelope, UserKey};
 use agent_mesh_discovery::{AnnounceConfig, Announcer, AnnouncerHandle};
+use agent_mesh_protocol::{AgentKey, CertChain, Fingerprint, Recipient, SignedEnvelope, UserKey};
 use agent_mesh_transport::{
     do_handshake,
     identity::agent_pubkey_to_iroh,
@@ -489,7 +489,7 @@ async fn ship_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_mesh_core::{AgentMetadata, UserKey};
+    use agent_mesh_protocol::{AgentMetadata, UserKey};
 
     fn agent(user: &UserKey, role: &str) -> AgentKey {
         AgentKey::issue(

@@ -26,7 +26,7 @@ around.
 CLI: `amesh` (workspace member `agent-mesh-cli`).
 Libraries:
 
-- `agent-mesh-core` — identity types, signed envelopes.
+- `agent-mesh-protocol` — identity types, signed envelopes.
 - `agent-mesh-discovery` — LAN discovery via mDNS.
 - `agent-mesh-transport` — authenticated QUIC transport via iroh.
 - `agent-mesh-bus` — high-level pub/sub + request/reply.

@@ -6,7 +6,7 @@
 //! signature all checked before the bytes leave this module.
 
 use crate::error::{Result, TransportError};
-use agent_mesh_core::SignedEnvelope;
+use agent_mesh_protocol::SignedEnvelope;
 use iroh::endpoint::{RecvStream, SendStream};
 
 /// Max accepted envelope size. Envelopes ship arbitrary payloads, so
@@ -74,7 +74,7 @@ pub async fn recv_envelope(recv: &mut RecvStream) -> Result<SignedEnvelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_mesh_core::{AgentKey, AgentMetadata, Fingerprint, Recipient, UserKey};
+    use agent_mesh_protocol::{AgentKey, AgentMetadata, Fingerprint, Recipient, UserKey};
 
     fn fixture_envelope() -> SignedEnvelope {
         let user = UserKey::generate();

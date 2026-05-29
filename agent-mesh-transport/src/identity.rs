@@ -1,4 +1,4 @@
-//! Bridge between `agent-mesh-core`'s [`AgentKey`] and iroh's
+//! Bridge between `agent-mesh-protocol`'s [`AgentKey`] and iroh's
 //! [`SecretKey`] / [`PublicKey`].
 //!
 //! The architectural insight Phase 2 leans on: **iroh's `EndpointId`
@@ -7,7 +7,7 @@
 //! to manage. A peer that knows your agent fingerprint already knows
 //! enough to address your iroh endpoint.
 
-use agent_mesh_core::AgentKey;
+use agent_mesh_protocol::AgentKey;
 use iroh::{PublicKey, SecretKey};
 
 /// Build an iroh [`SecretKey`] from the agent's ed25519 signing seed.
@@ -36,7 +36,7 @@ pub fn agent_pubkey_to_iroh(pubkey_bytes: &[u8; 32]) -> Option<PublicKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_mesh_core::{AgentMetadata, UserKey};
+    use agent_mesh_protocol::{AgentMetadata, UserKey};
 
     fn fixture_agent() -> AgentKey {
         let user = UserKey::generate();

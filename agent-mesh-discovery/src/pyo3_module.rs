@@ -9,8 +9,8 @@
 //! duration; that covers every Python-side use case discovery has.
 
 use crate::{AnnounceConfig, Announcer, AnnouncerHandle, Browser, BrowserEvent, PeerInfo};
-use agent_mesh_core::pyo3_module::PyFingerprint;
-use agent_mesh_core::Fingerprint;
+use agent_mesh_protocol::pyo3_module::PyFingerprint;
+use agent_mesh_protocol::Fingerprint;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule, PyType};

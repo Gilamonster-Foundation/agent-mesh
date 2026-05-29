@@ -6,8 +6,8 @@
 //! fingerprint.
 
 use crate::util;
-use agent_mesh_core::UserKey;
 use agent_mesh_discovery::{Browser, BrowserEvent, PeerInfo};
+use agent_mesh_protocol::UserKey;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;

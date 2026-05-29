@@ -413,7 +413,7 @@ fn verify_fails_on_missing_binding_file() {
     // Drives `amesh verify` to its first I/O error — no network is
     // touched because the file read fails first. Phase 0 covers the
     // remaining verify paths via `GitHubBinding::verify` unit tests
-    // in `agent-mesh-core::github_binding::tests`; a full end-to-end
+    // in `agent-mesh-protocol::github_binding::tests`; a full end-to-end
     // verify test would need a `--keys-url` flag we deliberately
     // haven't shipped yet.
     let dir = TempDir::new().unwrap();

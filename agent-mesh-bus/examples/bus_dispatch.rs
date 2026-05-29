@@ -11,7 +11,7 @@
 //! request/reply round-trip.
 
 use agent_mesh_bus::{Bus, Topic};
-use agent_mesh_core::{AgentKey, AgentMetadata, UserKey};
+use agent_mesh_protocol::{AgentKey, AgentMetadata, UserKey};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
