@@ -14,6 +14,12 @@ use std::net::IpAddr;
 pub struct PeerInfo {
     /// Agent pubkey fingerprint (claimed in TXT record).
     pub agent_fp: Fingerprint,
+    /// Raw 32-byte ed25519 pubkey of the agent (claimed in TXT
+    /// record). `None` for peers that publish only a fingerprint
+    /// (e.g. `amesh announce` in Phase 1; Phase 2's `amesh listen`
+    /// publishes both). The Phase 2 transport requires this to dial
+    /// the peer — iroh dials by `EndpointId`, which IS the pubkey.
+    pub agent_pubkey: Option<[u8; 32]>,
     /// User pubkey fingerprint (claimed in TXT record).
     pub user_fp: Fingerprint,
     /// Capabilities the agent claims (e.g. `["ollama", "vllm"]`).
@@ -50,6 +56,7 @@ mod tests {
     fn sample_peer(user_fp: Fingerprint) -> PeerInfo {
         PeerInfo {
             agent_fp: fp_of(1),
+            agent_pubkey: None,
             user_fp,
             capabilities: vec!["ollama".into()],
             role: "newt-worker".into(),
@@ -77,6 +84,7 @@ mod tests {
     fn peer_info_serde_roundtrip() {
         let peer = PeerInfo {
             agent_fp: fp_of(1),
+            agent_pubkey: Some([7u8; 32]),
             user_fp: fp_of(2),
             capabilities: vec!["ollama".into(), "vllm".into()],
             role: "newt-worker".into(),
@@ -94,6 +102,7 @@ mod tests {
     fn peer_info_with_no_capabilities() {
         let peer = PeerInfo {
             agent_fp: fp_of(3),
+            agent_pubkey: None,
             user_fp: fp_of(4),
             capabilities: vec![],
             role: "scout".into(),
@@ -112,6 +121,7 @@ mod tests {
     fn peer_info_with_ipv6() {
         let peer = PeerInfo {
             agent_fp: fp_of(5),
+            agent_pubkey: None,
             user_fp: fp_of(6),
             capabilities: vec!["ipv6".into()],
             role: "r".into(),

@@ -34,6 +34,7 @@ async fn announce_and_browse_round_trip() {
 
     let _announcer = Announcer::start(AnnounceConfig {
         agent_fp,
+        agent_pubkey: None,
         user_fp,
         capabilities: vec!["ollama".into()],
         role: "test-worker".into(),

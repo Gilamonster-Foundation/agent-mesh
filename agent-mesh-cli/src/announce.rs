@@ -44,6 +44,10 @@ pub async fn run(
 
     let _handle = Announcer::start(AnnounceConfig {
         agent_fp,
+        // `amesh announce` is discovery-only — no transport bound,
+        // so we don't publish a pubkey. Peers who want to dial
+        // should use `amesh listen` instead (Phase 2).
+        agent_pubkey: None,
         user_fp,
         capabilities: capabilities.clone(),
         role: role.clone(),
