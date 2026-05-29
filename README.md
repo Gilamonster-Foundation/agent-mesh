@@ -47,8 +47,32 @@ is blocked by PyPI's similarity check — see the note in
 
 This installs the Python package `agent_mesh` with submodules
 `.core`, `.discovery`, `.transport`, `.bus`. The `amesh` CLI binary
-ships separately — install it with `cargo install --path agent-mesh-cli`
+ships separately — install it with `cargo install agent-mesh-cli`
 if you want it on `$PATH`.
+
+## Rust install
+
+The library crates are on crates.io:
+
+```toml
+# Cargo.toml
+[dependencies]
+agent-mesh-protocol = "0.5"   # ed25519 identity, signed envelopes
+agent-mesh-discovery = "0.5"  # mDNS LAN discovery
+agent-mesh-transport = "0.5"  # authenticated QUIC via iroh
+agent-mesh-bus = "0.5"        # high-level pub/sub + request/reply
+```
+
+The `amesh` CLI:
+
+```sh
+cargo install agent-mesh-cli   # binary lands as `amesh` on PATH
+```
+
+(The `-protocol` suffix on the foundation crate is because
+`agent-mesh-core` on crates.io is owned by an unrelated project.
+The Rust crate name is `agent-mesh-protocol`; the Python user-facing
+submodule it powers is still `agent_mesh.core`.)
 
 ## Discovery (Phase 1)
 
