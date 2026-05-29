@@ -19,7 +19,9 @@ path = "src/lib.rs"
 
 [dependencies]
 agent-mesh-core.workspace = true
+agent-mesh-discovery.workspace = true
 anyhow.workspace = true
+chrono.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
