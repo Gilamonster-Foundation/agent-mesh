@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 )]
 #[derive(Clone)]
 pub struct PyPeerInfo {
-    pub(crate) inner: PeerInfo,
+    pub inner: PeerInfo,
 }
 
 #[pymethods]
