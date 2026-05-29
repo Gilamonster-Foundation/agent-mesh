@@ -130,6 +130,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-mesh-py"
+version = "0.5.20260528"
+dependencies = [
+ "agent-mesh-bus",
+ "agent-mesh-core",
+ "agent-mesh-discovery",
+ "agent-mesh-transport",
+ "pyo3",
+ "pyo3-async-runtimes",
+ "tokio",
+]
+
+[[package]]
 name = "agent-mesh-transport"
 version = "0.5.20260528"
 dependencies = [

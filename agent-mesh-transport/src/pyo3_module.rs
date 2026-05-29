@@ -64,7 +64,7 @@ impl PyEndpoint {
             let ep = Endpoint::bind(&agent, port)
                 .await
                 .map_err(|e| PyRuntimeError::new_err(format!("endpoint bind: {e}")))?;
-            Ok(PyEndpoint {
+            Ok(Self {
                 inner: Arc::new(Mutex::new(Some(ep))),
             })
         })

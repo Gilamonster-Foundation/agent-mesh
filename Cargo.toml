@@ -5,6 +5,7 @@ members = [
     "agent-mesh-bus",
     "agent-mesh-cli",
     "agent-mesh-discovery",
+    "agent-mesh-py",
     "agent-mesh-transport",
     "tests/common",
 ]
