@@ -29,7 +29,7 @@ pub mod user_key;
 #[cfg(feature = "pyo3")]
 pub mod pyo3_module;
 
-pub use agent_key::{AgentKey, AgentMetadata, CertChain, SerdeSig};
+pub use agent_key::{AgentKey, AgentMetadata, CertChain, Issuer, SerdeSig};
 pub use caveats::{Caveats, CountBound, Scope};
 pub use envelope::{Recipient, SignedEnvelope};
 pub use error::{MeshError, Result};

@@ -10,7 +10,7 @@ use crate::caveats::Caveats;
 use crate::fingerprint::Fingerprint;
 use crate::user_key::{UserKey, UserPublic};
 use crate::{MeshError, Result};
-use ed25519_dalek::{Signature, Signer, SigningKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +30,8 @@ impl AgentKey {
     ///
     /// The user's private key is used exactly once here to sign
     /// `(agent_pubkey || canonical_metadata_bytes)`, producing the
-    /// `user_sig` field of the embedded [`CertChain`].
+    /// `issuer_sig` of the embedded [`CertChain`] (a root [`Issuer::User`]).
+    /// Use [`AgentKey::delegate`] to mint an *attenuated* sub-agent.
     pub fn issue(user: &UserKey, metadata: AgentMetadata) -> Self {
         let mut csprng = OsRng;
         let signing = SigningKey::generate(&mut csprng);
@@ -42,10 +43,42 @@ impl AgentKey {
         let cert = CertChain {
             agent_pubkey: agent_pubkey_bytes,
             metadata,
-            user_pubkey: user.public(),
-            user_sig: SerdeSig(sig),
+            issuer: Issuer::User(user.public()),
+            issuer_sig: SerdeSig(sig),
         };
         Self { signing, cert }
+    }
+
+    /// Delegate a **sub-agent** key from this agent — attenuation-only.
+    ///
+    /// The child's caveats must be `⊑` this agent's caveats (the parent
+    /// authority), otherwise [`MeshError::CaveatAmplification`] is returned
+    /// and no key is minted. The sub-cert is signed by *this* agent's key and
+    /// embeds this agent's cert as its parent, so it roots at the same user
+    /// and every verifier re-checks attenuation at each link. A confused or
+    /// compromised agent therefore cannot mint a child with more authority
+    /// than it holds.
+    pub fn delegate(&self, metadata: AgentMetadata) -> Result<Self> {
+        if !metadata.caveats.leq(&self.cert.metadata.caveats) {
+            return Err(MeshError::CaveatAmplification);
+        }
+        let mut csprng = OsRng;
+        let signing = SigningKey::generate(&mut csprng);
+        let sub_pubkey: [u8; 32] = *signing.verifying_key().as_bytes();
+
+        let to_sign = sign_payload(&sub_pubkey, &metadata);
+        let sig = self.signing.sign(&to_sign);
+
+        let cert = CertChain {
+            agent_pubkey: sub_pubkey,
+            metadata,
+            issuer: Issuer::Agent {
+                pubkey: self.cert.agent_pubkey,
+                parent: Box::new(self.cert.clone()),
+            },
+            issuer_sig: SerdeSig(sig),
+        };
+        Ok(Self { signing, cert })
     }
 
     /// Sign a message with the agent's sub-key.
@@ -128,28 +161,77 @@ pub struct AgentMetadata {
     /// trust them. Defaults to [`Caveats::top`] (unrestricted), which is the
     /// back-compatible "no caveats declared" authority.
     ///
-    /// Enforcing `child ⊑ parent` across a delegation chain is the next step
-    /// (see [`crate::caveats`] and issue #35); this field is the signed
-    /// substrate that step builds on.
+    /// [`AgentKey::delegate`] enforces `child ⊑ parent` at mint time, and
+    /// [`CertChain::verify`] re-checks attenuation at every link — so a chain
+    /// that amplifies authority is rejected even if each signature is valid
+    /// (see [`crate::caveats`] and issue #35).
     #[serde(default)]
     pub caveats: Caveats,
 }
 
-/// The proof that this agent serves a specific user.
+/// Who signed a [`CertChain`] — the trust anchor for that link.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Issuer {
+    /// Root: signed directly by the user's key (the trust anchor).
+    User(UserPublic),
+    /// Delegated: signed by a parent agent. Carries the parent's full cert so
+    /// the chain roots at an [`Issuer::User`] and attenuation is checkable per
+    /// link.
+    Agent {
+        /// The parent agent's ed25519 public key. Must equal the embedded
+        /// `parent.agent_pubkey`.
+        pubkey: [u8; 32],
+        /// The parent's cert (recursively verifiable, attenuation-checked).
+        parent: Box<CertChain>,
+    },
+}
+
+/// The proof that this agent serves a specific user — directly (root) or
+/// through a chain of attenuating delegations.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CertChain {
     pub agent_pubkey: [u8; 32],
     pub metadata: AgentMetadata,
-    pub user_pubkey: UserPublic,
-    pub user_sig: SerdeSig,
+    /// Who signed this cert: the root user, or a parent agent + its cert.
+    pub issuer: Issuer,
+    /// The issuer's signature over `(agent_pubkey || metadata_bytes)`.
+    pub issuer_sig: SerdeSig,
 }
 
 impl CertChain {
-    /// Verify the cert: the embedded `user_pubkey` must have signed
-    /// `(agent_pubkey || metadata_bytes)` and produced `user_sig`.
+    /// Verify the cert chain end to end.
+    ///
+    /// - **Root** ([`Issuer::User`]): the user's key must have signed
+    ///   `(agent_pubkey || metadata_bytes)`.
+    /// - **Delegated** ([`Issuer::Agent`]): the named parent pubkey must match
+    ///   the embedded parent cert, that parent cert must itself verify
+    ///   (rooting at a user), the parent agent's key must have signed this
+    ///   cert, **and** this cert's caveats must be `⊑` the parent's
+    ///   ([`MeshError::CaveatAmplification`] otherwise). Attenuation is thus
+    ///   enforced structurally at every link — a forged or tampered chain that
+    ///   amplifies authority is rejected even if each signature is valid.
     pub fn verify(&self) -> Result<()> {
         let to_verify = sign_payload(&self.agent_pubkey, &self.metadata);
-        self.user_pubkey.verify(&to_verify, &self.user_sig.0)
+        match &self.issuer {
+            Issuer::User(user) => {
+                // The user is the root authority (`⊤`); any caveats the agent
+                // declares are `⊑ ⊤`, so there is nothing to attenuate-check.
+                user.verify(&to_verify, &self.issuer_sig.0)
+            }
+            Issuer::Agent { pubkey, parent } => {
+                if *pubkey != parent.agent_pubkey {
+                    return Err(MeshError::InvalidCertChain(
+                        "delegated cert issuer pubkey does not match its parent".into(),
+                    ));
+                }
+                parent.verify()?;
+                verify_detached(pubkey, &to_verify, &self.issuer_sig.0)?;
+                if !self.metadata.caveats.leq(&parent.metadata.caveats) {
+                    return Err(MeshError::CaveatAmplification);
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Fingerprint of the agent's public key.
@@ -158,10 +240,23 @@ impl CertChain {
         Fingerprint::of_bytes(&self.agent_pubkey)
     }
 
-    /// Fingerprint of the issuing user's public key.
+    /// Fingerprint of the **root user** this cert chains up to (walking through
+    /// any delegations). Unchanged for root certs.
     #[must_use]
     pub fn user_fingerprint(&self) -> Fingerprint {
-        self.user_pubkey.fingerprint()
+        match &self.issuer {
+            Issuer::User(user) => user.fingerprint(),
+            Issuer::Agent { parent, .. } => parent.user_fingerprint(),
+        }
+    }
+
+    /// The root user's public key this cert chains up to.
+    #[must_use]
+    pub fn root_user_pubkey(&self) -> UserPublic {
+        match &self.issuer {
+            Issuer::User(user) => user.clone(),
+            Issuer::Agent { parent, .. } => parent.root_user_pubkey(),
+        }
     }
 }
 
@@ -199,6 +294,14 @@ fn sign_payload(agent_pubkey: &[u8; 32], metadata: &AgentMetadata) -> Vec<u8> {
     out
 }
 
+/// Verify an ed25519 signature from a raw 32-byte public key (a parent
+/// agent's key, which — unlike a [`UserPublic`] — arrives as bare bytes).
+fn verify_detached(pubkey: &[u8; 32], msg: &[u8], sig: &Signature) -> Result<()> {
+    let vk = VerifyingKey::from_bytes(pubkey).map_err(|_| MeshError::BadSignature)?;
+    vk.verify_strict(msg, sig)
+        .map_err(|_| MeshError::BadSignature)
+}
+
 impl MeshError {
     /// Helper used in tests to assert cert-chain failures uniformly.
     #[cfg(test)]
@@ -226,7 +329,7 @@ mod tests {
     fn issue_agent_key_signed_by_user() {
         let user = UserKey::generate();
         let agent = AgentKey::issue(&user, fixture_metadata("worker"));
-        assert_eq!(agent.cert().user_pubkey, user.public());
+        assert_eq!(agent.cert().root_user_pubkey(), user.public());
         assert_eq!(agent.cert().agent_pubkey, agent.public_bytes());
     }
 
@@ -312,7 +415,7 @@ mod tests {
         let other = UserKey::generate();
         let agent = AgentKey::issue(&user, fixture_metadata("worker"));
         let mut cert = agent.cert().clone();
-        cert.user_pubkey = other.public();
+        cert.issuer = Issuer::User(other.public());
         assert!(cert.verify().unwrap_err().is_bad_signature());
     }
 
@@ -402,5 +505,121 @@ mod tests {
         let json = serde_json::to_string(cert).unwrap();
         let parsed: CertChain = serde_json::from_str(&json).unwrap();
         parsed.verify().unwrap();
+    }
+
+    // ── Delegation + attenuation enforcement (#35 phase 1c) ─────────────────
+
+    /// Metadata whose only restriction is the given exec allow-list.
+    fn meta_exec(role: &str, cmds: &[&str]) -> AgentMetadata {
+        AgentMetadata {
+            caveats: Caveats {
+                exec: crate::Scope::only(cmds.iter().map(|s| s.to_string())),
+                ..Caveats::top()
+            },
+            ..fixture_metadata(role)
+        }
+    }
+
+    #[test]
+    fn delegate_accepts_attenuation_and_roots_at_user() {
+        let user = UserKey::generate();
+        let parent = AgentKey::issue(&user, meta_exec("parent", &["git", "cargo"]));
+        // child exec {git} ⊑ parent {git, cargo}
+        let child = parent
+            .delegate(meta_exec("child", &["git"]))
+            .expect("attenuating delegation succeeds");
+        child.cert().verify().expect("delegated cert verifies");
+        assert_eq!(child.cert().user_fingerprint(), user.fingerprint());
+        assert_eq!(child.cert().root_user_pubkey(), user.public());
+    }
+
+    #[test]
+    fn delegate_rejects_amplification() {
+        let user = UserKey::generate();
+        let parent = AgentKey::issue(&user, meta_exec("parent", &["git"]));
+        // child wants ⊤ exec — strictly more than the parent's {git}.
+        let child = AgentMetadata {
+            caveats: Caveats::top(),
+            ..fixture_metadata("child")
+        };
+        assert!(matches!(
+            parent.delegate(child),
+            Err(MeshError::CaveatAmplification)
+        ));
+    }
+
+    #[test]
+    fn multi_level_delegation_attenuates_each_link() {
+        let user = UserKey::generate();
+        let a = AgentKey::issue(&user, meta_exec("a", &["git", "cargo"]));
+        let b = a.delegate(meta_exec("b", &["git"])).expect("B ⊑ A");
+        b.cert().verify().expect("B verifies through the chain");
+        assert_eq!(b.cert().user_fingerprint(), user.fingerprint());
+        // B cannot grant `rm`, which it never held.
+        assert!(matches!(
+            b.delegate(meta_exec("c", &["git", "rm"])),
+            Err(MeshError::CaveatAmplification)
+        ));
+    }
+
+    #[test]
+    fn delegated_cert_serde_roundtrips() {
+        let user = UserKey::generate();
+        let parent = AgentKey::issue(&user, meta_exec("parent", &["git"]));
+        let child = parent.delegate(meta_exec("child", &["git"])).unwrap();
+        let json = serde_json::to_string(child.cert()).unwrap();
+        let parsed: CertChain = serde_json::from_str(&json).unwrap();
+        assert_eq!(&parsed, child.cert());
+        parsed
+            .verify()
+            .expect("roundtripped delegated cert verifies");
+    }
+
+    #[test]
+    fn forged_amplifying_chain_fails_verify() {
+        // A compromised parent that signs a child granting MORE than it holds
+        // must still be rejected at verify time: attenuation is structural,
+        // not merely a mint-time courtesy in `delegate`.
+        let user = UserKey::generate();
+        let parent = AgentKey::issue(&user, meta_exec("parent", &["git"]));
+
+        // Hand-build a child with ⊤ caveats, signed correctly by the parent's
+        // key — i.e. bypassing `delegate`'s refusal.
+        let mut csprng = OsRng;
+        let child_signing = SigningKey::generate(&mut csprng);
+        let child_pubkey: [u8; 32] = *child_signing.verifying_key().as_bytes();
+        let child_meta = AgentMetadata {
+            caveats: Caveats::top(),
+            ..fixture_metadata("child")
+        };
+        let to_sign = sign_payload(&child_pubkey, &child_meta);
+        let sig = parent.sign(&to_sign); // a *valid* signature by the parent
+        let forged = CertChain {
+            agent_pubkey: child_pubkey,
+            metadata: child_meta,
+            issuer: Issuer::Agent {
+                pubkey: parent.public_bytes(),
+                parent: Box::new(parent.cert().clone()),
+            },
+            issuer_sig: SerdeSig(sig),
+        };
+        assert!(matches!(
+            forged.verify(),
+            Err(MeshError::CaveatAmplification)
+        ));
+    }
+
+    #[test]
+    fn delegated_issuer_pubkey_must_match_parent() {
+        // The issuer pubkey naming a different key than the embedded parent
+        // cert is a structural inconsistency and must be rejected.
+        let user = UserKey::generate();
+        let parent = AgentKey::issue(&user, meta_exec("parent", &["git"]));
+        let child = parent.delegate(meta_exec("child", &["git"])).unwrap();
+        let mut cert = child.cert().clone();
+        if let Issuer::Agent { pubkey, .. } = &mut cert.issuer {
+            pubkey[0] ^= 0xff;
+        }
+        assert!(matches!(cert.verify(), Err(MeshError::InvalidCertChain(_))));
     }
 }
