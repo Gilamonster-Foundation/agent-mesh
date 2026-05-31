@@ -74,7 +74,7 @@ pub async fn recv_envelope(recv: &mut RecvStream) -> Result<SignedEnvelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_mesh_protocol::{AgentKey, AgentMetadata, Fingerprint, Recipient, UserKey};
+    use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, Fingerprint, Recipient, UserKey};
 
     fn fixture_envelope() -> SignedEnvelope {
         let user = UserKey::generate();
@@ -86,6 +86,7 @@ mod tests {
                 capabilities: vec!["test".into()],
                 issued_at: "2026-05-28T00:00:00Z".into(),
                 expires_at: None,
+                caveats: Caveats::top(),
             },
         );
         SignedEnvelope::new(

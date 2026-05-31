@@ -205,7 +205,7 @@ async fn read_frame_raw(recv: &mut RecvStream) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_mesh_protocol::{AgentKey, AgentMetadata, UserKey};
+    use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, UserKey};
 
     fn fixture_cert(user: &UserKey, role: &str) -> CertChain {
         AgentKey::issue(
@@ -216,6 +216,7 @@ mod tests {
                 capabilities: vec!["test".into()],
                 issued_at: "2026-05-28T00:00:00Z".into(),
                 expires_at: None,
+                caveats: Caveats::top(),
             },
         )
         .cert()

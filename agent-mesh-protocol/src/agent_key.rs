@@ -6,6 +6,7 @@
 //! signed off on this agent's identity and metadata. Peers verify the
 //! cert chain once on first contact and cache the agent's public key.
 
+use crate::caveats::Caveats;
 use crate::fingerprint::Fingerprint;
 use crate::user_key::{UserKey, UserPublic};
 use crate::{MeshError, Result};
@@ -121,6 +122,17 @@ pub struct AgentMetadata {
     /// Optional expiry, RFC 3339. `None` means the cert has no
     /// declared expiry; consumers may still impose their own.
     pub expires_at: Option<String>,
+    /// The agent's attenuated authority — the capability set it was minted
+    /// with. Part of the signed payload, so it cannot be tampered with
+    /// without invalidating the cert: a verifier can read these caveats and
+    /// trust them. Defaults to [`Caveats::top`] (unrestricted), which is the
+    /// back-compatible "no caveats declared" authority.
+    ///
+    /// Enforcing `child ⊑ parent` across a delegation chain is the next step
+    /// (see [`crate::caveats`] and issue #35); this field is the signed
+    /// substrate that step builds on.
+    #[serde(default)]
+    pub caveats: Caveats,
 }
 
 /// The proof that this agent serves a specific user.
@@ -206,6 +218,7 @@ mod tests {
             capabilities: vec!["test".to_string()],
             issued_at: "2026-05-28T12:00:00Z".to_string(),
             expires_at: None,
+            caveats: Caveats::top(),
         }
     }
 
@@ -231,6 +244,57 @@ mod tests {
         let mut cert = agent.cert().clone();
         cert.metadata.role = "evil".to_string();
         assert!(cert.verify().unwrap_err().is_bad_signature());
+    }
+
+    /// A fixture with no explicit caveats is unrestricted (`⊤`).
+    #[test]
+    fn fixture_caveats_default_to_top() {
+        assert_eq!(fixture_metadata("worker").caveats, Caveats::top());
+    }
+
+    /// Bounded caveats are part of the signed payload: they survive a serde
+    /// round-trip and the cert still verifies.
+    #[test]
+    fn bounded_caveats_roundtrip_and_verify() {
+        let mut meta = fixture_metadata("worker");
+        meta.caveats = Caveats {
+            exec: crate::Scope::only(["git".to_string()]),
+            max_calls: crate::CountBound::AtMost(8),
+            ..Caveats::top()
+        };
+        let user = UserKey::generate();
+        let agent = AgentKey::issue(&user, meta.clone());
+        agent.cert().verify().expect("fresh cert verifies");
+
+        let json = serde_json::to_string(agent.cert()).unwrap();
+        let parsed: CertChain = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.metadata.caveats, meta.caveats);
+        parsed.verify().expect("roundtripped cert verifies");
+    }
+
+    /// Widening an agent's caveats after issue must invalidate the cert —
+    /// proof the caveats are signed, so a verifier can trust them.
+    #[test]
+    fn tampered_caveats_fails_verify() {
+        let mut meta = fixture_metadata("worker");
+        meta.caveats = Caveats {
+            exec: crate::Scope::only(["git".to_string()]),
+            ..Caveats::top()
+        };
+        let user = UserKey::generate();
+        let agent = AgentKey::issue(&user, meta);
+        let mut cert = agent.cert().clone();
+        cert.metadata.caveats = Caveats::top(); // amplify post-issue
+        assert!(cert.verify().unwrap_err().is_bad_signature());
+    }
+
+    /// Back-compat: metadata serialized without a `caveats` field (older wire
+    /// format) deserializes with `⊤` caveats via `#[serde(default)]`.
+    #[test]
+    fn absent_caveats_default_to_top() {
+        let json = r#"{"role":"w","host":"h","capabilities":[],"issued_at":"2026-05-28T00:00:00Z","expires_at":null}"#;
+        let meta: AgentMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.caveats, Caveats::top());
     }
 
     #[test]

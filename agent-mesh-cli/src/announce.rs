@@ -7,7 +7,7 @@
 
 use crate::util;
 use agent_mesh_discovery::{AnnounceConfig, Announcer};
-use agent_mesh_protocol::{AgentKey, AgentMetadata, UserKey};
+use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, UserKey};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
@@ -36,6 +36,7 @@ pub async fn run(
             capabilities: capabilities.clone(),
             issued_at: util::now_rfc3339(),
             expires_at: None,
+            caveats: Caveats::top(),
         },
     );
 

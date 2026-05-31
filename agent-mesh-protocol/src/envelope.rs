@@ -151,6 +151,7 @@ mod tests {
                 capabilities: vec!["test".to_string()],
                 issued_at: "2026-05-28T12:00:00Z".to_string(),
                 expires_at: None,
+                caveats: crate::Caveats::top(),
             },
         );
         (user, agent)
