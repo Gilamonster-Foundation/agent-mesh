@@ -30,6 +30,14 @@ pub enum MeshError {
     #[error("invalid cert chain: {0}")]
     InvalidCertChain(String),
 
+    /// A delegated agent's caveats are not `⊑` its parent's — delegation is
+    /// attenuation-only, so a child may never grant more authority than the
+    /// parent it chains to.
+    #[error(
+        "caveat amplification: a delegated agent may not grant more authority than its parent"
+    )]
+    CaveatAmplification,
+
     /// A credential or envelope was rejected because it claims an
     /// expired validity window.
     #[error("expired: {0}")]
