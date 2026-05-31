@@ -12,10 +12,11 @@ for end-users; everything here is plumbing to make that CLI honest.
 
 ## Versioning
 
-This workspace uses **date-based versioning**: `0.{month}.{YYYYMMDD}`.
-All workspace members share the same version, pinned via
-`workspace.package.version`. Bump it in the same PR that ships the
-change.
+This workspace uses **semver** (`0.MINOR.PATCH`). The first crates.io
+release is **`0.5.1`**; the earlier pre-publish date-based scheme
+(`0.{month}.{YYYYMMDD}`) is retired. All workspace members share one
+version via `workspace.package.version` and publish in lock-step — bump
+it in the release PR.
 
 ## Build & test gates
 
