@@ -19,6 +19,7 @@
 #![doc(html_root_url = "https://docs.rs/agent-mesh-protocol")]
 
 pub mod agent_key;
+pub mod caveats;
 pub mod envelope;
 pub mod error;
 pub mod fingerprint;
@@ -29,6 +30,7 @@ pub mod user_key;
 pub mod pyo3_module;
 
 pub use agent_key::{AgentKey, AgentMetadata, CertChain, SerdeSig};
+pub use caveats::{Caveats, CountBound, Scope};
 pub use envelope::{Recipient, SignedEnvelope};
 pub use error::{MeshError, Result};
 pub use fingerprint::Fingerprint;
