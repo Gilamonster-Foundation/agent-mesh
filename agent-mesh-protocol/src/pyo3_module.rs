@@ -239,6 +239,7 @@ impl PyAgentMetadata {
                 capabilities,
                 issued_at,
                 expires_at,
+                caveats: crate::Caveats::top(),
             },
         }
     }

@@ -19,7 +19,7 @@ use std::str::FromStr;
 
 use crate::util;
 use agent_mesh_protocol::{
-    AgentKey, AgentMetadata, Fingerprint, Recipient, SignedEnvelope, UserKey,
+    AgentKey, AgentMetadata, Caveats, Fingerprint, Recipient, SignedEnvelope, UserKey,
 };
 use agent_mesh_transport::{
     do_handshake, identity::agent_pubkey_to_iroh, send_envelope, Endpoint, PeerResolver,
@@ -48,6 +48,7 @@ pub async fn run(home: PathBuf, peer_fp: String, payload: String, timeout: Strin
             capabilities: vec![],
             issued_at: util::now_rfc3339(),
             expires_at: None,
+            caveats: Caveats::top(),
         },
     );
 

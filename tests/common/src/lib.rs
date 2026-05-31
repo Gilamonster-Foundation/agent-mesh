@@ -4,7 +4,7 @@
 //! here. Today that's a temp-dir factory and a deterministic
 //! `AgentMetadata` fixture.
 
-use agent_mesh_protocol::{AgentKey, AgentMetadata, UserKey};
+use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, UserKey};
 
 /// Spawn a temporary directory bounded to the caller's scope.
 ///
@@ -28,6 +28,7 @@ pub fn issue_test_agent(user: &UserKey, role: &str) -> AgentKey {
             capabilities: vec!["test".to_string()],
             issued_at: "2026-05-28T00:00:00Z".to_string(),
             expires_at: None,
+            caveats: Caveats::top(),
         },
     )
 }

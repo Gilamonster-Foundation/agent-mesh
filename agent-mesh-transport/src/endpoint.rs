@@ -126,7 +126,7 @@ impl Endpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_mesh_protocol::{AgentMetadata, UserKey};
+    use agent_mesh_protocol::{AgentMetadata, Caveats, UserKey};
 
     fn fixture_agent(role: &str) -> AgentKey {
         let user = UserKey::generate();
@@ -138,6 +138,7 @@ mod tests {
                 capabilities: vec!["test".into()],
                 issued_at: "2026-05-28T00:00:00Z".into(),
                 expires_at: None,
+                caveats: Caveats::top(),
             },
         )
     }

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use crate::util;
 use agent_mesh_discovery::{AnnounceConfig, Announcer};
-use agent_mesh_protocol::{AgentKey, AgentMetadata, CertChain, UserKey};
+use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, CertChain, UserKey};
 use agent_mesh_transport::{do_handshake, iroh_reexports::Incoming, recv_envelope, Endpoint};
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -62,6 +62,7 @@ pub async fn run(home: PathBuf, duration: Option<String>) -> Result<()> {
             capabilities: vec![],
             issued_at: util::now_rfc3339(),
             expires_at: None,
+            caveats: Caveats::top(),
         },
     );
     let agent_fp = agent.fingerprint();

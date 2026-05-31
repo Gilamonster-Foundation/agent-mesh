@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use agent_mesh_protocol::{
-    AgentKey, AgentMetadata, Fingerprint, Recipient, SignedEnvelope, UserKey,
+    AgentKey, AgentMetadata, Caveats, Fingerprint, Recipient, SignedEnvelope, UserKey,
 };
 use agent_mesh_transport::{
     do_handshake, identity::agent_pubkey_to_iroh, recv_envelope, send_envelope, Endpoint,
@@ -25,6 +25,7 @@ fn agent_for(user: &UserKey, role: &str) -> AgentKey {
             capabilities: vec!["test".into()],
             issued_at: "2026-05-28T00:00:00Z".into(),
             expires_at: None,
+            caveats: Caveats::top(),
         },
     )
 }
