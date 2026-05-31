@@ -13,7 +13,7 @@ for end-users; everything here is plumbing to make that CLI honest.
 ## Versioning
 
 This workspace uses **semver** (`0.MINOR.PATCH`). The first crates.io
-release is **`0.5.1`**; the earlier pre-publish date-based scheme
+release is **`0.1.0`**; the earlier pre-publish date-based scheme
 (`0.{month}.{YYYYMMDD}`) is retired. All workspace members share one
 version via `workspace.package.version` and publish in lock-step — bump
 it in the release PR.
