@@ -118,6 +118,107 @@ def test_agent_metadata_attrs() -> None:
     assert meta.expires_at == "2027-01-01T00:00:00Z"
 
 
+def test_caveats_top_is_unrestricted() -> None:
+    top = core.Caveats.top()
+    # Every axis on ⊤ is "unrestricted", which we represent as None.
+    assert top.fs_read is None
+    assert top.fs_write is None
+    assert top.exec is None
+    assert top.net is None
+    assert top.valid_for_generation is None
+    assert top.max_calls is None
+
+
+def test_caveats_construct_restricted() -> None:
+    c = core.Caveats(
+        fs_read=["/repo"],
+        fs_write=[],
+        exec=["git"],
+        net=[],
+        max_calls=10,
+        valid_for_generation=[7],
+    )
+    assert c.fs_read == ["/repo"]
+    assert c.fs_write == []  # bounded-to-nothing, not unrestricted
+    assert c.exec == ["git"]
+    assert c.net == []
+    assert c.max_calls == 10
+    assert c.valid_for_generation == [7]
+
+
+def test_caveats_leq_shows_attenuation() -> None:
+    restricted = core.Caveats(
+        fs_read=["/repo"],
+        exec=["git"],
+        max_calls=10,
+    )
+    top = core.Caveats.top()
+    # restricted ⊑ top, but ⊤ is NOT ⊑ restricted (no escalation upward).
+    assert restricted.leq(top)
+    assert not top.leq(restricted)
+    # reflexive
+    assert restricted.leq(restricted)
+
+
+def test_caveats_meet_never_amplifies() -> None:
+    a = core.Caveats(fs_read=["/repo", "/tmp"], max_calls=10)
+    b = core.Caveats(fs_read=["/repo"], max_calls=4)
+    m = a.meet(b)
+    # meet ⊑ both operands — composing authority can only narrow it.
+    assert m.leq(a)
+    assert m.leq(b)
+    # intersection of paths, tighter call bound.
+    assert m.fs_read == ["/repo"]
+    assert m.max_calls == 4
+    # commutative
+    assert m == b.meet(a)
+
+
+def test_caveats_to_json_from_json_roundtrip() -> None:
+    c = core.Caveats(
+        fs_read=["/repo"],
+        exec=["git", "cargo"],
+        max_calls=3,
+        valid_for_generation=[42],
+    )
+    blob = c.to_json()  # a plain dict
+    assert isinstance(blob, dict)
+    back = core.Caveats.from_json(blob)
+    assert back == c
+    # A JSON-encoded string is accepted too.
+    import json
+
+    back2 = core.Caveats.from_json(json.dumps(blob))
+    assert back2 == c
+
+
+def test_agent_metadata_caveats_roundtrip() -> None:
+    restricted = core.Caveats(
+        fs_read=["/repo"],
+        exec=["git"],
+        max_calls=5,
+    )
+    meta = core.AgentMetadata(
+        role="worker",
+        host="host",
+        capabilities=["build"],
+        issued_at="2026-05-29T00:00:00Z",
+        caveats=restricted,
+    )
+    assert meta.caveats == restricted
+
+
+def test_agent_metadata_caveats_default_top() -> None:
+    # No caveats declared → unrestricted (⊤), the back-compatible default.
+    meta = core.AgentMetadata(
+        role="worker",
+        host="host",
+        capabilities=["build"],
+        issued_at="2026-05-29T00:00:00Z",
+    )
+    assert meta.caveats == core.Caveats.top()
+
+
 def test_mesh_error_is_exported() -> None:
     assert hasattr(core, "MeshError")
     # Failing verify should raise our exception class.

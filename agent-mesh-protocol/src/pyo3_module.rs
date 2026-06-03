@@ -11,6 +11,7 @@
 
 use crate::{
     agent_key::{AgentKey, AgentMetadata, CertChain},
+    caveats::{Caveats, CountBound, Scope},
     envelope::{Recipient, SignedEnvelope},
     fingerprint::Fingerprint,
     github_binding::{ssh_pubkey_ed25519_bytes, GitHubBinding},
@@ -207,6 +208,179 @@ impl PyUserKey {
     }
 }
 
+// ---- Caveats ----
+
+/// `None` → `Scope::All` (unrestricted ⊤); `Some(v)` → `Scope::only(v)`.
+fn scope_from_opt<T: Ord + Clone>(opt: Option<Vec<T>>) -> Scope<T> {
+    match opt {
+        None => Scope::All,
+        Some(v) => Scope::only(v),
+    }
+}
+
+/// `Scope::All` → `None`; `Scope::Only(set)` → `Some(sorted vec)`. The set is
+/// a `BTreeSet` so iteration is already in sorted order — the Python side gets
+/// a deterministic list.
+fn opt_from_scope<T: Ord + Clone>(scope: &Scope<T>) -> Option<Vec<T>> {
+    match scope {
+        Scope::All => None,
+        Scope::Only(set) => Some(set.iter().cloned().collect()),
+    }
+}
+
+/// One element of the object-capability authority lattice — the attenuated
+/// capability set an agent holds.
+///
+/// Each axis is *Pythonic*: `None` means unrestricted (`⊤`) and a list means
+/// "exactly these items". `max_calls` is `None` for unlimited or an `int` for
+/// an upper bound. `meet` composes authority along a delegation chain and can
+/// never amplify; `leq` is the attenuation check (`child ⊑ parent`).
+#[pyclass(
+    name = "Caveats",
+    module = "agent_mesh._agent_mesh.core",
+    frozen,
+    from_py_object
+)]
+#[derive(Clone)]
+pub struct PyCaveats {
+    pub inner: Caveats,
+}
+
+#[pymethods]
+impl PyCaveats {
+    /// Build a caveat set. Omit an axis (or pass `None`) to leave it
+    /// unrestricted; pass a list to bound it to exactly those items.
+    #[new]
+    #[pyo3(signature = (
+        fs_read = None,
+        fs_write = None,
+        exec = None,
+        net = None,
+        max_calls = None,
+        valid_for_generation = None,
+    ))]
+    fn new(
+        fs_read: Option<Vec<String>>,
+        fs_write: Option<Vec<String>>,
+        exec: Option<Vec<String>>,
+        net: Option<Vec<String>>,
+        max_calls: Option<u64>,
+        valid_for_generation: Option<Vec<u64>>,
+    ) -> Self {
+        Self {
+            inner: Caveats {
+                fs_read: scope_from_opt(fs_read),
+                fs_write: scope_from_opt(fs_write),
+                exec: scope_from_opt(exec),
+                net: scope_from_opt(net),
+                max_calls: match max_calls {
+                    None => CountBound::Unlimited,
+                    Some(n) => CountBound::AtMost(n),
+                },
+                valid_for_generation: scope_from_opt(valid_for_generation),
+            },
+        }
+    }
+
+    /// `⊤` — unrestricted authority on every axis (the user's full authority,
+    /// equivalent to "no caveats declared").
+    #[classmethod]
+    fn top(_cls: &Bound<'_, PyType>) -> Self {
+        Self {
+            inner: Caveats::top(),
+        }
+    }
+
+    /// Filesystem paths the agent may read (`None` → unrestricted).
+    #[getter]
+    fn fs_read(&self) -> Option<Vec<String>> {
+        opt_from_scope(&self.inner.fs_read)
+    }
+
+    /// Filesystem paths the agent may write (`None` → unrestricted).
+    #[getter]
+    fn fs_write(&self) -> Option<Vec<String>> {
+        opt_from_scope(&self.inner.fs_write)
+    }
+
+    /// Commands the agent may execute (`None` → unrestricted).
+    #[getter]
+    fn exec(&self) -> Option<Vec<String>> {
+        opt_from_scope(&self.inner.exec)
+    }
+
+    /// Network hosts the agent may reach (`None` → unrestricted).
+    #[getter]
+    fn net(&self) -> Option<Vec<String>> {
+        opt_from_scope(&self.inner.net)
+    }
+
+    /// Generation counters this authority is valid for (`None` →
+    /// unrestricted). Causal, not wall-clock.
+    #[getter]
+    fn valid_for_generation(&self) -> Option<Vec<u64>> {
+        opt_from_scope(&self.inner.valid_for_generation)
+    }
+
+    /// Upper bound on tool calls (`None` → unlimited).
+    #[getter]
+    fn max_calls(&self) -> Option<u64> {
+        match self.inner.max_calls {
+            CountBound::Unlimited => None,
+            CountBound::AtMost(n) => Some(n),
+        }
+    }
+
+    /// `self ⊑ other` — does `self` grant no more authority than `other` on
+    /// every axis? The attenuation check (`child ⊑ parent`).
+    fn leq(&self, other: &Self) -> bool {
+        self.inner.leq(&other.inner)
+    }
+
+    /// `self ⊓ other` — the greatest lower bound, axis by axis. How authority
+    /// composes along a delegation chain; never amplifies.
+    fn meet(&self, other: &Self) -> Self {
+        Self {
+            inner: self.inner.meet(&other.inner),
+        }
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Caveats({:?})", self.inner)
+    }
+
+    /// Serialize to a Python object (dict) suitable for `json.dumps`. The
+    /// layout matches the `serde_json` representation of `Caveats` — that's
+    /// how caveats travel on the wire and into a signed cert.
+    fn to_json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let s = serde_json::to_string(&self.inner)
+            .map_err(|e| PyMeshError::new_err(format!("encode caveats: {e}")))?;
+        let json_mod = py.import("json")?;
+        json_mod.getattr("loads")?.call1((PyString::new(py, &s),))
+    }
+
+    /// Parse caveats back from JSON. Accepts either a dict (as produced by
+    /// :meth:`to_json`) or a JSON-encoded string.
+    #[classmethod]
+    fn from_json(_cls: &Bound<'_, PyType>, data: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let py = data.py();
+        let json_str: String = if let Ok(s) = data.cast::<PyString>() {
+            s.to_str()?.to_string()
+        } else {
+            let json_mod = py.import("json")?;
+            let dumped = json_mod.getattr("dumps")?.call1((data,))?;
+            dumped.extract::<String>()?
+        };
+        let inner: Caveats = serde_json::from_str(&json_str)
+            .map_err(|e| PyMeshError::new_err(format!("decode caveats: {e}")))?;
+        Ok(Self { inner })
+    }
+}
+
 // ---- AgentMetadata ----
 
 /// Metadata claimed by an agent at certificate-issue time.
@@ -224,13 +398,14 @@ pub struct PyAgentMetadata {
 #[pymethods]
 impl PyAgentMetadata {
     #[new]
-    #[pyo3(signature = (role, host, capabilities, issued_at, expires_at = None))]
+    #[pyo3(signature = (role, host, capabilities, issued_at, expires_at = None, caveats = None))]
     fn new(
         role: String,
         host: String,
         capabilities: Vec<String>,
         issued_at: String,
         expires_at: Option<String>,
+        caveats: Option<PyCaveats>,
     ) -> Self {
         Self {
             inner: AgentMetadata {
@@ -239,7 +414,7 @@ impl PyAgentMetadata {
                 capabilities,
                 issued_at,
                 expires_at,
-                caveats: crate::Caveats::top(),
+                caveats: caveats.map_or_else(Caveats::top, |c| c.inner),
             },
         }
     }
@@ -267,6 +442,15 @@ impl PyAgentMetadata {
     #[getter]
     fn expires_at(&self) -> Option<String> {
         self.inner.expires_at.clone()
+    }
+
+    /// The caveat set this metadata was minted with. Defaults to `⊤`
+    /// (unrestricted) when no caveats were declared at construction.
+    #[getter]
+    fn caveats(&self) -> PyCaveats {
+        PyCaveats {
+            inner: self.inner.caveats.clone(),
+        }
     }
 }
 
@@ -597,6 +781,7 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFingerprint>()?;
     m.add_class::<PyUserKey>()?;
     m.add_class::<PyUserPublic>()?;
+    m.add_class::<PyCaveats>()?;
     m.add_class::<PyAgentMetadata>()?;
     m.add_class::<PyAgentKey>()?;
     m.add_class::<PyCertChain>()?;
