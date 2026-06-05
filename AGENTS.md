@@ -79,3 +79,19 @@ other two in the same PR. Each file carries a `PIPELINE PARITY` or
   blocks `*.key` and `*.sig`; don't fight it.
 - **No secrets in code or tests.** Test SSH keys are generated
   in-memory in the test body, not shipped as fixtures.
+
+## Crate README Rule
+
+Every crate in this workspace gets its own `README.md` — crates.io renders
+it as the crate's front page, and `cargo package` fails if a declared
+`readme` file is missing.
+
+1. **Existence:** a new crate lands with a `README.md` in its crate root
+   (short: what it is, what it does, license).
+2. **Freshness:** every version bump of a crate includes a review of that
+   crate's README. Update it to match the released behavior — new features,
+   changed CLI flags, removed APIs. If a bump PR leaves the README
+   untouched, the PR body must say why.
+
+Treat a version bump without a README review as an incomplete change, the
+same way a bug fix without a regression test is incomplete.
