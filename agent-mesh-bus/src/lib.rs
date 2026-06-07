@@ -25,7 +25,7 @@ pub mod topic;
 #[cfg(feature = "pyo3")]
 pub mod pyo3_module;
 
-pub use bus::Bus;
+pub use bus::{Bus, BusOptions};
 pub use error::{BusError, Result};
 pub use inbox::{BusMessage, Inbox, OutgoingReply};
 pub use reply::CorrelationId;

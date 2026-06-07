@@ -19,6 +19,14 @@
 //! to clean up when a peer disappears, and the inbox routes replies
 //! by correlation id (not by connection), so a reply arriving on a
 //! freshly-dialed reverse connection works exactly the same.
+//!
+//! Replies prefer **dial-back over mDNS**: the request connection's
+//! TLS-authenticated remote key doubles as the sender's agent pubkey,
+//! so the responder dials the observed source address directly and
+//! only falls back to mDNS resolution if that dial fails. This keeps
+//! replies working when the asker's announce hasn't propagated yet
+//! (cold-start race) or when the asker never announces at all (a
+//! quiet [`BusOptions`] bind).
 
 use crate::inbox::{BusMessage, Inbox, OutgoingReply};
 use crate::reply::CorrelationId;
@@ -28,7 +36,7 @@ use agent_mesh_protocol::{AgentKey, CertChain, Fingerprint, Recipient, SignedEnv
 use agent_mesh_transport::{
     do_handshake,
     identity::agent_pubkey_to_iroh,
-    iroh_reexports::{Connection, Incoming},
+    iroh_reexports::{Connection, Incoming, IncomingAddr, PublicKey},
     recv_envelope, send_envelope, Endpoint, PeerResolver, ResolverHandle, TransportError,
 };
 use std::future::Future;
@@ -50,6 +58,22 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// from pinning a stream forever.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Options for [`Bus::bind_with`].
+#[derive(Debug, Clone)]
+pub struct BusOptions {
+    /// Announce this bus over mDNS so peers can resolve it by
+    /// fingerprint (the default). Quiet binds (`false`) are for
+    /// ephemeral clients that only dial out — peers can still reply
+    /// to them via dial-back on the connection the request arrived on.
+    pub announce: bool,
+}
+
+impl Default for BusOptions {
+    fn default() -> Self {
+        Self { announce: true }
+    }
+}
+
 /// The high-level message bus.
 ///
 /// One `Bus` per process — owns the bound QUIC endpoint, the mDNS
@@ -66,7 +90,8 @@ pub struct Bus {
     /// Keeps the mDNS browser thread alive for the life of the bus.
     _resolver_handle: ResolverHandle,
     /// Keeps the mDNS announcer alive (so peers can discover us).
-    _announcer: AnnouncerHandle,
+    /// `None` for a quiet bind ([`BusOptions::announce`] = false).
+    _announcer: Option<AnnouncerHandle>,
     accept_task: JoinHandle<()>,
 }
 
@@ -78,6 +103,16 @@ impl Bus {
     /// and the accept task is spawned — the bus is immediately ready
     /// to send and receive.
     pub async fn bind(user: &UserKey, agent: AgentKey, port: u16) -> Result<Self> {
+        Self::bind_with(user, agent, port, BusOptions::default()).await
+    }
+
+    /// Bind a bus with explicit [`BusOptions`]. See [`Self::bind`].
+    pub async fn bind_with(
+        user: &UserKey,
+        agent: AgentKey,
+        port: u16,
+        opts: BusOptions,
+    ) -> Result<Self> {
         let user_fp = user.fingerprint();
         let endpoint = Endpoint::bind(&agent, port).await?;
         let local_port = endpoint.port();
@@ -88,16 +123,24 @@ impl Bus {
         let agent = Arc::new(agent);
         let sequence = Arc::new(AtomicU64::new(1));
 
-        let announcer = Announcer::start(AnnounceConfig {
-            agent_fp: agent.fingerprint(),
-            agent_pubkey: Some(agent.public_bytes()),
-            user_fp,
-            capabilities: agent.cert().metadata.capabilities.clone(),
-            role: agent.cert().metadata.role.clone(),
-            host: agent.cert().metadata.host.clone(),
-            port: local_port,
-        })
-        .map_err(|e| BusError::Transport(TransportError::Iroh(format!("announce start: {e}"))))?;
+        let announcer = if opts.announce {
+            Some(
+                Announcer::start(AnnounceConfig {
+                    agent_fp: agent.fingerprint(),
+                    agent_pubkey: Some(agent.public_bytes()),
+                    user_fp,
+                    capabilities: agent.cert().metadata.capabilities.clone(),
+                    role: agent.cert().metadata.role.clone(),
+                    host: agent.cert().metadata.host.clone(),
+                    port: local_port,
+                })
+                .map_err(|e| {
+                    BusError::Transport(TransportError::Iroh(format!("announce start: {e}")))
+                })?,
+            )
+        } else {
+            None
+        };
 
         let accept_task = spawn_accept_loop(
             endpoint.clone(),
@@ -403,9 +446,23 @@ async fn handle_incoming(
     resolver: Arc<PeerResolver>,
     sequence: Arc<AtomicU64>,
 ) -> Result<()> {
+    // The UDP source the connection physically arrived from. QUIC uses
+    // one socket for both directions, so this is also where the peer
+    // can be dialed back.
+    let reverse_addr = match incoming.remote_addr() {
+        IncomingAddr::Ip(addr) => Some(addr),
+        // Relay/custom transports are not used in this mesh (the
+        // endpoint binds relay-free), but don't pretend otherwise.
+        _ => None,
+    };
     let conn = incoming
         .await
         .map_err(|e| BusError::Transport(TransportError::Iroh(format!("incoming: {e}"))))?;
+    // The TLS-authenticated key of whoever dialed us — for agents this
+    // IS the agent pubkey, so replies can verify it against the
+    // envelope sender's fingerprint and dial straight back.
+    let reverse: Option<(PublicKey, SocketAddr)> =
+        reverse_addr.map(|addr| (conn.remote_id(), addr));
     loop {
         let (mut send, mut recv) = match conn.accept_bi().await {
             Ok(streams) => streams,
@@ -454,7 +511,9 @@ async fn handle_incoming(
             let agent = agent.clone();
             let sequence = sequence.clone();
             tokio::spawn(async move {
-                if let Err(e) = ship_reply(endpoint, resolver, agent, sequence, reply).await {
+                if let Err(e) =
+                    ship_reply(endpoint, resolver, agent, sequence, reply, reverse).await
+                {
                     tracing::warn!(error = %e, "bus: reply ship failed");
                 }
             });
@@ -463,14 +522,21 @@ async fn handle_incoming(
 }
 
 /// Ship an [`OutgoingReply`] back to the peer it came from.
+///
+/// `reverse` is the dial-back route observed on the request connection
+/// (the peer's TLS-authenticated key + the UDP source address). When it
+/// matches the envelope sender it is preferred over mDNS resolution —
+/// the asker may not be announced yet (cold-start race) or may never
+/// announce (quiet bind).
 async fn ship_reply(
     endpoint: Arc<Endpoint>,
     resolver: Arc<PeerResolver>,
     agent: Arc<AgentKey>,
     sequence: Arc<AtomicU64>,
     reply: OutgoingReply,
+    reverse: Option<(PublicKey, SocketAddr)>,
 ) -> Result<()> {
-    let conn = dial_peer(&endpoint, &resolver, reply.peer_fp).await?;
+    let conn = dial_reply_peer(&endpoint, &resolver, reply.peer_fp, reverse).await?;
     let msg = BusMessage::Reply {
         correlation: reply.correlation.0,
         body: reply.body,
@@ -484,6 +550,41 @@ async fn ship_reply(
         msg,
     )
     .await
+}
+
+/// Dial the peer a reply is destined for: dial-back first, mDNS second.
+///
+/// The dial-back route is only taken when the connection's remote key
+/// hashes to the envelope sender's fingerprint (`agent_fp =
+/// blake3(agent_pubkey)`), so a reply can never be redirected to a
+/// connection peer that didn't sign the request. The subsequent cert
+/// handshake in `send_one` re-verifies the chain to the user trust
+/// root either way.
+async fn dial_reply_peer(
+    endpoint: &Endpoint,
+    resolver: &PeerResolver,
+    peer_fp: Fingerprint,
+    reverse: Option<(PublicKey, SocketAddr)>,
+) -> Result<Connection> {
+    if let Some((pubkey, addr)) = reverse {
+        if Fingerprint::of_bytes(pubkey.as_bytes()) == peer_fp {
+            match endpoint.dial(pubkey, [addr]).await {
+                Ok(conn) => return Ok(conn),
+                Err(e) => tracing::debug!(
+                    peer = %peer_fp.short(),
+                    %addr,
+                    error = %e,
+                    "bus: reply dial-back failed, falling back to mDNS"
+                ),
+            }
+        } else {
+            tracing::warn!(
+                peer = %peer_fp.short(),
+                "bus: connection key does not match envelope sender; ignoring dial-back route"
+            );
+        }
+    }
+    dial_peer(endpoint, resolver, peer_fp).await
 }
 
 #[cfg(test)]
