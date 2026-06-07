@@ -44,6 +44,6 @@ pub use stream::{recv_envelope, send_envelope, MAX_ENVELOPE_BYTES};
 /// a caller starts reaching into `iroh::*` directly the right answer
 /// is usually a new wrapper in this crate.
 pub mod iroh_reexports {
-    pub use iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
+    pub use iroh::endpoint::{Connection, Incoming, IncomingAddr, RecvStream, SendStream};
     pub use iroh::PublicKey;
 }
