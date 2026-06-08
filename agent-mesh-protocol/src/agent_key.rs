@@ -59,26 +59,57 @@ impl AgentKey {
     /// compromised agent therefore cannot mint a child with more authority
     /// than it holds.
     pub fn delegate(&self, metadata: AgentMetadata) -> Result<Self> {
-        if !metadata.caveats.leq(&self.cert.metadata.caveats) {
-            return Err(MeshError::CaveatAmplification);
-        }
         let mut csprng = OsRng;
         let signing = SigningKey::generate(&mut csprng);
         let sub_pubkey: [u8; 32] = *signing.verifying_key().as_bytes();
+        let cert = self.certify_pubkey(sub_pubkey, metadata)?;
+        Ok(Self { signing, cert })
+    }
 
-        let to_sign = sign_payload(&sub_pubkey, &metadata);
+    /// Certify an **externally-held** public key into a [`CertChain`] signed by
+    /// this agent — attenuation-only, *without* minting or holding the external
+    /// party's secret.
+    ///
+    /// This is the seam phone enrollment needs. A worker agent (itself
+    /// delegated from a [`UserKey`]) can vouch for a phone's keystore-resident
+    /// public key: it produces a sub-cert rooted at the same user, with caveats
+    /// `⊑` this agent's authority, and signed by this agent's key. The phone
+    /// never reveals its private key — it keeps its seed (or a non-exportable
+    /// keystore handle) and reconstructs its own [`AgentKey`] via
+    /// [`from_seed_and_cert`](Self::from_seed_and_cert), or signs through a
+    /// [`MeshSigner`](crate::MeshSigner) paired with this cert.
+    ///
+    /// Returns [`MeshError::CaveatAmplification`] if the requested caveats are
+    /// not `⊑` this agent's, exactly like [`delegate`](Self::delegate). The
+    /// only difference from `delegate` is *who holds the secret*: here, not us.
+    pub fn delegate_external(
+        &self,
+        external_verifying: VerifyingKey,
+        metadata: AgentMetadata,
+    ) -> Result<CertChain> {
+        let external_pubkey: [u8; 32] = *external_verifying.as_bytes();
+        self.certify_pubkey(external_pubkey, metadata)
+    }
+
+    /// Shared cert-minting body for [`delegate`](Self::delegate) and
+    /// [`delegate_external`](Self::delegate_external): attenuation-check, then
+    /// sign `(pubkey || metadata)` with this agent's key, embedding this
+    /// agent's cert as the parent so the chain roots at the same user.
+    fn certify_pubkey(&self, pubkey: [u8; 32], metadata: AgentMetadata) -> Result<CertChain> {
+        if !metadata.caveats.leq(&self.cert.metadata.caveats) {
+            return Err(MeshError::CaveatAmplification);
+        }
+        let to_sign = sign_payload(&pubkey, &metadata);
         let sig = self.signing.sign(&to_sign);
-
-        let cert = CertChain {
-            agent_pubkey: sub_pubkey,
+        Ok(CertChain {
+            agent_pubkey: pubkey,
             metadata,
             issuer: Issuer::Agent {
                 pubkey: self.cert.agent_pubkey,
                 parent: Box::new(self.cert.clone()),
             },
             issuer_sig: SerdeSig(sig),
-        };
-        Ok(Self { signing, cert })
+        })
     }
 
     /// Sign a message with the agent's sub-key.
@@ -134,6 +165,26 @@ impl AgentKey {
             return Err(MeshError::BadSignature);
         }
         Ok(Self { signing, cert })
+    }
+
+    /// The ed25519 verifying (public) half of this agent's key.
+    #[must_use]
+    pub fn verifying_key(&self) -> VerifyingKey {
+        self.signing.verifying_key()
+    }
+}
+
+/// `AgentKey` is the software (in-memory seed) [`MeshSigner`]: it signs with
+/// the seed it holds. This is today's behavior, surfaced through the trait so
+/// the envelope/transport layers can sign via `&dyn MeshSigner` and a future
+/// non-exportable keystore signer drops in at the same call sites.
+impl crate::signer::MeshSigner for AgentKey {
+    fn verifying_key(&self) -> VerifyingKey {
+        self.signing.verifying_key()
+    }
+
+    fn sign(&self, msg: &[u8]) -> Signature {
+        self.signing.sign(msg)
     }
 }
 
@@ -605,6 +656,108 @@ mod tests {
         };
         assert!(matches!(
             forged.verify(),
+            Err(MeshError::CaveatAmplification)
+        ));
+    }
+
+    // ── External-pubkey delegation (phone enrollment, PR #202 P1) ───────────
+
+    /// A worker certifies an EXTERNAL pubkey (the phone's) into a cert chain it
+    /// does NOT hold the secret for. The phone reconstructs its own `AgentKey`
+    /// from its OWN seed + the returned cert, signs an envelope, and that
+    /// envelope verifies and roots at the user — with caveats attenuated at
+    /// each link (phone ⊑ worker ⊑ user).
+    #[test]
+    fn delegate_external_certifies_phone_and_roots_at_user() {
+        use crate::envelope::{Recipient, SignedEnvelope};
+
+        let user = UserKey::generate();
+        let worker = AgentKey::issue(&user, meta_exec("worker", &["git", "cargo"]));
+
+        // The phone holds its OWN seed; the worker only ever sees the pubkey.
+        let phone_seed = [42u8; 32];
+        let phone_signing = SigningKey::from_bytes(&phone_seed);
+        let phone_vk = phone_signing.verifying_key();
+
+        // Worker vouches for the phone's pubkey, attenuating to {git}.
+        let phone_cert = worker
+            .delegate_external(phone_vk, meta_exec("phone", &["git"]))
+            .expect("external delegation attenuates");
+
+        // The cert names the phone's pubkey (NOT a freshly minted one).
+        assert_eq!(phone_cert.agent_pubkey, *phone_vk.as_bytes());
+        phone_cert.verify().expect("external cert verifies");
+        assert_eq!(phone_cert.root_user_pubkey(), user.public());
+        assert_eq!(phone_cert.user_fingerprint(), user.fingerprint());
+
+        // Phone reconstructs its AgentKey from its own seed + the cert.
+        let phone =
+            AgentKey::from_seed_and_cert(&phone_seed, phone_cert).expect("phone seed matches cert");
+
+        // Phone signs an envelope; it verifies end-to-end.
+        let env = SignedEnvelope::new(
+            &phone,
+            Recipient::Topic {
+                name: "drake/work".into(),
+            },
+            1,
+            b"from-the-phone".to_vec(),
+        );
+        env.verify().expect("phone envelope verifies");
+        assert_eq!(env.sender_user_fp(), user.fingerprint());
+
+        // Attenuation: phone {git} ⊑ worker {git,cargo} ⊑ user ⊤.
+        assert!(phone
+            .cert()
+            .metadata
+            .caveats
+            .leq(&worker.cert().metadata.caveats));
+    }
+
+    /// A cert built over one external pubkey must NOT validate a DIFFERENT
+    /// holder: pairing a mismatched seed with the cert is rejected, and a cert
+    /// whose `agent_pubkey` is swapped fails signature verification.
+    #[test]
+    fn delegate_external_rejects_wrong_pubkey() {
+        let user = UserKey::generate();
+        let worker = AgentKey::issue(&user, meta_exec("worker", &["git"]));
+
+        let phone_seed = [42u8; 32];
+        let phone_vk = SigningKey::from_bytes(&phone_seed).verifying_key();
+        let cert = worker
+            .delegate_external(phone_vk, meta_exec("phone", &["git"]))
+            .unwrap();
+
+        // A DIFFERENT seed cannot reconstruct an AgentKey from this cert.
+        let other_seed = [99u8; 32];
+        assert!(matches!(
+            AgentKey::from_seed_and_cert(&other_seed, cert.clone()),
+            Err(MeshError::BadSignature)
+        ));
+
+        // Swapping the certified pubkey breaks the issuer signature.
+        let mut tampered = cert;
+        tampered.agent_pubkey[0] ^= 0xff;
+        assert!(matches!(
+            tampered.verify(),
+            Err(MeshError::BadSignature) | Err(MeshError::CaveatAmplification)
+        ));
+    }
+
+    /// External delegation is attenuation-only: a phone that asks for MORE than
+    /// the worker holds is rejected, just like `delegate`.
+    #[test]
+    fn delegate_external_rejects_amplification() {
+        let user = UserKey::generate();
+        let worker = AgentKey::issue(&user, meta_exec("worker", &["git"]));
+        let phone_vk = SigningKey::from_bytes(&[42u8; 32]).verifying_key();
+        // Phone requests ⊤ exec — strictly more than worker's {git}.
+        let amplifying = AgentMetadata {
+            caveats: Caveats::top(),
+            ..fixture_metadata("phone")
+        };
+        assert!(matches!(
+            worker.delegate_external(phone_vk, amplifying),
             Err(MeshError::CaveatAmplification)
         ));
     }

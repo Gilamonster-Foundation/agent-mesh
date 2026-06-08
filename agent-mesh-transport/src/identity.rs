@@ -18,6 +18,21 @@ use iroh::{PublicKey, SecretKey};
 /// the matched halves of one ed25519 keypair, so the iroh endpoint
 /// bound with this key will advertise the same pubkey the mesh
 /// already trusts.
+///
+/// TODO(phone-keystore): this is the ONE remaining seam that still
+/// requires the raw seed. The protocol layer now signs envelopes
+/// through `agent_mesh_protocol::MeshSigner` (no seed needed), but
+/// binding an iroh QUIC endpoint requires an iroh `SecretKey` because
+/// iroh performs the TLS-level handshake signing *internally* and its
+/// `EndpointBuilder::secret_key` API takes an owned key, not an opaque
+/// signer. A non-exportable platform key (Android Keystore / iOS Secure
+/// Enclave) therefore cannot back an iroh endpoint today. Closing this
+/// requires either (a) an iroh API that accepts a `dyn Signer` for the
+/// endpoint key, or (b) a phone-side proxy endpoint holding an
+/// ephemeral transport key while the durable identity key (in the
+/// keystore) only ever signs envelopes via `MeshSigner`. Out of scope
+/// for this slice; the app-level handshake itself signs nothing — it
+/// only exchanges and verifies cert chains.
 #[must_use]
 pub fn to_iroh_secret(agent: &AgentKey) -> SecretKey {
     SecretKey::from_bytes(&agent.signing_key_bytes())
