@@ -6,6 +6,7 @@ members = [
     "agent-mesh-cli",
     "agent-mesh-discovery",
     "agent-mesh-py",
+    "agent-mesh-ratchet",
     "agent-mesh-transport",
     "tests/common",
 ]
@@ -36,6 +37,12 @@ rand = "0.8"
 hex = "0.4"
 base64 = "0.22"
 zeroize = { version = "1", features = ["zeroize_derive"] }
+
+# Double Ratchet / Olm session crypto (Matrix's audited libsignal-style
+# implementation). Used by `agent-mesh-ratchet` for 1:1 message-layer
+# forward secrecy + post-compromise security. We do NOT hand-roll ratchet
+# crypto. `libolm-compat` is enabled for legacy-pickle interop helpers.
+vodozemac = { version = "0.10", features = ["libolm-compat"] }
 
 # Async
 tokio = { version = "1", features = ["full"] }
@@ -74,6 +81,7 @@ futures = "0.3"
 agent-mesh-protocol = { path = "agent-mesh-protocol", version = "=0.6.2" }
 agent-mesh-bus = { path = "agent-mesh-bus", version = "=0.6.2" }
 agent-mesh-discovery = { path = "agent-mesh-discovery", version = "=0.6.2" }
+agent-mesh-ratchet = { path = "agent-mesh-ratchet", version = "=0.6.2" }
 agent-mesh-transport = { path = "agent-mesh-transport", version = "=0.6.2" }
 tests-common = { path = "tests/common" }
 

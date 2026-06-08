@@ -1,0 +1,25 @@
+[package]
+name = "agent-mesh-ratchet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Signal-style Double Ratchet (Olm) for 1:1 agent-mesh sessions, bound to the mesh ed25519 identity."
+
+[dependencies]
+agent-mesh-protocol.workspace = true
+vodozemac.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ed25519-dalek.workspace = true
+
+[dev-dependencies]
+# (none beyond the normal deps; `serde_json` is already a normal dependency
+# and is reused by the integration tests.)
+
+[lints]
+workspace = true
