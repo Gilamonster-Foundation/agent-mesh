@@ -6,6 +6,7 @@
 
 use crate::agent_key::{AgentKey, CertChain, SerdeSig};
 use crate::fingerprint::Fingerprint;
+use crate::signer::MeshSigner;
 use crate::{MeshError, Result};
 use ed25519_dalek::{Verifier, VerifyingKey};
 use rand::RngCore;
@@ -58,15 +59,43 @@ impl SignedEnvelope {
     /// don't manage it. The `sequence` is supplied by the caller —
     /// it's session-scoped state, not crate state.
     pub fn new(sender: &AgentKey, recipient: Recipient, sequence: u64, payload: Vec<u8>) -> Self {
+        // Thin wrapper over the signer seam: an `AgentKey` is a software
+        // `MeshSigner`, and its own cert is the provenance. Kept so existing
+        // callers (and all current tests) are unchanged.
+        Self::new_with_signer(sender, sender.cert().clone(), recipient, sequence, payload)
+    }
+
+    /// Build and sign a new envelope using an explicit [`MeshSigner`] and a
+    /// matching [`CertChain`].
+    ///
+    /// This is the seam that lets a non-exportable / platform key (a phone
+    /// keystore) sign an envelope **without** the raw seed: the `signer`
+    /// produces the signature, and the `cert_chain` carries the provenance
+    /// (issued via [`AgentKey::delegate_external`](crate::AgentKey::delegate_external)).
+    /// For the wire envelope to [`verify`](Self::verify), the signer's
+    /// [`verifying_key`](MeshSigner::verifying_key) must equal
+    /// `cert_chain.agent_pubkey` — verification checks the signature against the
+    /// pubkey *in the cert*, so a mismatched signer simply yields a
+    /// [`MeshError::BadSignature`] at verify time.
+    ///
+    /// [`new`](Self::new) is a thin wrapper over this, passing the `AgentKey`
+    /// as both signer and cert source.
+    pub fn new_with_signer<S: MeshSigner + ?Sized>(
+        signer: &S,
+        cert_chain: CertChain,
+        recipient: Recipient,
+        sequence: u64,
+        payload: Vec<u8>,
+    ) -> Self {
         let mut nonce = [0u8; 24];
         rand::thread_rng().fill_bytes(&mut nonce);
         let payload_cid: [u8; 32] = *blake3::hash(&payload).as_bytes();
 
         let to_sign = signing_message(&recipient, &nonce, sequence, &payload_cid);
-        let sig = sender.sign(&to_sign);
+        let sig = signer.sign(&to_sign);
 
         Self {
-            cert_chain: sender.cert().clone(),
+            cert_chain,
             recipient,
             nonce,
             sequence,
@@ -272,5 +301,107 @@ mod tests {
         let (_user, agent) = fixture_user_and_agent();
         let env = SignedEnvelope::new(&agent, direct_recipient(), 1, vec![]);
         env.verify().expect("empty payload is fine");
+    }
+
+    // ── Signer seam (MeshSigner) — phone enrollment, PR #202 P1 ─────────────
+
+    use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+
+    /// A signer that holds a bare ed25519 key and is NOT an `AgentKey` —
+    /// stands in for a platform-keystore-backed signer.
+    struct ExternalSigner {
+        signing: SigningKey,
+    }
+
+    impl crate::signer::MeshSigner for ExternalSigner {
+        fn verifying_key(&self) -> VerifyingKey {
+            self.signing.verifying_key()
+        }
+        fn sign(&self, msg: &[u8]) -> Signature {
+            self.signing.sign(msg)
+        }
+    }
+
+    /// The full phone path: a worker delegates to an external pubkey, the
+    /// holder signs an envelope through a `MeshSigner` (never an `AgentKey`),
+    /// and the envelope verifies and roots at the user.
+    #[test]
+    fn external_signer_envelope_verifies_via_seam() {
+        let user = crate::UserKey::generate();
+        let worker = AgentKey::issue(
+            &user,
+            AgentMetadata {
+                role: "worker".into(),
+                host: "test-host".into(),
+                capabilities: vec!["test".into()],
+                issued_at: "2026-05-28T12:00:00Z".into(),
+                expires_at: None,
+                caveats: crate::Caveats::top(),
+            },
+        );
+
+        let phone_seed = [42u8; 32];
+        let phone = ExternalSigner {
+            signing: SigningKey::from_bytes(&phone_seed),
+        };
+        let phone_cert = worker
+            .delegate_external(
+                phone.verifying_key(),
+                AgentMetadata {
+                    role: "phone".into(),
+                    host: "phone-host".into(),
+                    capabilities: vec!["chat".into()],
+                    issued_at: "2026-05-28T12:00:00Z".into(),
+                    expires_at: None,
+                    caveats: crate::Caveats::top(),
+                },
+            )
+            .expect("external delegation");
+
+        // Sign WITHOUT an AgentKey — purely through the signer seam.
+        let env = SignedEnvelope::new_with_signer(
+            &phone,
+            phone_cert,
+            direct_recipient(),
+            1,
+            b"seam".to_vec(),
+        );
+        env.verify().expect("seam-signed envelope verifies");
+        assert_eq!(env.sender_user_fp(), user.fingerprint());
+    }
+
+    /// A signer whose key does NOT match the paired cert produces an envelope
+    /// that fails verification — the seam can't be abused to forge identity.
+    #[test]
+    fn mismatched_signer_and_cert_fails_verify() {
+        let (_user, agent) = fixture_user_and_agent();
+        // Sign with a stranger's key but ship the agent's cert.
+        let stranger = ExternalSigner {
+            signing: SigningKey::from_bytes(&[7u8; 32]),
+        };
+        let env = SignedEnvelope::new_with_signer(
+            &stranger,
+            agent.cert().clone(),
+            direct_recipient(),
+            1,
+            b"forge".to_vec(),
+        );
+        assert!(matches!(env.verify().unwrap_err(), MeshError::BadSignature));
+    }
+
+    /// `new` and `new_with_signer` are the same operation for an `AgentKey`:
+    /// signing the same bytes yields a verifiable envelope either way.
+    #[test]
+    fn new_is_thin_wrapper_over_new_with_signer() {
+        let (_user, agent) = fixture_user_and_agent();
+        let via_signer = SignedEnvelope::new_with_signer(
+            &agent,
+            agent.cert().clone(),
+            direct_recipient(),
+            5,
+            b"x".to_vec(),
+        );
+        via_signer.verify().expect("signer path verifies");
+        assert_eq!(via_signer.cert_chain, *agent.cert());
     }
 }
