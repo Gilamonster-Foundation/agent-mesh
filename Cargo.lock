@@ -68,6 +68,7 @@ dependencies = [
 name = "agent-mesh-cli"
 version = "0.6.1"
 dependencies = [
+ "agent-mesh-bus",
  "agent-mesh-discovery",
  "agent-mesh-protocol",
  "agent-mesh-transport",
