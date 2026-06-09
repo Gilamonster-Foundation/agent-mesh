@@ -12,6 +12,7 @@ mod announce;
 mod bind;
 mod keygen;
 mod listen;
+mod mcp;
 mod peers;
 mod send;
 mod util;
@@ -97,6 +98,17 @@ pub enum Command {
         #[arg(long, default_value = "10s")]
         timeout: String,
     },
+    /// Serve the mesh over MCP (stdio JSON-RPC) so MCP-capable
+    /// agents can call `mesh_whoami` / `mesh_peers` / `mesh_request`
+    /// as tools. Add to an MCP client config as
+    /// `command = "amesh", args = ["mcp"]`.
+    Mcp {
+        /// Bind without announcing on mDNS. The server is a
+        /// dial-out-only consumer; peers reach it for replies via
+        /// the bus's dial-back path.
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Bind a QUIC endpoint, announce it on mDNS, accept envelopes.
     ///
     /// This is `amesh announce` + transport listener in one. Use
@@ -151,6 +163,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             timeout,
         } => send::run(home, peer_fp, payload, timeout).await,
         Command::Listen { duration } => listen::run(home, duration).await,
+        Command::Mcp { quiet } => mcp::run(home, quiet).await,
     }
 }
 

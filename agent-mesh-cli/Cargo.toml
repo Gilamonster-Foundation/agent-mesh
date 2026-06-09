@@ -21,6 +21,7 @@ path = "src/lib.rs"
 agent-mesh-protocol.workspace = true
 agent-mesh-discovery.workspace = true
 agent-mesh-transport.workspace = true
+agent-mesh-bus.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
