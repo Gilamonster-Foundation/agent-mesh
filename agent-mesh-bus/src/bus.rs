@@ -40,7 +40,7 @@ use agent_mesh_transport::{
     recv_envelope, send_envelope, Endpoint, PeerResolver, ResolverHandle, TransportError,
 };
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,6 +71,59 @@ pub struct BusOptions {
 impl Default for BusOptions {
     fn default() -> Self {
         Self { announce: true }
+    }
+}
+
+/// An explicit dial route to a known peer — its ed25519 agent pubkey
+/// plus one socket address — used to reach a peer **without mDNS
+/// discovery**.
+///
+/// This is the building block for the WAN / WireGuard phase of the
+/// mesh: mDNS is LAN-multicast only, but over a VPN the client already
+/// has L3 reachability to a known agent's `SocketAddr`, so it dials by
+/// endpoint instead of resolving a fingerprint over multicast.
+///
+/// Note the dial route carries the **agent pubkey**, not just a
+/// [`Fingerprint`]. A fingerprint is `blake3(agent_pubkey)` — a
+/// one-way hash — so it cannot be turned back into the iroh node
+/// identity QUIC needs to dial. The [`Fingerprint`] used for envelope
+/// addressing is *derived from* the pubkey here
+/// ([`Self::fingerprint`]), so a caller who knows the pubkey + address
+/// has everything required. (This mirrors the reply dial-back path,
+/// which likewise takes the peer's TLS-authenticated pubkey + observed
+/// address from the request connection.)
+#[derive(Debug, Clone, Copy)]
+pub struct PeerEndpoint {
+    /// The peer agent's raw 32-byte ed25519 public key.
+    pub agent_pubkey: [u8; 32],
+    /// A socket address the peer is reachable at (e.g. its WireGuard
+    /// tunnel IP + UDP port).
+    pub addr: SocketAddr,
+}
+
+impl PeerEndpoint {
+    /// Build a dial route from the peer's agent pubkey and a single
+    /// `SocketAddr`.
+    #[must_use]
+    pub fn new(agent_pubkey: [u8; 32], addr: SocketAddr) -> Self {
+        Self { agent_pubkey, addr }
+    }
+
+    /// Build a dial route from the peer's agent pubkey, an IP, and a
+    /// port. Convenience for callers holding the parts separately.
+    #[must_use]
+    pub fn from_parts(agent_pubkey: [u8; 32], ip: IpAddr, port: u16) -> Self {
+        Self::new(agent_pubkey, SocketAddr::new(ip, port))
+    }
+
+    /// The peer's agent fingerprint, derived as `blake3(agent_pubkey)`
+    /// — the same value the peer announces over mDNS and signs its
+    /// envelopes under. Used for the envelope `Recipient` address so a
+    /// directly-dialed message is indistinguishable on the wire from a
+    /// resolver-dialed one.
+    #[must_use]
+    pub fn fingerprint(&self) -> Fingerprint {
+        Fingerprint::of_bytes(&self.agent_pubkey)
     }
 }
 
@@ -185,12 +238,52 @@ impl Bus {
     /// Send a `Request` to `peer_fp` on `topic` and wait up to
     /// `timeout` for the matching `Reply`.
     ///
-    /// Returns the reply body on success. On timeout returns
-    /// [`BusError::Timeout`]; on peer-not-found,
-    /// [`BusError::Unreachable`].
+    /// Resolves `peer_fp` over mDNS before dialing. Returns the reply
+    /// body on success. On timeout returns [`BusError::Timeout`]; on
+    /// peer-not-found, [`BusError::Unreachable`].
     pub async fn request(
         &self,
         peer_fp: Fingerprint,
+        topic: &Topic,
+        body: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        self.request_via(DialRoute::Resolve(peer_fp), topic, body, timeout)
+            .await
+    }
+
+    /// Send a `Request` directly to a known [`PeerEndpoint`] — its
+    /// agent pubkey + socket address — **without mDNS discovery** —
+    /// and wait up to `timeout` for the matching `Reply`.
+    ///
+    /// This is the WAN / WireGuard dial path: the caller already knows
+    /// where the agent lives (e.g. its VPN tunnel address), so the
+    /// resolver is skipped entirely and the bus dials the endpoint
+    /// straight away. The reply routes back over the freshly-dialed
+    /// reverse connection by correlation id, exactly as a
+    /// resolver-dialed request would.
+    ///
+    /// The on-wire envelope is identical to one sent via [`request`]:
+    /// the recipient fingerprint is derived from
+    /// [`PeerEndpoint::fingerprint`], so the responder cannot tell a
+    /// direct dial from a resolver dial.
+    ///
+    /// [`request`]: Self::request
+    pub async fn request_direct(
+        &self,
+        peer: PeerEndpoint,
+        topic: &Topic,
+        body: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        self.request_via(DialRoute::Direct(peer), topic, body, timeout)
+            .await
+    }
+
+    /// Shared request core for both the resolver and direct-dial paths.
+    async fn request_via(
+        &self,
+        route: DialRoute,
         topic: &Topic,
         body: Vec<u8>,
         timeout: Duration,
@@ -203,7 +296,7 @@ impl Bus {
             correlation: correlation.0,
             body,
         };
-        if let Err(e) = self.send_to(peer_fp, msg).await {
+        if let Err(e) = self.send_via(route, msg).await {
             self.inbox.cancel_reply(&correlation);
             return Err(e);
         }
@@ -253,7 +346,27 @@ impl Bus {
             topic: topic.wire(),
             body,
         };
-        self.send_to(peer_fp, msg).await
+        self.send_via(DialRoute::Resolve(peer_fp), msg).await
+    }
+
+    /// Publish a body directly to a known [`PeerEndpoint`] on `topic`,
+    /// **without mDNS discovery**. Fire-and-forget. The direct-dial
+    /// counterpart of [`publish_to`]; see [`request_direct`] for the
+    /// WAN / WireGuard rationale.
+    ///
+    /// [`publish_to`]: Self::publish_to
+    /// [`request_direct`]: Self::request_direct
+    pub async fn publish_to_direct(
+        &self,
+        peer: PeerEndpoint,
+        topic: &Topic,
+        body: Vec<u8>,
+    ) -> Result<()> {
+        let msg = BusMessage::Publish {
+            topic: topic.wire(),
+            body,
+        };
+        self.send_via(DialRoute::Direct(peer), msg).await
     }
 
     /// Subscribe to a topic. Returns a `broadcast::Receiver` that
@@ -281,10 +394,20 @@ impl Bus {
         Ok(())
     }
 
-    /// Pull the next sequence number and dial the peer to ship a
-    /// single envelope carrying `msg`.
-    async fn send_to(&self, peer_fp: Fingerprint, msg: BusMessage) -> Result<()> {
-        let conn = dial_peer(&self.endpoint, &self.resolver, peer_fp).await?;
+    /// Dial the peer named by `route` (resolver or direct endpoint),
+    /// pull the next sequence number, and ship a single envelope
+    /// carrying `msg`.
+    async fn send_via(&self, route: DialRoute, msg: BusMessage) -> Result<()> {
+        let (conn, peer_fp) = match route {
+            DialRoute::Resolve(peer_fp) => {
+                let conn = dial_peer(&self.endpoint, &self.resolver, peer_fp).await?;
+                (conn, peer_fp)
+            }
+            DialRoute::Direct(peer) => {
+                let conn = dial_endpoint(&self.endpoint, peer).await?;
+                (conn, peer.fingerprint())
+            }
+        };
         send_one(
             &conn,
             self.agent.cert(),
@@ -295,6 +418,37 @@ impl Bus {
         )
         .await
     }
+}
+
+/// How an outbound message names its destination: resolve a
+/// [`Fingerprint`] over mDNS, or dial a known [`PeerEndpoint`]
+/// directly.
+#[derive(Debug, Clone, Copy)]
+enum DialRoute {
+    /// Look the peer up by fingerprint over mDNS, then dial.
+    Resolve(Fingerprint),
+    /// Dial a known agent pubkey + socket address, no resolver.
+    Direct(PeerEndpoint),
+}
+
+/// Dial a known [`PeerEndpoint`] directly — no mDNS. Reuses the same
+/// transport connect path as the resolver dial and the reply
+/// dial-back: convert the agent pubkey to an iroh node id and
+/// [`Endpoint::dial`] it at the supplied address.
+async fn dial_endpoint(endpoint: &Endpoint, peer: PeerEndpoint) -> Result<Connection> {
+    let iroh_pk = agent_pubkey_to_iroh(&peer.agent_pubkey).ok_or_else(|| {
+        BusError::Unreachable(format!(
+            "direct-dial endpoint {} has an invalid ed25519 pubkey",
+            peer.fingerprint().short()
+        ))
+    })?;
+    tracing::debug!(
+        peer = %peer.fingerprint().short(),
+        addr = %peer.addr,
+        "bus: direct-dialing peer endpoint (no mDNS)"
+    );
+    let conn = endpoint.dial(iroh_pk, [peer.addr]).await?;
+    Ok(conn)
 }
 
 /// Resolve `peer_fp` via mDNS, then dial the iroh endpoint.
