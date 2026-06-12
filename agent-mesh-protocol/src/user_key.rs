@@ -60,15 +60,11 @@ impl UserKey {
     ///
     /// Refuses to overwrite an existing file (returns
     /// [`MeshError::Io`] with `AlreadyExists`). On Unix systems the
-    /// resulting file is `chmod 0600`. The parent directory is
-    /// created if it doesn't exist.
+    /// file is created `0600` *atomically* — the key is never
+    /// group/world-readable for any window, not even between create
+    /// and the first byte written. The parent directory is created if
+    /// it doesn't exist.
     pub fn save(&self, path: &Path) -> Result<()> {
-        if path.exists() {
-            return Err(MeshError::Io(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!("refusing to overwrite existing key at {}", path.display()),
-            )));
-        }
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
@@ -78,12 +74,34 @@ impl UserKey {
             .signing
             .to_pkcs8_pem(LineEnding::LF)
             .map_err(|e| MeshError::InvalidKey(e.to_string()))?;
-        std::fs::write(path, pem.as_bytes())?;
+
+        use std::io::Write;
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        }
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut opts = std::fs::OpenOptions::new();
+        // `create_new(true)` folds in the old `path.exists()` guard:
+        // it returns `AlreadyExists` rather than truncating an
+        // existing key, preserving the refuse-to-overwrite contract.
+        opts.write(true).create_new(true);
+        // On Unix the file is born at 0600 — there is no umask-default
+        // (e.g. 0644) window where the key bytes are readable by
+        // group/world. Non-unix has no mode support, so it falls back
+        // to a plain create, unchanged from before.
+        #[cfg(unix)]
+        opts.mode(0o600);
+
+        let mut f = opts.open(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                MeshError::Io(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("refusing to overwrite existing key at {}", path.display()),
+                ))
+            } else {
+                MeshError::Io(e)
+            }
+        })?;
+        f.write_all(pem.as_bytes())?;
         Ok(())
     }
 
@@ -219,11 +237,22 @@ mod tests {
     #[cfg(unix)]
     fn save_sets_0600_permissions() {
         use std::os::unix::fs::PermissionsExt;
+        // The key is created 0600 *atomically* (see `save`): the file
+        // is born with these bits via `OpenOptions::mode`, never at a
+        // umask default and narrowed afterward. There is therefore no
+        // window — not even between `create` and the first byte — in
+        // which the private key is group/world-readable. This test
+        // asserts the final mode is *exactly* 0600 (no wider bits set,
+        // hence no wider window the create could have transiently left
+        // behind).
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("user.key");
         UserKey::generate().save(&path).expect("save");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600, "expected 0600, got {mode:o}");
+        assert_eq!(mode & 0o777, 0o600, "expected exactly 0600, got {mode:o}");
+        // No group/world bits at all — the atomic create never widened
+        // the file even transiently.
+        assert_eq!(mode & 0o077, 0, "no group/world bits, got {mode:o}");
     }
 
     #[test]
