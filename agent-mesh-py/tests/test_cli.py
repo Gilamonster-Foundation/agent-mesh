@@ -149,7 +149,12 @@ def test_argparse_keygen_path_roundtrips() -> None:
     parser = build_parser()
     ns = parser.parse_args(["keygen", "--path", "/tmp/k"])
     assert ns.cmd == "keygen"
-    assert str(ns.path) == "/tmp/k"
+    # ``--path`` is typed ``type=Path`` in build_parser, so ns.path is a
+    # ``pathlib.Path``. Comparing its ``str()`` to a POSIX literal is
+    # platform-naive: on Windows ``str(Path("/tmp/k"))`` renders as
+    # ``\tmp\k``. Compare ``Path``-to-``Path`` so equality normalizes the
+    # separators on both sides while still asserting the round-trip.
+    assert ns.path == Path("/tmp/k")
 
 
 def test_argparse_announce_capabilities_are_a_list() -> None:
