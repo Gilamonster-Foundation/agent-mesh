@@ -15,9 +15,11 @@
 use crate::alpn::ALPN;
 use crate::error::{Result, TransportError};
 use agent_mesh_protocol::AgentKey;
-use iroh::endpoint::{presets, Connection, Incoming};
+use iroh::endpoint::{presets, BindOpts, Connection, Incoming};
 use iroh::{Endpoint as IrohEndpoint, EndpointAddr, PublicKey, SecretKey};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+
+const EPHEMERAL_BIND_ATTEMPTS: usize = 8;
 
 /// A bound iroh endpoint, ready to dial and accept agent-mesh
 /// connections.
@@ -38,21 +40,30 @@ impl Endpoint {
     /// Binds to the unspecified IPv4 address (`0.0.0.0:<port>`) so
     /// the endpoint is reachable on every local interface.
     pub async fn bind(agent: &AgentKey, port: u16) -> Result<Self> {
-        let secret: SecretKey = crate::identity::to_iroh_secret(agent);
-        let bind_addr: SocketAddr = format!("0.0.0.0:{port}")
-            .parse()
-            .expect("0.0.0.0:<port> always parses");
+        let attempts = if port == 0 {
+            EPHEMERAL_BIND_ATTEMPTS
+        } else {
+            1
+        };
+        let mut last_error = None;
 
-        let inner = IrohEndpoint::builder(presets::N0DisableRelay)
-            .secret_key(secret)
-            .alpns(vec![ALPN.to_vec()])
-            .clear_address_lookup()
-            .bind_addr(bind_addr)
-            .map_err(|e| TransportError::Iroh(format!("bind_addr: {e}")))?
-            .bind()
-            .await
-            .map_err(|e| TransportError::Iroh(format!("bind: {e}")))?;
-        Ok(Self { inner })
+        for _ in 0..attempts {
+            let selected_port = if port == 0 {
+                reserve_ephemeral_port()?
+            } else {
+                port
+            };
+
+            match bind_on_port(agent, selected_port).await {
+                Ok(inner) => return Ok(Self { inner }),
+                Err(e) if port == 0 => last_error = Some(e),
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            TransportError::Iroh("bind: failed to select an ephemeral port".to_string())
+        }))
     }
 
     /// Dial the given peer by iroh `PublicKey` and one-or-more socket
@@ -123,6 +134,32 @@ impl Endpoint {
     }
 }
 
+fn reserve_ephemeral_port() -> Result<u16> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(TransportError::Io)?;
+    socket
+        .local_addr()
+        .map(|addr| addr.port())
+        .map_err(TransportError::Io)
+}
+
+async fn bind_on_port(agent: &AgentKey, port: u16) -> Result<IrohEndpoint> {
+    let secret: SecretKey = crate::identity::to_iroh_secret(agent);
+    let bind_addr_v4 = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+    let bind_addr_v6 = SocketAddr::from((Ipv6Addr::UNSPECIFIED, port));
+
+    IrohEndpoint::builder(presets::N0DisableRelay)
+        .secret_key(secret)
+        .alpns(vec![ALPN.to_vec()])
+        .clear_address_lookup()
+        .bind_addr(bind_addr_v4)
+        .map_err(|e| TransportError::Iroh(format!("bind_addr {bind_addr_v4}: {e}")))?
+        .bind_addr_with_opts(bind_addr_v6, BindOpts::default().set_is_required(false))
+        .map_err(|e| TransportError::Iroh(format!("bind_addr {bind_addr_v6}: {e}")))?
+        .bind()
+        .await
+        .map_err(|e| TransportError::Iroh(format!("bind: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +196,19 @@ mod tests {
         let ep = Endpoint::bind(&agent, 0).await.expect("bind");
         let addrs = ep.local_socket_addrs();
         assert!(!addrs.is_empty(), "expected at least one bound socket");
+        ep.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ephemeral_bind_uses_one_advertisable_port() {
+        let agent = fixture_agent("worker");
+        let ep = Endpoint::bind(&agent, 0).await.expect("bind");
+        let advertised = ep.port();
+        let addrs = ep.local_socket_addrs();
+        assert!(
+            addrs.iter().all(|addr| addr.port() == advertised),
+            "all bound sockets must share the advertised mDNS port, got {addrs:?}"
+        );
         ep.close().await;
     }
 }

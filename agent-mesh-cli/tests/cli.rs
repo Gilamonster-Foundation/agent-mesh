@@ -6,6 +6,11 @@
 use assert_cmd::Command;
 use predicates::str::contains;
 use ssh_key::{Algorithm, LineEnding, PrivateKey};
+use std::io::{BufRead, BufReader, Read};
+use std::process::Stdio;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 fn fresh_ssh_key_pem() -> (PrivateKey, String) {
@@ -13,6 +18,50 @@ fn fresh_ssh_key_pem() -> (PrivateKey, String) {
         .expect("generate ssh ed25519");
     let pem = key.to_openssh(LineEnding::LF).expect("encode openssh");
     (key, pem.to_string())
+}
+
+fn forward_child_lines<R: Read + Send + 'static>(
+    stream: R,
+    label: &'static str,
+    tx: mpsc::Sender<String>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        for line in BufReader::new(stream).lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if tx.send(format!("{label}: {line}")).is_err() {
+                break;
+            }
+        }
+    })
+}
+
+fn recv_until<F>(
+    rx: &mpsc::Receiver<String>,
+    transcript: &mut Vec<String>,
+    timeout: Duration,
+    mut pred: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining.min(Duration::from_millis(250))) {
+            Ok(line) => {
+                if pred(&line) {
+                    transcript.push(line.clone());
+                    return Some(line);
+                }
+                transcript.push(line);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    None
 }
 
 #[test]
@@ -360,6 +409,92 @@ fn peers_with_same_user_filter_renders() {
         assert!(stdout.contains("yes"));
         assert!(stdout.contains("ollama"));
     }
+}
+
+#[test]
+fn listen_send_roundtrip_delivers_payload_before_sender_exits() {
+    let dir = TempDir::new().unwrap();
+    Command::cargo_bin("amesh")
+        .unwrap()
+        .args(["--home", dir.path().to_str().unwrap(), "keygen"])
+        .assert()
+        .success();
+
+    let bin = assert_cmd::cargo::cargo_bin("amesh");
+    let mut listener = std::process::Command::new(&bin)
+        .args([
+            "--home",
+            dir.path().to_str().unwrap(),
+            "listen",
+            "--duration",
+            "30s",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn listener");
+
+    let stdout = listener.stdout.take().expect("listener stdout");
+    let stderr = listener.stderr.take().expect("listener stderr");
+    let (tx, rx) = mpsc::channel();
+    let _stdout_handle = forward_child_lines(stdout, "stdout", tx.clone());
+    let _stderr_handle = forward_child_lines(stderr, "stderr", tx);
+    let mut transcript = Vec::new();
+
+    let agent_line = recv_until(&rx, &mut transcript, Duration::from_secs(10), |line| {
+        line.contains("agent_fp=")
+    });
+    let Some(agent_line) = agent_line else {
+        let _ = listener.kill();
+        let _ = listener.wait();
+        panic!(
+            "listener did not print agent_fp; transcript:\n{}",
+            transcript.join("\n")
+        );
+    };
+    let agent_fp = agent_line
+        .split_once("agent_fp=")
+        .expect("agent_fp line format")
+        .1
+        .trim()
+        .to_string();
+
+    let payload = "agent-mesh-cli-roundtrip";
+    let send_output = std::process::Command::new(&bin)
+        .args([
+            "--home",
+            dir.path().to_str().unwrap(),
+            "send",
+            &agent_fp,
+            "--payload",
+            payload,
+            "--timeout",
+            "15s",
+        ])
+        .output()
+        .expect("run send");
+
+    assert!(
+        send_output.status.success(),
+        "send failed\nstdout:\n{}\nstderr:\n{}\nlistener transcript:\n{}",
+        String::from_utf8_lossy(&send_output.stdout),
+        String::from_utf8_lossy(&send_output.stderr),
+        transcript.join("\n")
+    );
+
+    let received = recv_until(&rx, &mut transcript, Duration::from_secs(10), |line| {
+        line.contains(payload)
+    });
+    let _ = listener.kill();
+    let _ = listener.wait();
+
+    assert!(
+        received.is_some(),
+        "listener did not receive payload before sender exited\nsend stdout:\n{}\nsend stderr:\n{}\nlistener transcript:\n{}",
+        String::from_utf8_lossy(&send_output.stdout),
+        String::from_utf8_lossy(&send_output.stderr),
+        transcript.join("\n")
+    );
 }
 
 #[test]
