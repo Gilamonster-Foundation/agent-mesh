@@ -12,7 +12,43 @@ use crate::user_key::{UserKey, UserPublic};
 use crate::{MeshError, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+
+/// Domain-separation tag for proof-of-possession signatures, so a PoP can never
+/// be confused with a cert-issue signature or any other signed payload (§9.2).
+const POP_DOMAIN: &[u8] = b"agent-mesh/possession-challenge/v1";
+
+/// A proof-of-possession challenge (§9.2). A certifier issues it for a `subject`
+/// pubkey; the holder of that subject's *private* key must sign
+/// [`signing_bytes`](PossessionChallenge::signing_bytes) to prove possession
+/// before the certifier will vouch for the pubkey. Binding both pubkeys + a
+/// fresh nonce stops a proof minted for one `(issuer, subject)` pair — or one
+/// session — from being replayed into another.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PossessionChallenge {
+    /// The agent that issued this challenge and will sign the resulting cert.
+    pub issuer_pubkey: [u8; 32],
+    /// The externally-held pubkey whose possession must be proven.
+    pub subject_pubkey: [u8; 32],
+    /// Fresh random nonce — makes each challenge single-use.
+    pub nonce: [u8; 32],
+}
+
+impl PossessionChallenge {
+    /// The canonical, domain-separated bytes the **subject** signs to answer the
+    /// challenge. Returned for any holder (in-memory key, phone keystore, HSM) to
+    /// sign with whatever mechanism it has; the result is the PoP proof.
+    #[must_use]
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(POP_DOMAIN.len() + 96);
+        v.extend_from_slice(POP_DOMAIN);
+        v.extend_from_slice(&self.issuer_pubkey);
+        v.extend_from_slice(&self.subject_pubkey);
+        v.extend_from_slice(&self.nonce);
+        v
+    }
+}
 
 /// A short-lived per-agent keypair, signed by the user's root key.
 ///
@@ -66,29 +102,64 @@ impl AgentKey {
         Ok(Self { signing, cert })
     }
 
+    /// Issue a [`PossessionChallenge`] for certifying `subject_pubkey` under this
+    /// agent (§9.2). The certifier holds the returned challenge, sends it to the
+    /// subject out of band, and passes the subject's signed answer back into
+    /// [`delegate_external`](Self::delegate_external). The nonce is fresh, so each
+    /// challenge is single-use.
+    #[must_use]
+    pub fn possession_challenge(&self, subject_pubkey: [u8; 32]) -> PossessionChallenge {
+        let mut nonce = [0u8; 32];
+        OsRng.fill_bytes(&mut nonce);
+        PossessionChallenge {
+            issuer_pubkey: self.cert.agent_pubkey,
+            subject_pubkey,
+            nonce,
+        }
+    }
+
     /// Certify an **externally-held** public key into a [`CertChain`] signed by
     /// this agent — attenuation-only, *without* minting or holding the external
-    /// party's secret.
+    /// party's secret, and **only against a proof of possession** (§9.2).
     ///
-    /// This is the seam phone enrollment needs. A worker agent (itself
-    /// delegated from a [`UserKey`]) can vouch for a phone's keystore-resident
-    /// public key: it produces a sub-cert rooted at the same user, with caveats
-    /// `⊑` this agent's authority, and signed by this agent's key. The phone
-    /// never reveals its private key — it keeps its seed (or a non-exportable
-    /// keystore handle) and reconstructs its own [`AgentKey`] via
-    /// [`from_seed_and_cert`](Self::from_seed_and_cert), or signs through a
-    /// [`MeshSigner`](crate::MeshSigner) paired with this cert.
+    /// This is the seam phone enrollment needs. A worker agent (itself delegated
+    /// from a [`UserKey`]) can vouch for a phone's keystore-resident public key:
+    /// it produces a sub-cert rooted at the same user, with caveats `⊑` this
+    /// agent's authority, signed by this agent's key. The phone never reveals its
+    /// private key — it keeps its seed (or a non-exportable keystore handle) and
+    /// reconstructs its own [`AgentKey`] via
+    /// [`from_seed_and_cert`](Self::from_seed_and_cert).
     ///
-    /// Returns [`MeshError::CaveatAmplification`] if the requested caveats are
-    /// not `⊑` this agent's, exactly like [`delegate`](Self::delegate). The
-    /// only difference from `delegate` is *who holds the secret*: here, not us.
+    /// **Proof of possession.** `challenge` must have been issued by *this* agent
+    /// (via [`possession_challenge`](Self::possession_challenge)) and `proof` must
+    /// be the subject's signature over [`PossessionChallenge::signing_bytes`].
+    /// Without this, an agent could certify *any* pubkey — a victim's, or one it
+    /// does not control — which a cross-cloud join must never allow. The cert is
+    /// minted over `challenge.subject_pubkey`.
+    ///
+    /// # Errors
+    /// - [`MeshError::InvalidCertChain`] if `challenge.issuer_pubkey` is not this
+    ///   agent (a challenge it did not issue);
+    /// - [`MeshError::BadSignature`] if the PoP does not verify;
+    /// - [`MeshError::CaveatAmplification`] if `metadata`'s caveats are not `⊑`
+    ///   this agent's, exactly like [`delegate`](Self::delegate).
     pub fn delegate_external(
         &self,
-        external_verifying: VerifyingKey,
+        challenge: &PossessionChallenge,
+        proof: &Signature,
         metadata: AgentMetadata,
     ) -> Result<CertChain> {
-        let external_pubkey: [u8; 32] = *external_verifying.as_bytes();
-        self.certify_pubkey(external_pubkey, metadata)
+        // The challenge must be one THIS agent issued — not attacker-chosen.
+        if challenge.issuer_pubkey != self.cert.agent_pubkey {
+            return Err(MeshError::InvalidCertChain(
+                "possession challenge was not issued by this agent".into(),
+            ));
+        }
+        // Proof of possession: the subject's private key must have signed the
+        // challenge. This is the §9.2 gate — certify only a pubkey whose holder
+        // proved possession.
+        verify_detached(&challenge.subject_pubkey, &challenge.signing_bytes(), proof)?;
+        self.certify_pubkey(challenge.subject_pubkey, metadata)
     }
 
     /// Shared cert-minting body for [`delegate`](Self::delegate) and
@@ -793,9 +864,12 @@ mod tests {
         let phone_signing = SigningKey::from_bytes(&phone_seed);
         let phone_vk = phone_signing.verifying_key();
 
+        // Worker issues a PoP challenge; the phone proves possession by signing it.
+        let challenge = worker.possession_challenge(*phone_vk.as_bytes());
+        let proof = phone_signing.sign(&challenge.signing_bytes());
         // Worker vouches for the phone's pubkey, attenuating to {git}.
         let phone_cert = worker
-            .delegate_external(phone_vk, meta_exec("phone", &["git"]))
+            .delegate_external(&challenge, &proof, meta_exec("phone", &["git"]))
             .expect("external delegation attenuates");
 
         // The cert names the phone's pubkey (NOT a freshly minted one).
@@ -837,9 +911,12 @@ mod tests {
         let worker = AgentKey::issue(&user, meta_exec("worker", &["git"]));
 
         let phone_seed = [42u8; 32];
-        let phone_vk = SigningKey::from_bytes(&phone_seed).verifying_key();
+        let phone_signing = SigningKey::from_bytes(&phone_seed);
+        let phone_vk = phone_signing.verifying_key();
+        let challenge = worker.possession_challenge(*phone_vk.as_bytes());
+        let proof = phone_signing.sign(&challenge.signing_bytes());
         let cert = worker
-            .delegate_external(phone_vk, meta_exec("phone", &["git"]))
+            .delegate_external(&challenge, &proof, meta_exec("phone", &["git"]))
             .unwrap();
 
         // A DIFFERENT seed cannot reconstruct an AgentKey from this cert.
@@ -864,15 +941,55 @@ mod tests {
     fn delegate_external_rejects_amplification() {
         let user = UserKey::generate();
         let worker = AgentKey::issue(&user, meta_exec("worker", &["git"]));
-        let phone_vk = SigningKey::from_bytes(&[42u8; 32]).verifying_key();
-        // Phone requests ⊤ exec — strictly more than worker's {git}.
+        let phone_signing = SigningKey::from_bytes(&[42u8; 32]);
+        let phone_vk = phone_signing.verifying_key();
+        let challenge = worker.possession_challenge(*phone_vk.as_bytes());
+        let proof = phone_signing.sign(&challenge.signing_bytes());
+        // Phone requests ⊤ exec — strictly more than worker's {git}. PoP passes,
+        // so the request reaches — and is refused by — the attenuation check.
         let amplifying = AgentMetadata {
             caveats: Caveats::top(),
             ..fixture_metadata("phone")
         };
         assert!(matches!(
-            worker.delegate_external(phone_vk, amplifying),
+            worker.delegate_external(&challenge, &proof, amplifying),
             Err(MeshError::CaveatAmplification)
+        ));
+    }
+
+    /// §9.2: certifying a pubkey whose holder did NOT prove possession is refused.
+    /// A proof from the WRONG key fails — so an agent can't certify a victim's
+    /// pubkey (the proof must come from the holder of the subject's private key).
+    #[test]
+    fn delegate_external_requires_proof_of_possession() {
+        let user = UserKey::generate();
+        let worker = AgentKey::issue(&user, meta_exec("worker", &["git"]));
+        let victim_vk = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        let challenge = worker.possession_challenge(*victim_vk.as_bytes());
+        // An attacker signs with a DIFFERENT key (they don't hold the victim's).
+        let attacker = SigningKey::from_bytes(&[9u8; 32]);
+        let forged = attacker.sign(&challenge.signing_bytes());
+        assert!(matches!(
+            worker.delegate_external(&challenge, &forged, meta_exec("v", &["git"])),
+            Err(MeshError::BadSignature)
+        ));
+    }
+
+    /// A challenge issued by a DIFFERENT agent is refused: the proof must answer a
+    /// challenge THIS certifier minted (no relay of a foreign challenge).
+    #[test]
+    fn delegate_external_rejects_a_foreign_challenge() {
+        let user = UserKey::generate();
+        let worker = AgentKey::issue(&user, meta_exec("worker", &["git"]));
+        let other = AgentKey::issue(&user, meta_exec("other", &["git"]));
+        let phone_signing = SigningKey::from_bytes(&[42u8; 32]);
+        let phone_vk = phone_signing.verifying_key();
+        // Challenge minted by `other`, presented to `worker`.
+        let foreign = other.possession_challenge(*phone_vk.as_bytes());
+        let proof = phone_signing.sign(&foreign.signing_bytes());
+        assert!(matches!(
+            worker.delegate_external(&foreign, &proof, meta_exec("phone", &["git"])),
+            Err(MeshError::InvalidCertChain(_))
         ));
     }
 
