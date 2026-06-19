@@ -344,9 +344,12 @@ mod tests {
         let phone = ExternalSigner {
             signing: SigningKey::from_bytes(&phone_seed),
         };
+        let challenge = worker.possession_challenge(*phone.verifying_key().as_bytes());
+        let proof = phone.signing.sign(&challenge.signing_bytes());
         let phone_cert = worker
             .delegate_external(
-                phone.verifying_key(),
+                &challenge,
+                &proof,
                 AgentMetadata {
                     role: "phone".into(),
                     host: "phone-host".into(),
