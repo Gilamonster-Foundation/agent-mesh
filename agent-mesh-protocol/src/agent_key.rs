@@ -6,7 +6,7 @@
 //! signed off on this agent's identity and metadata. Peers verify the
 //! cert chain once on first contact and cache the agent's public key.
 
-use crate::caveats::Caveats;
+use crate::caveats::{Caveats, Scope};
 use crate::fingerprint::Fingerprint;
 use crate::user_key::{UserKey, UserPublic};
 use crate::{MeshError, Result};
@@ -262,6 +262,30 @@ impl CertChain {
     ///   enforced structurally at every link — a forged or tampered chain that
     ///   amplifies authority is rejected even if each signature is valid.
     pub fn verify(&self) -> Result<()> {
+        self.verify_inner(None)
+    }
+
+    /// Verify the cert chain against a known **current generation** (causal, not
+    /// wall-clock — §9.1). In addition to signature + attenuation at every link,
+    /// each link's `valid_for_generation` must include `current_generation`, else
+    /// the chain is refused ([`MeshError::Generation`]). This is the authoritative
+    /// revocation axis: bumping the generation invalidates every cert scoped to an
+    /// earlier one, pull-based and without any wall-clock.
+    pub fn verify_at(&self, current_generation: u64) -> Result<()> {
+        self.verify_inner(Some(current_generation))
+    }
+
+    /// Shared chain walk. `current_generation = None` is the context-free
+    /// [`CertChain::verify`]: it still enforces signatures + attenuation, but a
+    /// link that declares a *bounded* `valid_for_generation` is **refused**
+    /// (fail-closed) — a generation scope cannot be honoured without a current
+    /// generation, and silently ignoring it would be fail-open (the §9.1 hole).
+    fn verify_inner(&self, current_generation: Option<u64>) -> Result<()> {
+        // Generation gate for THIS link, fail-closed.
+        check_generation(
+            &self.metadata.caveats.valid_for_generation,
+            current_generation,
+        )?;
         let to_verify = sign_payload(&self.agent_pubkey, &self.metadata);
         match &self.issuer {
             Issuer::User(user) => {
@@ -275,7 +299,7 @@ impl CertChain {
                         "delegated cert issuer pubkey does not match its parent".into(),
                     ));
                 }
-                parent.verify()?;
+                parent.verify_inner(current_generation)?;
                 verify_detached(pubkey, &to_verify, &self.issuer_sig.0)?;
                 if !self.metadata.caveats.leq(&parent.metadata.caveats) {
                     return Err(MeshError::CaveatAmplification);
@@ -345,6 +369,26 @@ fn sign_payload(agent_pubkey: &[u8; 32], metadata: &AgentMetadata) -> Vec<u8> {
     out
 }
 
+/// The causal-generation gate (§9.1, fail-closed). An unbounded scope (`All`)
+/// always passes. A *bounded* scope passes only when a `current` generation is
+/// supplied **and** lies within it; with no context it is REFUSED — a scope that
+/// cannot be checked must never be silently ignored (that was the fail-open hole).
+fn check_generation(scope: &Scope<u64>, current: Option<u64>) -> Result<()> {
+    match scope {
+        Scope::All => Ok(()),
+        Scope::Only(gens) => match current {
+            None => Err(MeshError::Generation(
+                "cert is generation-scoped; verify with a current generation via verify_at()"
+                    .into(),
+            )),
+            Some(g) if gens.contains(&g) => Ok(()),
+            Some(g) => Err(MeshError::Generation(format!(
+                "cert is not valid for generation {g}"
+            ))),
+        },
+    }
+}
+
 /// Verify an ed25519 signature from a raw 32-byte public key (a parent
 /// agent's key, which — unlike a [`UserPublic`] — arrives as bare bytes).
 fn verify_detached(pubkey: &[u8; 32], msg: &[u8], sig: &Signature) -> Result<()> {
@@ -389,6 +433,76 @@ mod tests {
         let user = UserKey::generate();
         let agent = AgentKey::issue(&user, fixture_metadata("worker"));
         agent.cert().verify().expect("fresh cert verifies");
+    }
+
+    /// §9.1: an unbounded (`All`) generation scope — the default — verifies both
+    /// context-free and at any generation. No regression for today's certs.
+    #[test]
+    fn unbounded_generation_verifies_in_any_context() {
+        let user = UserKey::generate();
+        let agent = AgentKey::issue(&user, fixture_metadata("worker"));
+        agent.cert().verify().expect("context-free ok");
+        agent.cert().verify_at(0).expect("gen 0 ok");
+        agent.cert().verify_at(9_999).expect("any gen ok");
+    }
+
+    /// §9.1 (the core fix): a generation-SCOPED cert is REFUSED by context-free
+    /// `verify()` (the scope can't be checked ⇒ fail-closed, not ignored), passes
+    /// `verify_at` for an in-scope generation, and is refused out of scope.
+    #[test]
+    fn generation_scoped_cert_is_fail_closed_context_free() {
+        let mut meta = fixture_metadata("worker");
+        meta.caveats = Caveats {
+            valid_for_generation: crate::Scope::only([5u64]),
+            ..Caveats::top()
+        };
+        let user = UserKey::generate();
+        let agent = AgentKey::issue(&user, meta);
+
+        // Context-free: cannot check the scope → REFUSE (was silently ignored).
+        assert!(matches!(
+            agent.cert().verify().unwrap_err(),
+            MeshError::Generation(_)
+        ));
+        // With the right generation: passes.
+        agent.cert().verify_at(5).expect("valid for generation 5");
+        // With a different generation: refused (revoked by generation bump).
+        assert!(matches!(
+            agent.cert().verify_at(6).unwrap_err(),
+            MeshError::Generation(_)
+        ));
+    }
+
+    /// The gate applies at EVERY link: a delegated child whose chain includes a
+    /// generation-scoped link is refused context-free and checked against the
+    /// supplied generation across the whole chain.
+    #[test]
+    fn generation_gate_applies_across_the_chain() {
+        let scoped = |role: &str| AgentMetadata {
+            caveats: Caveats {
+                valid_for_generation: crate::Scope::only([5u64]),
+                ..Caveats::top()
+            },
+            ..fixture_metadata(role)
+        };
+        let user = UserKey::generate();
+        let parent = AgentKey::issue(&user, scoped("lead"));
+        let child = parent
+            .delegate(scoped("worker"))
+            .expect("attenuating delegate");
+
+        assert!(matches!(
+            child.cert().verify().unwrap_err(),
+            MeshError::Generation(_)
+        ));
+        child
+            .cert()
+            .verify_at(5)
+            .expect("chain valid for generation 5");
+        assert!(matches!(
+            child.cert().verify_at(6).unwrap_err(),
+            MeshError::Generation(_)
+        ));
     }
 
     #[test]
