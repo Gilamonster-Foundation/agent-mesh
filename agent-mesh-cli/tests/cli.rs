@@ -411,16 +411,136 @@ fn peers_with_same_user_filter_renders() {
     }
 }
 
-// `amesh send <fingerprint>` resolves the peer over mDNS multicast (there is
-// no direct-address send mode), so this real-`amesh` round-trip depends on
-// multicast discovery — which is unreliable on hosted CI runners (the resolve
-// races a timeout; "connect: timed out" / "No address lookup configured"). It
-// has been failing on `main` since it was added. `#[ignore]`d as a real-LAN
-// integration test — run on demand with `cargo test -- --ignored` — the same
-// tiering the mDNS bus round-trip tests use (#166). The bus request/reply
-// LOGIC is covered deterministically by the in-memory-transport test in
-// `agent-mesh-bus`; the real QUIC transport by the direct-dial bus round-trip.
-#[ignore = "real mDNS multicast discovery (amesh send resolves by fingerprint); flaky on hosted CI. Run with --ignored on a real LAN."]
+/// Deterministic `amesh listen` → `amesh send` round-trip over the REAL
+/// QUIC transport on **loopback with no mDNS**: the sender dials the
+/// listener directly with `--addr 127.0.0.1:<port> --pubkey <hex>`,
+/// both parsed from the listener's own startup banner (#52).
+///
+/// This is the CLI analogue of the bus's
+/// `request_reply_roundtrip_via_direct_dial_no_mdns` — it exercises the
+/// full `amesh send` → handshake → envelope → `amesh listen` receive
+/// path end to end without touching multicast discovery, so it gates
+/// every PR (unlike the resolve-mode round-trip, which needs a real LAN
+/// and stays `#[ignore]`d below).
+#[test]
+fn listen_send_direct_addr_roundtrip_delivers_payload() {
+    let dir = TempDir::new().unwrap();
+    Command::cargo_bin("amesh")
+        .unwrap()
+        .args(["--home", dir.path().to_str().unwrap(), "keygen"])
+        .assert()
+        .success();
+
+    let bin = assert_cmd::cargo::cargo_bin("amesh");
+    let mut listener = std::process::Command::new(&bin)
+        .args([
+            "--home",
+            dir.path().to_str().unwrap(),
+            "listen",
+            "--duration",
+            "30s",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn listener");
+
+    let stdout = listener.stdout.take().expect("listener stdout");
+    let stderr = listener.stderr.take().expect("listener stderr");
+    let (tx, rx) = mpsc::channel();
+    let _stdout_handle = forward_child_lines(stdout, "stdout", tx.clone());
+    let _stderr_handle = forward_child_lines(stderr, "stderr", tx);
+    let mut transcript = Vec::new();
+
+    // Parse the listener's banner for the direct-dial route: the bound
+    // UDP port (`listening on udp/<port>`) and the raw agent pubkey
+    // (`agent_pubkey=<hex>`). Both are needed to dial without mDNS.
+    let kill_listener = |listener: &mut std::process::Child| {
+        let _ = listener.kill();
+        let _ = listener.wait();
+    };
+
+    let port_line = recv_until(&rx, &mut transcript, Duration::from_secs(10), |line| {
+        line.contains("listening on udp/")
+    });
+    let Some(port_line) = port_line else {
+        kill_listener(&mut listener);
+        panic!(
+            "listener did not print its port; transcript:\n{}",
+            transcript.join("\n")
+        );
+    };
+    let port = port_line
+        .rsplit_once("udp/")
+        .expect("udp/<port> line format")
+        .1
+        .trim()
+        .to_string();
+
+    let pubkey_line = recv_until(&rx, &mut transcript, Duration::from_secs(10), |line| {
+        line.contains("agent_pubkey=")
+    });
+    let Some(pubkey_line) = pubkey_line else {
+        kill_listener(&mut listener);
+        panic!(
+            "listener did not print agent_pubkey; transcript:\n{}",
+            transcript.join("\n")
+        );
+    };
+    let pubkey = pubkey_line
+        .split_once("agent_pubkey=")
+        .expect("agent_pubkey line format")
+        .1
+        .trim()
+        .to_string();
+
+    let addr = format!("127.0.0.1:{port}");
+    let payload = "agent-mesh-cli-direct-roundtrip";
+    let send_output = std::process::Command::new(&bin)
+        .args([
+            "--home",
+            dir.path().to_str().unwrap(),
+            "send",
+            "--addr",
+            &addr,
+            "--pubkey",
+            &pubkey,
+            "--payload",
+            payload,
+        ])
+        .output()
+        .expect("run send");
+
+    assert!(
+        send_output.status.success(),
+        "direct send failed\nstdout:\n{}\nstderr:\n{}\nlistener transcript:\n{}",
+        String::from_utf8_lossy(&send_output.stdout),
+        String::from_utf8_lossy(&send_output.stderr),
+        transcript.join("\n")
+    );
+
+    let received = recv_until(&rx, &mut transcript, Duration::from_secs(10), |line| {
+        line.contains(payload)
+    });
+    kill_listener(&mut listener);
+
+    assert!(
+        received.is_some(),
+        "listener did not receive payload before sender exited\nsend stdout:\n{}\nsend stderr:\n{}\nlistener transcript:\n{}",
+        String::from_utf8_lossy(&send_output.stdout),
+        String::from_utf8_lossy(&send_output.stderr),
+        transcript.join("\n")
+    );
+}
+
+// Resolve-mode `amesh send <fingerprint>` locates the peer over mDNS
+// multicast, which is unreliable on hosted CI runners (the resolve races a
+// timeout; "connect: timed out" / "No address lookup configured"). Kept as a
+// real-LAN integration test — run on demand with `cargo test -- --ignored`.
+// The deterministic per-PR coverage of the same send→listen path is
+// `listen_send_direct_addr_roundtrip_delivers_payload` above (direct dial, no
+// multicast); what this one uniquely exercises is mDNS resolution.
+#[ignore = "real mDNS multicast discovery (amesh send resolves by fingerprint); flaky on hosted CI. Run with --ignored on a real LAN. Direct-dial coverage is deterministic above."]
 #[test]
 fn listen_send_roundtrip_delivers_payload_before_sender_exits() {
     let dir = TempDir::new().unwrap();

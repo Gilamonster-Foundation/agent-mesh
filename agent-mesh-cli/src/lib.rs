@@ -82,19 +82,35 @@ pub enum Command {
         #[arg(long)]
         same_user: bool,
     },
-    /// Send a signed envelope to a peer discovered on the LAN.
+    /// Send a signed envelope to a peer.
     ///
-    /// `peer_fp` is the 64-char hex of the peer's ed25519 pubkey
-    /// (which is also its BLAKE3 fingerprint preimage). The peer
-    /// must be running `amesh listen` so its TXT record carries
-    /// both the pubkey and a real UDP port.
+    /// Two dial modes:
+    ///
+    /// * **Resolve** (default): pass the peer's 64-char hex agent
+    ///   fingerprint as the positional argument; the peer is located
+    ///   over mDNS multicast. The peer must be running `amesh listen`.
+    /// * **Direct**: pass `--addr <ip:port> --pubkey <64-hex>` to dial
+    ///   a known endpoint with no discovery (the WAN / WireGuard path,
+    ///   and what CI uses for a deterministic loopback round-trip).
+    ///   `amesh listen` prints both the port and `agent_pubkey`.
     Send {
-        /// Peer agent pubkey fingerprint (64-char hex).
-        peer_fp: String,
+        /// Peer agent fingerprint (64-char hex) to resolve over mDNS.
+        /// Omit when using `--addr`/`--pubkey` direct dial; if given
+        /// alongside `--pubkey` it must equal `blake3(pubkey)`.
+        peer_fp: Option<String>,
+        /// Direct-dial socket address, e.g. `192.168.1.5:47800` — skips
+        /// mDNS discovery. Requires `--pubkey`.
+        #[arg(long)]
+        addr: Option<String>,
+        /// Peer agent ed25519 public key (64-char hex) for direct dial.
+        /// Required with `--addr`.
+        #[arg(long)]
+        pubkey: Option<String>,
         /// Payload as a JSON-shaped string (sent verbatim as UTF-8).
         #[arg(long)]
         payload: String,
-        /// How long to wait for the peer to appear in discovery.
+        /// How long to wait for the peer to appear in discovery
+        /// (resolve mode only).
         #[arg(long, default_value = "10s")]
         timeout: String,
     },
@@ -159,9 +175,11 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Peers { listen, same_user } => peers::run(home, listen, same_user).await,
         Command::Send {
             peer_fp,
+            addr,
+            pubkey,
             payload,
             timeout,
-        } => send::run(home, peer_fp, payload, timeout).await,
+        } => send::run(home, peer_fp, addr, pubkey, payload, timeout).await,
         Command::Listen { duration } => listen::run(home, duration).await,
         Command::Mcp { quiet } => mcp::run(home, quiet).await,
     }
@@ -333,12 +351,46 @@ mod tests {
         match cli.command {
             Command::Send {
                 peer_fp,
+                addr,
+                pubkey,
                 payload,
                 timeout,
             } => {
-                assert_eq!(peer_fp, "deadbeef");
+                assert_eq!(peer_fp.as_deref(), Some("deadbeef"));
+                assert!(addr.is_none());
+                assert!(pubkey.is_none());
                 assert_eq!(payload, "{\"hello\":\"world\"}");
                 assert_eq!(timeout, "10s");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_send_direct_addr_and_pubkey() {
+        let cli = Cli::try_parse_from([
+            "amesh",
+            "send",
+            "--addr",
+            "192.168.1.5:47800",
+            "--pubkey",
+            "aa".repeat(32).as_str(),
+            "--payload",
+            "hi",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Send {
+                peer_fp,
+                addr,
+                pubkey,
+                payload,
+                ..
+            } => {
+                assert!(peer_fp.is_none(), "positional omitted in direct mode");
+                assert_eq!(addr.as_deref(), Some("192.168.1.5:47800"));
+                assert_eq!(pubkey.as_deref(), Some("aa".repeat(32).as_str()));
+                assert_eq!(payload, "hi");
             }
             _ => panic!("wrong variant"),
         }
