@@ -102,6 +102,9 @@ pub async fn run(home: PathBuf, peer_fp: String, payload: String, timeout: Strin
     );
     send_envelope(&mut send, &envelope).await?;
     send.finish().context("finish send stream")?;
+    send.stopped()
+        .await
+        .context("wait for peer to drain send stream")?;
 
     println!(
         "sent envelope to {} ({} bytes payload)",
