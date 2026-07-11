@@ -1,10 +1,23 @@
 //! End-to-end test of `amesh mcp` as a real subprocess over stdio —
 //! the exact loop an MCP client (Claude Code, drake) drives.
 //!
-//! Recreates the soak-test scenario from issue #23 deterministically:
-//! keygen into a temp home, start the MCP server, discover a live
-//! echo responder over mDNS, and round-trip a `mesh_request` through
-//! the server — no scratch client crates, no external services.
+//! Recreates the soak-test scenario from issue #23: keygen into a temp
+//! home, start the MCP server, discover a live echo responder over mDNS,
+//! and round-trip a `mesh_request` through the server — no scratch client
+//! crates, no external services.
+//!
+//! Tiering (#166): despite the "no external services" framing, steps 5–6
+//! resolve the responder over **mDNS multicast** (`mesh_peers` discovery
+//! and `mesh_request`-by-fingerprint-prefix — `amesh mcp` has no
+//! direct-address dial path). Multicast is unreliable on hosted CI
+//! runners, so this round-trip is flaky there: the resolve never
+//! completes and the client's 20s `STEP_TIMEOUT` fires. It is therefore
+//! `#[ignore]`d — run it on demand on a real LAN with
+//! `cargo test -- --ignored`. The server's own request/reply/inbox LOGIC
+//! is covered deterministically (no sockets) by the in-memory-transport
+//! test in `agent-mesh-bus` (`request_reply_roundtrip_over_in_memory_transport`);
+//! what this test uniquely exercises is the real stdio-subprocess + real
+//! multicast-discovery path.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -100,6 +113,11 @@ fn echo_agent(user: &UserKey) -> AgentKey {
     )
 }
 
+// Real mDNS multicast discovery (steps 5–6 resolve the responder by
+// fingerprint over multicast); flaky on hosted CI. See the module doc.
+// The bus request/reply logic is covered deterministically in-memory in
+// agent-mesh-bus's `request_reply_roundtrip_over_in_memory_transport`.
+#[ignore = "real mDNS multicast discovery (amesh mcp resolves the responder by fingerprint); flaky on hosted CI. Run with --ignored on a real LAN."]
 #[tokio::test(flavor = "multi_thread")]
 async fn mcp_server_round_trips_request_to_live_responder() {
     // 1. keygen into a private home (the same `--home` flow real
