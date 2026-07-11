@@ -1,6 +1,6 @@
 //! Request/reply round-trip integration tests over the REAL iroh transport.
 //!
-//! Tiering (#166): the request/reply/inbox/reply-routing LOGIC is covered
+//! Tiering (#52): the request/reply/inbox/reply-routing LOGIC is covered
 //! deterministically, with no sockets, by the in-memory-transport test in
 //! `bus.rs` (`request_reply_roundtrip_over_in_memory_transport`) plus the
 //! `inbox` unit tests. The tests here exercise the *real* QUIC/mDNS stack:
