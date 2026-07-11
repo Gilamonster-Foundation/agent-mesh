@@ -21,12 +21,14 @@ pub mod inbox;
 pub mod replay;
 pub mod reply;
 pub mod topic;
+pub mod transport;
 
 #[cfg(feature = "pyo3")]
 pub mod pyo3_module;
 
-pub use bus::{Bus, BusOptions, PeerEndpoint};
+pub use bus::{Bus, BusOptions, IrohTransport, PeerEndpoint};
 pub use error::{BusError, Result};
 pub use inbox::{BusMessage, Inbox, OutgoingReply};
 pub use reply::CorrelationId;
 pub use topic::Topic;
+pub use transport::{InMemoryTransport, Inbound, MeshNet, ReplyRoute, Transport};

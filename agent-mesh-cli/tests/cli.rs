@@ -411,6 +411,16 @@ fn peers_with_same_user_filter_renders() {
     }
 }
 
+// `amesh send <fingerprint>` resolves the peer over mDNS multicast (there is
+// no direct-address send mode), so this real-`amesh` round-trip depends on
+// multicast discovery — which is unreliable on hosted CI runners (the resolve
+// races a timeout; "connect: timed out" / "No address lookup configured"). It
+// has been failing on `main` since it was added. `#[ignore]`d as a real-LAN
+// integration test — run on demand with `cargo test -- --ignored` — the same
+// tiering the mDNS bus round-trip tests use (#166). The bus request/reply
+// LOGIC is covered deterministically by the in-memory-transport test in
+// `agent-mesh-bus`; the real QUIC transport by the direct-dial bus round-trip.
+#[ignore = "real mDNS multicast discovery (amesh send resolves by fingerprint); flaky on hosted CI. Run with --ignored on a real LAN."]
 #[test]
 fn listen_send_roundtrip_delivers_payload_before_sender_exits() {
     let dir = TempDir::new().unwrap();
