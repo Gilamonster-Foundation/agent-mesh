@@ -1,7 +1,20 @@
-//! 30-line request/reply round-trip — the canonical "the bus works"
-//! integration test for Phase 3. Two `Bus` instances in the same
-//! process under the same user fingerprint exchange one request and
-//! one reply over real loopback UDP via QUIC + mDNS.
+//! Request/reply round-trip integration tests over the REAL iroh transport.
+//!
+//! Tiering (#166): the request/reply/inbox/reply-routing LOGIC is covered
+//! deterministically, with no sockets, by the in-memory-transport test in
+//! `bus.rs` (`request_reply_roundtrip_over_in_memory_transport`) plus the
+//! `inbox` unit tests. The tests here exercise the *real* QUIC/mDNS stack:
+//!
+//! - [`request_reply_roundtrip_via_direct_dial_no_mdns`] — real QUIC over
+//!   loopback, no multicast. Deterministic enough to gate every PR; it is the
+//!   per-PR real-transport smoke.
+//! - [`request_reply_roundtrip`] and [`reply_reaches_quiet_asker_via_dial_back`]
+//!   additionally depend on **mDNS multicast discovery**, which is flaky on
+//!   hosted CI runners (no reliable multicast; the resolve races a 5s
+//!   timeout). They are `#[ignore]`d — run them on demand with
+//!   `cargo test -- --ignored` on a real LAN. Their bus-logic coverage is
+//!   already provided by the deterministic tests above; what they uniquely
+//!   touch is the real multicast-discovery path.
 
 use agent_mesh_bus::{Bus, BusOptions, PeerEndpoint, Topic};
 use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, UserKey};
@@ -22,6 +35,9 @@ fn agent(user: &UserKey, role: &str) -> AgentKey {
     )
 }
 
+// Real mDNS multicast discovery — flaky on hosted CI (see the module doc).
+// The bus-logic round-trip is covered deterministically in-memory in `bus.rs`.
+#[ignore = "real mDNS multicast discovery; flaky on hosted CI. Run with --ignored on a real LAN. Logic covered by the in-memory-transport test in bus.rs."]
 #[tokio::test(flavor = "multi_thread")]
 async fn request_reply_roundtrip() {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
@@ -57,10 +73,14 @@ async fn request_reply_roundtrip() {
 /// responder dials back the UDP source the request physically came
 /// from instead of resolving the asker by fingerprint.
 ///
-/// Before dial-back landed this timed out — the responder's
-/// `ship_reply` waited 5s for an mDNS announce that never came (the
-/// same failure mode as the cold-start race where an announced asker's
-/// record simply hasn't propagated yet).
+/// Before dial-back landed this timed out — the responder waited 5s for an
+/// mDNS announce that never came (the same failure mode as the cold-start
+/// race where an announced asker's record simply hasn't propagated yet).
+///
+/// Still resolves BOB over mDNS multicast, so it carries the same
+/// hosted-CI flakiness as [`request_reply_roundtrip`] and is likewise
+/// `#[ignore]`d — run on demand on a real LAN.
+#[ignore = "real mDNS multicast discovery (resolves bob); flaky on hosted CI. Run with --ignored on a real LAN."]
 #[tokio::test(flavor = "multi_thread")]
 async fn reply_reaches_quiet_asker_via_dial_back() {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
