@@ -842,7 +842,7 @@ mod tests {
         )
     }
 
-    /// #166: the request/reply round-trip driven over the **in-memory
+    /// The request/reply round-trip driven over the **in-memory
     /// transport** — the exact same `Bus` send / receive / inbox / reply
     /// wiring the iroh path uses, but with no sockets, no mDNS, and no QUIC
     /// handshake timing. Deterministic and portable, replacing the real-mDNS

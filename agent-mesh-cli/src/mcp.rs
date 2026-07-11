@@ -17,12 +17,13 @@
 //! the MCP stdio transport; `--quiet` binds without announcing
 //! (replies still arrive via the bus's dial-back path).
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_mesh_bus::{Bus, BusOptions, Topic};
+use agent_mesh_bus::{Bus, BusOptions, PeerEndpoint, Topic};
 use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, Fingerprint, UserKey};
 use agent_mesh_transport::{PeerResolver, ResolverHandle};
 use anyhow::{anyhow, Context, Result};
@@ -230,13 +231,21 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "mesh_request",
-            "description": "Send a request to a peer on a topic and wait for the reply. The body is forwarded verbatim — e.g. for a newt responder use topic `newt/inference/v1` with body {\"prompt\": ..., \"tier\": null, \"model\": null, \"max_tokens\": ...}.",
+            "description": "Send a request to a peer on a topic and wait for the reply. The body is forwarded verbatim — e.g. for a newt responder use topic `newt/inference/v1` with body {\"prompt\": ..., \"tier\": null, \"model\": null, \"max_tokens\": ...}. Name the peer one of two ways: `peer` (resolve by fingerprint over mDNS) OR `addr`+`pubkey` (direct dial a known endpoint, no discovery — the WAN/WireGuard path).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "peer": {
                         "type": "string",
-                        "description": "Peer agent fingerprint — 64-char hex, or a unique prefix of a discovered peer."
+                        "description": "Resolve mode: peer agent fingerprint — 64-char hex, or a unique prefix of a discovered peer. Omit when using addr+pubkey."
+                    },
+                    "addr": {
+                        "type": "string",
+                        "description": "Direct-dial socket address, e.g. `192.168.1.5:47800`. Requires `pubkey`; skips mDNS."
+                    },
+                    "pubkey": {
+                        "type": "string",
+                        "description": "Direct-dial peer agent ed25519 public key (64-char hex). Requires `addr`."
                     },
                     "topic": {
                         "type": "string",
@@ -250,7 +259,7 @@ fn tool_definitions() -> Value {
                         "description": "How long to wait for the reply (default 30)."
                     }
                 },
-                "required": ["peer", "topic", "body"]
+                "required": ["topic", "body"]
             }
         }
     ])
@@ -309,10 +318,9 @@ async fn tool_peers(state: &McpState, args: &Value) -> Result<String> {
 }
 
 async fn tool_request(state: &McpState, args: &Value) -> Result<String> {
-    let peer_arg = args
-        .get("peer")
-        .and_then(|p| p.as_str())
-        .ok_or_else(|| anyhow!("mesh_request needs `peer`"))?;
+    // `peer` is required only in resolve mode; direct dial uses
+    // `addr`+`pubkey` instead (validated in the match below).
+    let peer_arg = args.get("peer").and_then(|p| p.as_str());
     let topic_name = args
         .get("topic")
         .and_then(|t| t.as_str())
@@ -331,14 +339,43 @@ async fn tool_request(state: &McpState, args: &Value) -> Result<String> {
         other => serde_json::to_vec(other)?,
     };
 
-    let peer_fp = resolve_peer(state, peer_arg).await?;
     let topic = Topic::new(state.bus.user_fingerprint(), topic_name);
+    let timeout = Duration::from_secs_f64(timeout_secs);
+
+    // Two ways to name the peer, mutually exclusive:
+    //   * `addr` + `pubkey` — direct dial a known endpoint (no mDNS).
+    //   * `peer`            — resolve a fingerprint/prefix over mDNS.
+    let addr_arg = args.get("addr").and_then(Value::as_str);
+    let pubkey_arg = args.get("pubkey").and_then(Value::as_str);
 
     let started = std::time::Instant::now();
-    let reply_bytes = state
-        .bus
-        .request(peer_fp, &topic, body, Duration::from_secs_f64(timeout_secs))
-        .await?;
+    let (peer_fp, reply_bytes) = match (addr_arg, pubkey_arg) {
+        (Some(addr), Some(pubkey)) => {
+            let sock: SocketAddr = addr
+                .parse()
+                .with_context(|| format!("parse `addr` {addr:?} as <ip>:<port>"))?;
+            let endpoint = PeerEndpoint::new(parse_pubkey_hex(pubkey)?, sock);
+            let peer_fp = endpoint.fingerprint();
+            let reply = state
+                .bus
+                .request_direct(endpoint, &topic, body, timeout)
+                .await?;
+            (peer_fp, reply)
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(anyhow!(
+                "mesh_request direct dial needs both `addr` and `pubkey`"
+            ));
+        }
+        (None, None) => {
+            let peer_arg = peer_arg.ok_or_else(|| {
+                anyhow!("mesh_request needs `peer` (or `addr`+`pubkey` for direct dial)")
+            })?;
+            let peer_fp = resolve_peer(state, peer_arg).await?;
+            let reply = state.bus.request(peer_fp, &topic, body, timeout).await?;
+            (peer_fp, reply)
+        }
+    };
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
     // Surface JSON replies as JSON; anything else as lossy UTF-8.
@@ -378,6 +415,15 @@ async fn resolve_peer(state: &McpState, arg: &str) -> Result<Fingerprint> {
                 .join(", ")
         )),
     }
+}
+
+/// Parse a 64-char hex string into a 32-byte ed25519 pubkey for direct dial.
+fn parse_pubkey_hex(s: &str) -> Result<[u8; 32]> {
+    let bytes = hex::decode(s.trim())
+        .with_context(|| "`pubkey` must be 64-char hex (32 bytes)".to_string())?;
+    bytes
+        .try_into()
+        .map_err(|v: Vec<u8>| anyhow!("`pubkey` decoded to {} bytes, need 32", v.len()))
 }
 
 #[cfg(test)]
@@ -512,6 +558,74 @@ mod tests {
         .err()
         .unwrap();
         assert!(err.message.contains("mesh_peers"), "got: {}", err.message);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn request_direct_needs_both_addr_and_pubkey() {
+        let state = quiet_state().await;
+        // `addr` without `pubkey` — the direct-dial half is incomplete.
+        let err = handle_request(
+            &state,
+            "tools/call",
+            json!({
+                "name": "mesh_request",
+                "arguments": { "addr": "127.0.0.1:47800", "topic": "t", "body": "x" }
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(
+            err.message.contains("both `addr` and `pubkey`"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn request_direct_rejects_malformed_pubkey() {
+        let state = quiet_state().await;
+        let err = handle_request(
+            &state,
+            "tools/call",
+            json!({
+                "name": "mesh_request",
+                "arguments": {
+                    "addr": "127.0.0.1:47800",
+                    "pubkey": "not-hex",
+                    "topic": "t",
+                    "body": "x"
+                }
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(err.message.contains("pubkey"), "got: {}", err.message);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn request_without_peer_or_addr_is_rejected() {
+        let state = quiet_state().await;
+        let err = handle_request(
+            &state,
+            "tools/call",
+            json!({
+                "name": "mesh_request",
+                "arguments": { "topic": "t", "body": "x" }
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(err.message.contains("needs `peer`"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn parse_pubkey_hex_roundtrips_and_rejects_bad_length() {
+        assert_eq!(parse_pubkey_hex(&"cd".repeat(32)).unwrap(), [0xcd; 32]);
+        let err = parse_pubkey_hex(&"cd".repeat(10)).unwrap_err();
+        assert!(err.to_string().contains("10 bytes"), "got: {err}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
