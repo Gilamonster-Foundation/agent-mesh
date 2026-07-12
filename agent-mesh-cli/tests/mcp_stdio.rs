@@ -189,6 +189,78 @@ async fn mcp_server_direct_addr_round_trips_to_live_responder() {
     responder.close().await.expect("close responder");
 }
 
+/// Deterministic `mesh_publish` fan-out: `amesh mcp` publishes a body to a
+/// quiet-bound in-process subscriber `Bus` by explicit `addr`+`pubkey` over
+/// real QUIC on loopback (no mDNS), and the subscriber's topic
+/// `broadcast::Receiver` receives it (#56). Fire-and-forget — no reply,
+/// unlike the request round-trip above.
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_server_direct_addr_publishes_to_subscriber() {
+    // 1. keygen + start the MCP server + handshake.
+    let home = tempfile::tempdir().unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_amesh"))
+        .arg("--home")
+        .arg(home.path())
+        .arg("keygen")
+        .status()
+        .await
+        .expect("run keygen");
+    assert!(status.success(), "keygen must succeed");
+    let user = UserKey::load(&home.path().join("user.key")).expect("load generated key");
+
+    let mut client = McpClient::spawn(home.path());
+    let init = client.call("initialize", json!({})).await;
+    assert_eq!(init["result"]["serverInfo"]["name"], "amesh-mcp");
+    client.notify("notifications/initialized").await;
+
+    // 2. Bring up a quiet-bound subscriber and subscribe BEFORE publishing
+    //    so the broadcast channel exists to buffer the message.
+    let subscriber_agent = echo_agent(&user);
+    let subscriber_pubkey = subscriber_agent.public_bytes();
+    let subscriber = Bus::bind_with(&user, subscriber_agent, 0, BusOptions { announce: false })
+        .await
+        .expect("bind subscriber");
+    let subscriber_port = subscriber.local_port();
+    let topic = Topic::new(user.fingerprint(), "notes/v1");
+    let mut sub_rx = subscriber.subscribe(&topic).await;
+
+    // 3. Publish via explicit addr+pubkey — no mesh_peers, no mDNS.
+    let publish = client
+        .call(
+            "tools/call",
+            json!({
+                "name": "mesh_publish",
+                "arguments": {
+                    "addr": format!("127.0.0.1:{subscriber_port}"),
+                    "pubkey": hex::encode(subscriber_pubkey),
+                    "topic": "notes/v1",
+                    "body": { "note": "hello sub" }
+                }
+            }),
+        )
+        .await;
+    let publish = McpClient::tool_text(&publish);
+    assert_eq!(publish["published"], true, "publish ack; got {publish}");
+    assert_eq!(publish["topic"], "notes/v1");
+
+    // 4. The subscriber's broadcast receiver gets the published body.
+    let got = tokio::time::timeout(STEP_TIMEOUT, sub_rx.recv())
+        .await
+        .expect("subscriber must receive the publish before timeout")
+        .expect("broadcast recv");
+    let got: Value = serde_json::from_slice(&got).expect("published body is JSON");
+    assert_eq!(got, json!({ "note": "hello sub" }));
+
+    // 5. Clean shutdown.
+    drop(client.stdin);
+    let status = tokio::time::timeout(STEP_TIMEOUT, client.child.wait())
+        .await
+        .expect("server must exit after stdin closes")
+        .expect("wait");
+    assert!(status.success(), "clean exit, got {status:?}");
+    subscriber.close().await.expect("close subscriber");
+}
+
 // Real mDNS multicast discovery (steps 5–6 resolve the responder by
 // fingerprint over multicast); flaky on hosted CI. See the module doc.
 // The deterministic per-PR coverage of the same round-trip is
@@ -226,7 +298,10 @@ async fn mcp_server_round_trips_request_to_live_responder() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, vec!["mesh_whoami", "mesh_peers", "mesh_request"]);
+    assert_eq!(
+        names,
+        vec!["mesh_whoami", "mesh_peers", "mesh_request", "mesh_publish"]
+    );
 
     let whoami = client
         .call(
