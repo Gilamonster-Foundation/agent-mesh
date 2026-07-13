@@ -604,7 +604,22 @@ async fn dial_reply_peer(
 ) -> Result<Connection> {
     if let Some((pubkey, addr)) = reverse {
         if Fingerprint::of_bytes(pubkey.as_bytes()) == peer_fp {
-            match endpoint.dial(pubkey, [addr]).await {
+            // CANDIDATE (unverified — see issue #61): augment the dial-back with
+            // loopback at the source port, mirroring `dial_peer`, so a same-host
+            // quiet-bind client is reachable when its source is a scopeless
+            // link-local IPv6. Passed the isolated `quiet_client` test but was
+            // racy in the full serial suite; the scope_id-preserving fix is
+            // likely more correct. Left for the transport owner.
+            let mut dial_addrs = vec![addr];
+            for lo in [
+                SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), addr.port()),
+                SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), addr.port()),
+            ] {
+                if !dial_addrs.contains(&lo) {
+                    dial_addrs.push(lo);
+                }
+            }
+            match endpoint.dial(pubkey, dial_addrs).await {
                 Ok(conn) => return Ok(conn),
                 Err(e) => tracing::debug!(
                     peer = %peer_fp.short(),
