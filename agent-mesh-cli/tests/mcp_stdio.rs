@@ -152,8 +152,9 @@ async fn mcp_server_direct_addr_round_trips_to_live_responder() {
         let req: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
         Ok(serde_json::to_vec(&json!({ "echo": req["msg"] })).unwrap())
     });
-    // Only the handler registration needs a beat — there is no discovery.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // No beat needed: `handle_requests` registers the handler
+    // synchronously before returning, and there is no discovery to wait
+    // on (the responder is dialed by explicit addr+pubkey).
 
     // 4. Round-trip via explicit addr+pubkey — no mesh_peers, no mDNS.
     let reply = client

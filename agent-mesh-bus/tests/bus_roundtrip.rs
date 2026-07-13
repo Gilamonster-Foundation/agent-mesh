@@ -150,9 +150,9 @@ async fn request_reply_roundtrip_via_direct_dial_no_mdns() {
         Ok(format!("echo: {}", String::from_utf8_lossy(&body)).into_bytes())
     });
 
-    // Brief pause only for handler registration to settle — there is
-    // no discovery to wait on.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // No pause needed: `handle_requests` registers the handler
+    // synchronously before returning, and there is no discovery to wait
+    // on (both buses bound quiet). The round-trip is fully deterministic.
 
     // The explicit dial route: bob's agent pubkey + his loopback addr.
     let bob_endpoint = PeerEndpoint::new(
