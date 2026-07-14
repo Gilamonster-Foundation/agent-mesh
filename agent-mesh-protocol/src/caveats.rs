@@ -19,10 +19,16 @@
 //! it was minted with. Safety becomes structural rather than a property of the
 //! model behaving.
 //!
-//! This crate ships the lattice type and its laws (property-tested). Wiring it
-//! into [`crate::AgentMetadata`] and enforcing `child ⊑ parent` at issue time
-//! is the next step; OS-level enforcement (Landlock, uid-mapped namespaces) is
-//! the step after that. See
+//! This crate ships the lattice type and its laws (property-tested). The
+//! lattice is wired into [`crate::AgentMetadata`] (the `caveats` field is part
+//! of the signed cert payload) and `child ⊑ parent` attenuation is enforced at
+//! two independent points: [`AgentKey::delegate`](crate::AgentKey::delegate)
+//! refuses to mint an amplifying child ([`MeshError::CaveatAmplification`](crate::MeshError::CaveatAmplification)),
+//! and [`CertChain::verify`](crate::CertChain::verify) re-checks attenuation at
+//! every delegated link — so a forged chain that amplifies authority is
+//! rejected even when each signature is valid (see
+//! `forged_amplifying_chain_fails_verify` in `agent_key.rs`). OS-level
+//! enforcement (Landlock, uid-mapped namespaces) is the next step. See
 //! `docs/decisions/agentic_object_capability_security.md` in the `newt-agent`
 //! repo for the full design.
 //!
