@@ -314,14 +314,15 @@ impl Bus {
         F: Fn(Vec<u8>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Vec<u8>>> + Send + 'static,
     {
-        let inbox = self.inbox.clone();
-        // Inbox::register_handler is async only because it takes a
-        // write lock; spawn it so the caller doesn't have to .await.
-        // The handler is in place by the time the next message is
-        // dispatched.
-        tokio::spawn(async move {
-            inbox.register_handler(topic, handler).await;
-        });
+        // Register synchronously so the handler is live the instant this
+        // returns. Previously this spawned the registration onto the
+        // runtime, which left a window — before the spawned task was
+        // polled — where a request dispatched to this topic found no
+        // handler and was silently dropped (`Inbox::dispatch_request`
+        // returns `Ok(None)`), timing out the asker. Direct-dial
+        // round-trip tests papered over that window with a fixed
+        // `sleep`; synchronous registration removes the race outright.
+        self.inbox.register_handler(topic, handler);
     }
 
     /// Publish a body to `peer_fp` on `topic`. Fire-and-forget — the
@@ -872,12 +873,9 @@ mod tests {
         bob_bus.handle_requests(topic.clone(), |body| async move {
             Ok(format!("echo: {}", String::from_utf8_lossy(&body)).into_bytes())
         });
-        // `handle_requests` registers on a spawned task; on the single-threaded
-        // runtime a couple of yields run it to completion (it only takes an
-        // uncontended lock) before we send — deterministic, no wall-clock sleep.
-        for _ in 0..4 {
-            tokio::task::yield_now().await;
-        }
+        // No yield/sleep needed: `handle_requests` registers the handler
+        // synchronously before it returns (see
+        // `handle_requests_registers_synchronously_no_spawn_race`).
 
         let reply = alice_bus
             .request(bob_fp, &topic, b"hi".to_vec(), Duration::from_secs(5))
@@ -886,6 +884,52 @@ mod tests {
         assert_eq!(reply, b"echo: hi");
 
         alice_bus.close().await.unwrap();
+        bob_bus.close().await.unwrap();
+    }
+
+    /// Regression (#52 de-flake): `handle_requests` must register the
+    /// handler *before it returns*, with no spawn and no intervening
+    /// yield. It used to spawn the registration onto the runtime, so on a
+    /// `current_thread` runtime — where a spawned task is not polled until
+    /// the current task next yields — the handler was still absent the
+    /// instant `handle_requests` returned. A request dispatched into that
+    /// window found no handler and was silently dropped
+    /// (`Inbox::dispatch_request` -> `Ok(None)`), timing out the asker.
+    /// That is the exact flake the direct-dial round-trip tests used to
+    /// mask with a fixed `sleep(200ms)`.
+    ///
+    /// This test asserts the count with no yield between registration and
+    /// the check: it deterministically FAILS on the old spawn-based
+    /// implementation (count still 0) and PASSES on synchronous
+    /// registration (count 1). Run on the default single-threaded test
+    /// runtime so the "spawned task hasn't been polled yet" invariant
+    /// holds.
+    #[tokio::test]
+    async fn handle_requests_registers_synchronously_no_spawn_race() {
+        let user = UserKey::generate();
+        let bob = Arc::new(agent(&user, "bob"));
+        let bob_fp = bob.fingerprint();
+        let net = MeshNet::new();
+        let bob_bus =
+            Bus::bind_with_transport(bob, user.fingerprint(), Arc::new(net.transport_for(bob_fp)));
+
+        let topic = Topic::new(user.fingerprint(), "echo");
+        assert_eq!(
+            bob_bus.inbox.handler_count(),
+            0,
+            "no handler registered before handle_requests"
+        );
+
+        bob_bus.handle_requests(topic, |body| async move { Ok(body) });
+
+        // No sleep, no yield: on the old spawn-based code the spawned
+        // registration task has not run yet, so this would still read 0.
+        assert_eq!(
+            bob_bus.inbox.handler_count(),
+            1,
+            "handle_requests must register the handler before returning"
+        );
+
         bob_bus.close().await.unwrap();
     }
 
