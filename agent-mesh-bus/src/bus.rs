@@ -446,6 +446,45 @@ async fn dial_endpoint(endpoint: &Endpoint, peer: PeerEndpoint) -> Result<Connec
     Ok(conn)
 }
 
+/// `fe80::/10` link-local IPv6 with **no scope id**. Such an address is
+/// undialable, and left in an iroh dial set it fails `sendmsg` with
+/// `InvalidInput`, aborting the whole race (the #61 root cause). We hand-roll
+/// the `fe80::/10` test because `Ipv6Addr::is_unicast_link_local` is still
+/// unstable on our MSRV (1.75).
+fn is_scopeless_link_local(addr: &SocketAddr) -> bool {
+    match addr {
+        SocketAddr::V6(v6) => (v6.ip().segments()[0] & 0xffc0) == 0xfe80 && v6.scope_id() == 0,
+        SocketAddr::V4(_) => false,
+    }
+}
+
+/// Ordered dial candidates for a peer's **reply** route, keyed by identity:
+/// locations are candidates, never load-bearing (see
+/// `docs/decisions/floating_identity.md`). The set is the recv source path
+/// (its `recvmsg` scope id already intact) plus same-host loopback at that
+/// port; scopeless link-local is filtered so it can never poison the dial
+/// race. Never a single load-bearing address; never empty for a same-host
+/// peer.
+fn reply_dial_candidates(source: SocketAddr) -> Vec<SocketAddr> {
+    // QUIC uses one socket both directions, so the source port is also the
+    // dial-back port for same-host loopback (mirrors `dial_peer`).
+    let port = source.port();
+    let mut candidates: Vec<SocketAddr> = Vec::with_capacity(3);
+    for addr in [
+        source,
+        SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), port),
+        SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), port),
+    ] {
+        if is_scopeless_link_local(&addr) {
+            continue;
+        }
+        if !candidates.contains(&addr) {
+            candidates.push(addr);
+        }
+    }
+    candidates
+}
+
 /// Resolve `peer_fp` via mDNS, then dial the iroh endpoint.
 async fn dial_peer(
     endpoint: &Endpoint,
@@ -498,6 +537,11 @@ async fn dial_peer(
             socket_addrs.push(addr);
         }
     }
+    // A scopeless link-local mDNS address (`fe80::` with no scope id) is
+    // undialable and, left in the set, fails `sendmsg` with `InvalidInput`,
+    // aborting the whole iroh race (#61). Drop it — loopback keeps the set
+    // non-empty for same-host peers.
+    socket_addrs.retain(|addr| !is_scopeless_link_local(addr));
     tracing::debug!(
         peer = %peer_fp.short(),
         addrs = ?socket_addrs,
@@ -605,14 +649,20 @@ async fn dial_reply_peer(
 ) -> Result<Connection> {
     if let Some((pubkey, addr)) = reverse {
         if Fingerprint::of_bytes(pubkey.as_bytes()) == peer_fp {
-            match endpoint.dial(pubkey, [addr]).await {
-                Ok(conn) => return Ok(conn),
-                Err(e) => tracing::debug!(
-                    peer = %peer_fp.short(),
-                    %addr,
-                    error = %e,
-                    "bus: reply dial-back failed, falling back to mDNS"
-                ),
+            // Dial the peer's *identity* over a candidate set (source path +
+            // same-host loopback), never a single load-bearing address — see
+            // `docs/decisions/floating_identity.md` and #61.
+            let candidates = reply_dial_candidates(addr);
+            if !candidates.is_empty() {
+                match endpoint.dial(pubkey, candidates.iter().copied()).await {
+                    Ok(conn) => return Ok(conn),
+                    Err(e) => tracing::debug!(
+                        peer = %peer_fp.short(),
+                        ?candidates,
+                        error = %e,
+                        "bus: reply dial-back failed, falling back to mDNS"
+                    ),
+                }
             }
         } else {
             tracing::warn!(
@@ -991,5 +1041,98 @@ mod tests {
             other => panic!("expected Unreachable, got {other:?}"),
         }
         bus.close().await.unwrap();
+    }
+
+    // ── reply dial-candidate resolution ──────────────────────────────────
+    // Locations are candidates, never load-bearing
+    // (docs/decisions/floating_identity.md). These are pure and deterministic,
+    // so they gate every PR; the real dial-back-over-iroh proof stays
+    // `#[ignore]`d on the real-LAN tier (see tests/bus_roundtrip.rs).
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV6};
+
+    fn lo_v4(port: u16) -> SocketAddr {
+        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)
+    }
+    fn lo_v6(port: u16) -> SocketAddr {
+        SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port)
+    }
+
+    /// Regression for #61: a reply whose observed source is a **scopeless**
+    /// link-local IPv6 (`fe80::` with `scope_id == 0` — what mDNS surfaces on
+    /// CI / most Linux hosts) must not collapse to one undialable candidate.
+    /// Before the fix `dial_reply_peer` dialed `[that one addr]` →
+    /// `sendmsg InvalidInput` → a quiet-bind peer's reply was lost. The set
+    /// now drops the scopeless addr yet stays reachable via same-host loopback.
+    #[test]
+    fn scopeless_link_local_source_dropped_loopback_survives() {
+        let src: SocketAddr = "[fe80::1]:9000".parse().unwrap(); // scope_id = 0
+        let cands = reply_dial_candidates(src);
+        assert!(!cands.is_empty(), "identity must retain a usable path");
+        assert!(
+            !cands.contains(&src),
+            "scopeless link-local is undialable; must be filtered out"
+        );
+        assert!(
+            cands.contains(&lo_v4(9000)),
+            "same-host v4 loopback must be a candidate"
+        );
+        assert!(
+            cands.contains(&lo_v6(9000)),
+            "same-host v6 loopback must be a candidate"
+        );
+    }
+
+    /// A link-local source WITH a real scope id (`recvmsg` preserved it —
+    /// verified present through iroh's noq-udp fork) is dialable, so keep it.
+    #[test]
+    fn scoped_link_local_source_is_kept() {
+        let ip: Ipv6Addr = "fe80::1".parse().unwrap();
+        let src = SocketAddr::V6(SocketAddrV6::new(ip, 9000, 0, 3)); // scope_id = 3
+        let cands = reply_dial_candidates(src);
+        assert!(
+            cands.contains(&src),
+            "a scoped link-local is dialable; keep it"
+        );
+    }
+
+    /// A routable source yields itself plus both loopbacks — never a single
+    /// load-bearing address (floating-identity laws #1/#2).
+    #[test]
+    fn routable_source_yields_source_plus_loopback() {
+        let src: SocketAddr = "192.0.2.50:9000".parse().unwrap(); // RFC 5737 TEST-NET-1
+        let cands = reply_dial_candidates(src);
+        assert!(cands.contains(&src));
+        assert!(cands.contains(&lo_v4(9000)));
+        assert!(cands.contains(&lo_v6(9000)));
+        assert!(cands.len() >= 2, "never a single load-bearing address");
+    }
+
+    /// QUIC uses one socket both directions, so the source port is also the
+    /// dial-back port for loopback. A loopback source must not be duplicated.
+    #[test]
+    fn loopback_source_not_duplicated() {
+        let src = lo_v4(9000);
+        let cands = reply_dial_candidates(src);
+        assert_eq!(
+            cands.iter().filter(|a| **a == src).count(),
+            1,
+            "no duplicate loopback candidate"
+        );
+    }
+
+    /// `fe80::/10` with no scope is poison; scoped link-local, loopback,
+    /// global, IPv4, and `fec0::` (outside the /10) are all fine.
+    #[test]
+    fn scopeless_link_local_predicate_boundaries() {
+        assert!(is_scopeless_link_local(&"[fe80::abcd]:1".parse().unwrap()));
+        assert!(is_scopeless_link_local(&"[febf::1]:1".parse().unwrap())); // top of /10
+        let scoped = SocketAddr::V6(SocketAddrV6::new("fe80::1".parse().unwrap(), 1, 0, 2));
+        assert!(!is_scopeless_link_local(&scoped));
+        assert!(!is_scopeless_link_local(&"[::1]:1".parse().unwrap()));
+        assert!(!is_scopeless_link_local(
+            &"[2001:db8::1]:1".parse().unwrap()
+        ));
+        assert!(!is_scopeless_link_local(&"127.0.0.1:1".parse().unwrap()));
+        assert!(!is_scopeless_link_local(&"[fec0::1]:1".parse().unwrap())); // outside /10
     }
 }
