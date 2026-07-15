@@ -26,6 +26,12 @@ that floats over them. Keep the workload addressable by *who it is*, never
 4. **Conversations outlive locations.** Session primitives (the session-streams
    ADR) attach to fingerprints. A peer that re-binds, roams hosts, or changes
    address mid-conversation is the designed case, not an edge case.
+5. **First contact is a ceremony, not an assumption.** Keyless first contact
+   is a TOFU "leap of faith" open to MITM — RFC 7401's own admission, and the
+   one failure mode of key-as-identity systems with primary-source backing. A
+   fingerprint's key is learned over a verifiable channel or an explicit
+   pinning ceremony. The mesh exposes the introduction as data; the consumer
+   renders the ask (#65).
 
 ## Case study (#61)
 
@@ -53,9 +59,25 @@ The bug is the **singular** address, not the bad one.
 - Ratchet direction: each release, more-fungible substrate and more-durable
   context.
 
+## Prior art
+
+This doctrine re-derives ~30 years of loc/ID-split and Zero Trust canon —
+cite it, don't reargue it:
+
+- Saltzer, RFC 1498 (1993): an address is a mutable binding to a location,
+  categorically not the identity.
+- HIP, RFC 7401 / RFC 9063: identity = public key; the HIT (hash of the key)
+  is its self-certifying fingerprint; IPs are disposable locators transport
+  associations migrate across. Also the TOFU admission behind law 5.
+- NIST SP 800-207, Tenet 2: "Network location alone does not imply trust."
+- SPIFFE: workload trust from a signature chain, never from topology.
+- iroh: "IP addresses break, dial keys instead" — addresses as raced
+  candidates, the model law 2 ships.
+
 ## Related
 
-- Issue #61 / PRs #62 (diagnosis), #64 (fix).
+- Issue #61 / PRs #62 (diagnosis), #64 (fix); #65 (first-contact and other
+  decision surfaces as data, never TUI).
 - `docs/decisions/session_streams.md` — conversations as mesh primitives.
 - newt-mobile — mesh-first client: a phone as a caveat-limited mesh peer,
   identity persisting across radio/network churn.
