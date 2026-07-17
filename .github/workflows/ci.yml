@@ -17,7 +17,7 @@ env:
 jobs:
   lint:
     name: Rust lint (fmt + clippy)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -31,7 +31,7 @@ jobs:
 
   test:
     name: Rust tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -41,7 +41,7 @@ jobs:
 
   coverage:
     name: Workspace coverage (cargo-llvm-cov)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
