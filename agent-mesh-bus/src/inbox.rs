@@ -101,7 +101,15 @@ pub struct Inbox {
     sequence: SequenceTracker,
     waiters: ReplyWaiter,
     subscriptions: RwLock<HashMap<String, broadcast::Sender<Vec<u8>>>>,
-    handlers: RwLock<HashMap<String, RequestHandler>>,
+    // Request handlers are guarded by a *synchronous* lock, not a
+    // `tokio::sync::RwLock`, so a handler can be registered without an
+    // `.await`. That lets `Bus::handle_requests` install the handler
+    // before it returns instead of on a spawned task — closing the
+    // registration race a directly-dialed request could otherwise lose
+    // (see `register_handler`). The guard is only ever held for a
+    // `get().cloned()` / `insert()` and never across an `.await`, so it
+    // cannot block the async runtime.
+    handlers: std::sync::RwLock<HashMap<String, RequestHandler>>,
 }
 
 impl Inbox {
@@ -116,7 +124,7 @@ impl Inbox {
             sequence: SequenceTracker::new(),
             waiters: ReplyWaiter::new(),
             subscriptions: RwLock::new(HashMap::new()),
-            handlers: RwLock::new(HashMap::new()),
+            handlers: std::sync::RwLock::new(HashMap::new()),
         }
     }
 
@@ -137,15 +145,31 @@ impl Inbox {
 
     /// Register a request handler for the given topic.
     ///
+    /// Synchronous by design: registration takes only the in-memory
+    /// `handlers` lock (never held across an `.await`), so the handler
+    /// is live the instant this returns. `Bus::handle_requests` relies
+    /// on that to avoid a spawn-and-race window where a freshly-dialed
+    /// request could arrive before the handler existed and be silently
+    /// dropped.
+    ///
     /// Re-registering replaces the previous handler for that topic.
-    pub async fn register_handler<F, Fut>(&self, topic: Topic, handler: F)
+    pub fn register_handler<F, Fut>(&self, topic: Topic, handler: F)
     where
         F: Fn(Vec<u8>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Vec<u8>>> + Send + 'static,
     {
         let key = topic.wire();
         let boxed: RequestHandler = Arc::new(move |body| Box::pin(handler(body)));
-        self.handlers.write().await.insert(key, boxed);
+        self.handlers
+            .write()
+            .expect("handlers lock poisoned")
+            .insert(key, boxed);
+    }
+
+    /// Number of registered request handlers (tests + diagnostics).
+    #[must_use]
+    pub fn handler_count(&self) -> usize {
+        self.handlers.read().expect("handlers lock poisoned").len()
     }
 
     /// Register an in-flight request waiter; returns the receiver
@@ -244,7 +268,7 @@ impl Inbox {
         body: Vec<u8>,
     ) -> Result<Option<OutgoingReply>> {
         let handler = {
-            let map = self.handlers.read().await;
+            let map = self.handlers.read().expect("handlers lock poisoned");
             map.get(&topic).cloned()
         };
         let Some(handler) = handler else {
@@ -396,11 +420,9 @@ mod tests {
         let topic = Topic::new(user.fingerprint(), "echo");
 
         let inbox = Inbox::new();
-        inbox
-            .register_handler(topic.clone(), |body| async move {
-                Ok([b"echo:".to_vec(), body].concat())
-            })
-            .await;
+        inbox.register_handler(topic.clone(), |body| async move {
+            Ok([b"echo:".to_vec(), body].concat())
+        });
 
         let req = BusMessage::Request {
             topic: topic.wire(),

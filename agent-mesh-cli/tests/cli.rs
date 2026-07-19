@@ -6,6 +6,11 @@
 use assert_cmd::Command;
 use predicates::str::contains;
 use ssh_key::{Algorithm, LineEnding, PrivateKey};
+use std::io::{BufRead, BufReader, Read};
+use std::process::Stdio;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 fn fresh_ssh_key_pem() -> (PrivateKey, String) {
@@ -13,6 +18,50 @@ fn fresh_ssh_key_pem() -> (PrivateKey, String) {
         .expect("generate ssh ed25519");
     let pem = key.to_openssh(LineEnding::LF).expect("encode openssh");
     (key, pem.to_string())
+}
+
+fn forward_child_lines<R: Read + Send + 'static>(
+    stream: R,
+    label: &'static str,
+    tx: mpsc::Sender<String>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        for line in BufReader::new(stream).lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if tx.send(format!("{label}: {line}")).is_err() {
+                break;
+            }
+        }
+    })
+}
+
+fn recv_until<F>(
+    rx: &mpsc::Receiver<String>,
+    transcript: &mut Vec<String>,
+    timeout: Duration,
+    mut pred: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining.min(Duration::from_millis(250))) {
+            Ok(line) => {
+                if pred(&line) {
+                    transcript.push(line.clone());
+                    return Some(line);
+                }
+                transcript.push(line);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    None
 }
 
 #[test]
@@ -360,6 +409,222 @@ fn peers_with_same_user_filter_renders() {
         assert!(stdout.contains("yes"));
         assert!(stdout.contains("ollama"));
     }
+}
+
+/// Deterministic `amesh listen` → `amesh send` round-trip over the REAL
+/// QUIC transport on **loopback with no mDNS**: the sender dials the
+/// listener directly with `--addr 127.0.0.1:<port> --pubkey <hex>`,
+/// both parsed from the listener's own startup banner (#52).
+///
+/// This is the CLI analogue of the bus's
+/// `request_reply_roundtrip_via_direct_dial_no_mdns` — it exercises the
+/// full `amesh send` → handshake → envelope → `amesh listen` receive
+/// path end to end without touching multicast discovery, so it gates
+/// every PR (unlike the resolve-mode round-trip, which needs a real LAN
+/// and stays `#[ignore]`d below).
+#[test]
+fn listen_send_direct_addr_roundtrip_delivers_payload() {
+    let dir = TempDir::new().unwrap();
+    Command::cargo_bin("amesh")
+        .unwrap()
+        .args(["--home", dir.path().to_str().unwrap(), "keygen"])
+        .assert()
+        .success();
+
+    let bin = assert_cmd::cargo::cargo_bin("amesh");
+    let mut listener = std::process::Command::new(&bin)
+        .args([
+            "--home",
+            dir.path().to_str().unwrap(),
+            "listen",
+            "--duration",
+            "30s",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn listener");
+
+    let stdout = listener.stdout.take().expect("listener stdout");
+    let stderr = listener.stderr.take().expect("listener stderr");
+    let (tx, rx) = mpsc::channel();
+    let _stdout_handle = forward_child_lines(stdout, "stdout", tx.clone());
+    let _stderr_handle = forward_child_lines(stderr, "stderr", tx);
+    let mut transcript = Vec::new();
+
+    // Parse the listener's banner for the direct-dial route: the bound
+    // UDP port (`listening on udp/<port>`) and the raw agent pubkey
+    // (`agent_pubkey=<hex>`). Both are needed to dial without mDNS.
+    let kill_listener = |listener: &mut std::process::Child| {
+        let _ = listener.kill();
+        let _ = listener.wait();
+    };
+
+    let port_line = recv_until(&rx, &mut transcript, Duration::from_secs(10), |line| {
+        line.contains("listening on udp/")
+    });
+    let Some(port_line) = port_line else {
+        kill_listener(&mut listener);
+        panic!(
+            "listener did not print its port; transcript:\n{}",
+            transcript.join("\n")
+        );
+    };
+    let port = port_line
+        .rsplit_once("udp/")
+        .expect("udp/<port> line format")
+        .1
+        .trim()
+        .to_string();
+
+    let pubkey_line = recv_until(&rx, &mut transcript, Duration::from_secs(10), |line| {
+        line.contains("agent_pubkey=")
+    });
+    let Some(pubkey_line) = pubkey_line else {
+        kill_listener(&mut listener);
+        panic!(
+            "listener did not print agent_pubkey; transcript:\n{}",
+            transcript.join("\n")
+        );
+    };
+    let pubkey = pubkey_line
+        .split_once("agent_pubkey=")
+        .expect("agent_pubkey line format")
+        .1
+        .trim()
+        .to_string();
+
+    let addr = format!("127.0.0.1:{port}");
+    let payload = "agent-mesh-cli-direct-roundtrip";
+    let send_output = std::process::Command::new(&bin)
+        .args([
+            "--home",
+            dir.path().to_str().unwrap(),
+            "send",
+            "--addr",
+            &addr,
+            "--pubkey",
+            &pubkey,
+            "--payload",
+            payload,
+        ])
+        .output()
+        .expect("run send");
+
+    assert!(
+        send_output.status.success(),
+        "direct send failed\nstdout:\n{}\nstderr:\n{}\nlistener transcript:\n{}",
+        String::from_utf8_lossy(&send_output.stdout),
+        String::from_utf8_lossy(&send_output.stderr),
+        transcript.join("\n")
+    );
+
+    let received = recv_until(&rx, &mut transcript, Duration::from_secs(10), |line| {
+        line.contains(payload)
+    });
+    kill_listener(&mut listener);
+
+    assert!(
+        received.is_some(),
+        "listener did not receive payload before sender exited\nsend stdout:\n{}\nsend stderr:\n{}\nlistener transcript:\n{}",
+        String::from_utf8_lossy(&send_output.stdout),
+        String::from_utf8_lossy(&send_output.stderr),
+        transcript.join("\n")
+    );
+}
+
+// Resolve-mode `amesh send <fingerprint>` locates the peer over mDNS
+// multicast, which is unreliable on hosted CI runners (the resolve races a
+// timeout; "connect: timed out" / "No address lookup configured"). Kept as a
+// real-LAN integration test — run on demand with `cargo test -- --ignored`.
+// The deterministic per-PR coverage of the same send→listen path is
+// `listen_send_direct_addr_roundtrip_delivers_payload` above (direct dial, no
+// multicast); what this one uniquely exercises is mDNS resolution.
+#[ignore = "real mDNS multicast discovery (amesh send resolves by fingerprint); flaky on hosted CI. Run with --ignored on a real LAN. Direct-dial coverage is deterministic above."]
+#[test]
+fn listen_send_roundtrip_delivers_payload_before_sender_exits() {
+    let dir = TempDir::new().unwrap();
+    Command::cargo_bin("amesh")
+        .unwrap()
+        .args(["--home", dir.path().to_str().unwrap(), "keygen"])
+        .assert()
+        .success();
+
+    let bin = assert_cmd::cargo::cargo_bin("amesh");
+    let mut listener = std::process::Command::new(&bin)
+        .args([
+            "--home",
+            dir.path().to_str().unwrap(),
+            "listen",
+            "--duration",
+            "30s",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn listener");
+
+    let stdout = listener.stdout.take().expect("listener stdout");
+    let stderr = listener.stderr.take().expect("listener stderr");
+    let (tx, rx) = mpsc::channel();
+    let _stdout_handle = forward_child_lines(stdout, "stdout", tx.clone());
+    let _stderr_handle = forward_child_lines(stderr, "stderr", tx);
+    let mut transcript = Vec::new();
+
+    let agent_line = recv_until(&rx, &mut transcript, Duration::from_secs(10), |line| {
+        line.contains("agent_fp=")
+    });
+    let Some(agent_line) = agent_line else {
+        let _ = listener.kill();
+        let _ = listener.wait();
+        panic!(
+            "listener did not print agent_fp; transcript:\n{}",
+            transcript.join("\n")
+        );
+    };
+    let agent_fp = agent_line
+        .split_once("agent_fp=")
+        .expect("agent_fp line format")
+        .1
+        .trim()
+        .to_string();
+
+    let payload = "agent-mesh-cli-roundtrip";
+    let send_output = std::process::Command::new(&bin)
+        .args([
+            "--home",
+            dir.path().to_str().unwrap(),
+            "send",
+            &agent_fp,
+            "--payload",
+            payload,
+            "--timeout",
+            "15s",
+        ])
+        .output()
+        .expect("run send");
+
+    assert!(
+        send_output.status.success(),
+        "send failed\nstdout:\n{}\nstderr:\n{}\nlistener transcript:\n{}",
+        String::from_utf8_lossy(&send_output.stdout),
+        String::from_utf8_lossy(&send_output.stderr),
+        transcript.join("\n")
+    );
+
+    let received = recv_until(&rx, &mut transcript, Duration::from_secs(10), |line| {
+        line.contains(payload)
+    });
+    let _ = listener.kill();
+    let _ = listener.wait();
+
+    assert!(
+        received.is_some(),
+        "listener did not receive payload before sender exited\nsend stdout:\n{}\nsend stderr:\n{}\nlistener transcript:\n{}",
+        String::from_utf8_lossy(&send_output.stdout),
+        String::from_utf8_lossy(&send_output.stderr),
+        transcript.join("\n")
+    );
 }
 
 #[test]

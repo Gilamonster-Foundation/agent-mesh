@@ -28,8 +28,9 @@
 //! (cold-start race) or when the asker never announces at all (a
 //! quiet [`BusOptions`] bind).
 
-use crate::inbox::{BusMessage, Inbox, OutgoingReply};
+use crate::inbox::{BusMessage, Inbox};
 use crate::reply::CorrelationId;
+use crate::transport::{Inbound, ReplyRoute, Transport};
 use crate::{BusError, Result, Topic};
 use agent_mesh_discovery::{AnnounceConfig, Announcer, AnnouncerHandle};
 use agent_mesh_protocol::{AgentKey, CertChain, Fingerprint, Recipient, SignedEnvelope, UserKey};
@@ -39,13 +40,20 @@ use agent_mesh_transport::{
     iroh_reexports::{Connection, Incoming, IncomingAddr, PublicKey},
     recv_envelope, send_envelope, Endpoint, PeerResolver, ResolverHandle, TransportError,
 };
+use async_trait::async_trait;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
+
+/// The dial-back route observed on an inbound iroh connection — the peer's
+/// TLS-authenticated key and the UDP source address. Carried as the opaque
+/// [`ReplyRoute`] for [`IrohTransport`]; `None` when no source address was
+/// observed (relay/custom transports, which this mesh does not use).
+type IrohReverse = Option<(PublicKey, SocketAddr)>;
 
 /// How long we'll wait for a peer to appear on mDNS before giving up.
 ///
@@ -74,6 +82,59 @@ impl Default for BusOptions {
     }
 }
 
+/// An explicit dial route to a known peer — its ed25519 agent pubkey
+/// plus one socket address — used to reach a peer **without mDNS
+/// discovery**.
+///
+/// This is the building block for the WAN / WireGuard phase of the
+/// mesh: mDNS is LAN-multicast only, but over a VPN the client already
+/// has L3 reachability to a known agent's `SocketAddr`, so it dials by
+/// endpoint instead of resolving a fingerprint over multicast.
+///
+/// Note the dial route carries the **agent pubkey**, not just a
+/// [`Fingerprint`]. A fingerprint is `blake3(agent_pubkey)` — a
+/// one-way hash — so it cannot be turned back into the iroh node
+/// identity QUIC needs to dial. The [`Fingerprint`] used for envelope
+/// addressing is *derived from* the pubkey here
+/// ([`Self::fingerprint`]), so a caller who knows the pubkey + address
+/// has everything required. (This mirrors the reply dial-back path,
+/// which likewise takes the peer's TLS-authenticated pubkey + observed
+/// address from the request connection.)
+#[derive(Debug, Clone, Copy)]
+pub struct PeerEndpoint {
+    /// The peer agent's raw 32-byte ed25519 public key.
+    pub agent_pubkey: [u8; 32],
+    /// A socket address the peer is reachable at (e.g. its WireGuard
+    /// tunnel IP + UDP port).
+    pub addr: SocketAddr,
+}
+
+impl PeerEndpoint {
+    /// Build a dial route from the peer's agent pubkey and a single
+    /// `SocketAddr`.
+    #[must_use]
+    pub fn new(agent_pubkey: [u8; 32], addr: SocketAddr) -> Self {
+        Self { agent_pubkey, addr }
+    }
+
+    /// Build a dial route from the peer's agent pubkey, an IP, and a
+    /// port. Convenience for callers holding the parts separately.
+    #[must_use]
+    pub fn from_parts(agent_pubkey: [u8; 32], ip: IpAddr, port: u16) -> Self {
+        Self::new(agent_pubkey, SocketAddr::new(ip, port))
+    }
+
+    /// The peer's agent fingerprint, derived as `blake3(agent_pubkey)`
+    /// — the same value the peer announces over mDNS and signs its
+    /// envelopes under. Used for the envelope `Recipient` address so a
+    /// directly-dialed message is indistinguishable on the wire from a
+    /// resolver-dialed one.
+    #[must_use]
+    pub fn fingerprint(&self) -> Fingerprint {
+        Fingerprint::of_bytes(&self.agent_pubkey)
+    }
+}
+
 /// The high-level message bus.
 ///
 /// One `Bus` per process — owns the bound QUIC endpoint, the mDNS
@@ -82,16 +143,13 @@ impl Default for BusOptions {
 pub struct Bus {
     agent: Arc<AgentKey>,
     user_fp: Fingerprint,
-    endpoint: Arc<Endpoint>,
-    resolver: Arc<PeerResolver>,
+    /// The wire this bus sends/receives envelopes over — iroh QUIC + mDNS in
+    /// production ([`IrohTransport`]), an in-memory switchboard in tests.
+    transport: Arc<dyn Transport>,
     inbox: Arc<Inbox>,
     sequence: Arc<AtomicU64>,
-    local_port: u16,
-    /// Keeps the mDNS browser thread alive for the life of the bus.
-    _resolver_handle: ResolverHandle,
-    /// Keeps the mDNS announcer alive (so peers can discover us).
-    /// `None` for a quiet bind ([`BusOptions::announce`] = false).
-    _announcer: Option<AnnouncerHandle>,
+    /// The bus-level receive loop: pulls each inbound envelope off the
+    /// transport, runs it through the inbox, and ships any reply back.
     accept_task: JoinHandle<()>,
 }
 
@@ -114,54 +172,44 @@ impl Bus {
         opts: BusOptions,
     ) -> Result<Self> {
         let user_fp = user.fingerprint();
-        let endpoint = Endpoint::bind(&agent, port).await?;
-        let local_port = endpoint.port();
-        let endpoint = Arc::new(endpoint);
-        let (resolver, resolver_handle) = PeerResolver::start()?;
-        let resolver = Arc::new(resolver);
-        let inbox = Arc::new(Inbox::new());
         let agent = Arc::new(agent);
-        let sequence = Arc::new(AtomicU64::new(1));
-
-        let announcer = if opts.announce {
-            Some(
-                Announcer::start(AnnounceConfig {
-                    agent_fp: agent.fingerprint(),
-                    agent_pubkey: Some(agent.public_bytes()),
-                    user_fp,
-                    capabilities: agent.cert().metadata.capabilities.clone(),
-                    role: agent.cert().metadata.role.clone(),
-                    host: agent.cert().metadata.host.clone(),
-                    port: local_port,
-                })
-                .map_err(|e| {
-                    BusError::Transport(TransportError::Iroh(format!("announce start: {e}")))
-                })?,
-            )
-        } else {
-            None
-        };
-
-        let accept_task = spawn_accept_loop(
-            endpoint.clone(),
-            agent.clone(),
-            inbox.clone(),
-            resolver.clone(),
-            sequence.clone(),
-        );
-
-        Ok(Self {
+        let transport = IrohTransport::bind(user_fp, agent.clone(), port, opts).await?;
+        Ok(Self::bind_with_transport(
             agent,
             user_fp,
-            endpoint,
-            resolver,
+            Arc::new(transport),
+        ))
+    }
+
+    /// Bind a bus over an explicit [`Transport`], skipping iroh entirely.
+    ///
+    /// This is the seam that lets the bus's request/reply/correlation/dial-back
+    /// logic be exercised over an in-memory switchboard in tests — the same
+    /// `Bus` code path, but with no sockets, no mDNS, and no QUIC handshake
+    /// timing (the flaky `request_reply_roundtrip` used the real stack and
+    /// timed out on hosted CI runners). Production always goes through
+    /// [`Self::bind_with`] → [`IrohTransport`].
+    pub fn bind_with_transport(
+        agent: Arc<AgentKey>,
+        user_fp: Fingerprint,
+        transport: Arc<dyn Transport>,
+    ) -> Self {
+        let inbox = Arc::new(Inbox::new());
+        let sequence = Arc::new(AtomicU64::new(1));
+        let accept_task = spawn_accept_loop(
+            transport.clone(),
+            agent.clone(),
+            inbox.clone(),
+            sequence.clone(),
+        );
+        Self {
+            agent,
+            user_fp,
+            transport,
             inbox,
             sequence,
-            local_port,
-            _resolver_handle: resolver_handle,
-            _announcer: announcer,
             accept_task,
-        })
+        }
     }
 
     /// User fingerprint this bus belongs to.
@@ -176,21 +224,61 @@ impl Bus {
         self.agent.fingerprint()
     }
 
-    /// Local UDP port the iroh endpoint is bound on.
+    /// Local UDP port the transport is bound on (`0` for a non-socket transport).
     #[must_use]
     pub fn local_port(&self) -> u16 {
-        self.local_port
+        self.transport.local_port()
     }
 
     /// Send a `Request` to `peer_fp` on `topic` and wait up to
     /// `timeout` for the matching `Reply`.
     ///
-    /// Returns the reply body on success. On timeout returns
-    /// [`BusError::Timeout`]; on peer-not-found,
-    /// [`BusError::Unreachable`].
+    /// Resolves `peer_fp` over mDNS before dialing. Returns the reply
+    /// body on success. On timeout returns [`BusError::Timeout`]; on
+    /// peer-not-found, [`BusError::Unreachable`].
     pub async fn request(
         &self,
         peer_fp: Fingerprint,
+        topic: &Topic,
+        body: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        self.request_via(DialRoute::Resolve(peer_fp), topic, body, timeout)
+            .await
+    }
+
+    /// Send a `Request` directly to a known [`PeerEndpoint`] — its
+    /// agent pubkey + socket address — **without mDNS discovery** —
+    /// and wait up to `timeout` for the matching `Reply`.
+    ///
+    /// This is the WAN / WireGuard dial path: the caller already knows
+    /// where the agent lives (e.g. its VPN tunnel address), so the
+    /// resolver is skipped entirely and the bus dials the endpoint
+    /// straight away. The reply routes back over the freshly-dialed
+    /// reverse connection by correlation id, exactly as a
+    /// resolver-dialed request would.
+    ///
+    /// The on-wire envelope is identical to one sent via [`request`]:
+    /// the recipient fingerprint is derived from
+    /// [`PeerEndpoint::fingerprint`], so the responder cannot tell a
+    /// direct dial from a resolver dial.
+    ///
+    /// [`request`]: Self::request
+    pub async fn request_direct(
+        &self,
+        peer: PeerEndpoint,
+        topic: &Topic,
+        body: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        self.request_via(DialRoute::Direct(peer), topic, body, timeout)
+            .await
+    }
+
+    /// Shared request core for both the resolver and direct-dial paths.
+    async fn request_via(
+        &self,
+        route: DialRoute,
         topic: &Topic,
         body: Vec<u8>,
         timeout: Duration,
@@ -203,7 +291,7 @@ impl Bus {
             correlation: correlation.0,
             body,
         };
-        if let Err(e) = self.send_to(peer_fp, msg).await {
+        if let Err(e) = self.send_via(route, msg).await {
             self.inbox.cancel_reply(&correlation);
             return Err(e);
         }
@@ -226,14 +314,15 @@ impl Bus {
         F: Fn(Vec<u8>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Vec<u8>>> + Send + 'static,
     {
-        let inbox = self.inbox.clone();
-        // Inbox::register_handler is async only because it takes a
-        // write lock; spawn it so the caller doesn't have to .await.
-        // The handler is in place by the time the next message is
-        // dispatched.
-        tokio::spawn(async move {
-            inbox.register_handler(topic, handler).await;
-        });
+        // Register synchronously so the handler is live the instant this
+        // returns. Previously this spawned the registration onto the
+        // runtime, which left a window — before the spawned task was
+        // polled — where a request dispatched to this topic found no
+        // handler and was silently dropped (`Inbox::dispatch_request`
+        // returns `Ok(None)`), timing out the asker. Direct-dial
+        // round-trip tests papered over that window with a fixed
+        // `sleep`; synchronous registration removes the race outright.
+        self.inbox.register_handler(topic, handler);
     }
 
     /// Publish a body to `peer_fp` on `topic`. Fire-and-forget — the
@@ -253,7 +342,27 @@ impl Bus {
             topic: topic.wire(),
             body,
         };
-        self.send_to(peer_fp, msg).await
+        self.send_via(DialRoute::Resolve(peer_fp), msg).await
+    }
+
+    /// Publish a body directly to a known [`PeerEndpoint`] on `topic`,
+    /// **without mDNS discovery**. Fire-and-forget. The direct-dial
+    /// counterpart of [`publish_to`]; see [`request_direct`] for the
+    /// WAN / WireGuard rationale.
+    ///
+    /// [`publish_to`]: Self::publish_to
+    /// [`request_direct`]: Self::request_direct
+    pub async fn publish_to_direct(
+        &self,
+        peer: PeerEndpoint,
+        topic: &Topic,
+        body: Vec<u8>,
+    ) -> Result<()> {
+        let msg = BusMessage::Publish {
+            topic: topic.wire(),
+            body,
+        };
+        self.send_via(DialRoute::Direct(peer), msg).await
     }
 
     /// Subscribe to a topic. Returns a `broadcast::Receiver` that
@@ -263,38 +372,78 @@ impl Bus {
         self.inbox.subscribe(topic).await
     }
 
-    /// Graceful shutdown. Stops the accept loop, closes the endpoint,
-    /// shuts the resolver down.
+    /// Graceful shutdown. Stops the bus receive loop and releases the
+    /// transport (which closes the endpoint / leaves the switchboard).
     pub async fn close(self) -> Result<()> {
         self.accept_task.abort();
-        // Endpoint is owned via Arc by the (now-aborted) accept loop;
-        // try to take the inner Endpoint by unwrapping the Arc. If
-        // some background task still holds a clone we can't reclaim
-        // the owned value — fall back to letting Drop release the
-        // socket.
-        match Arc::try_unwrap(self.endpoint) {
-            Ok(ep) => ep.close().await,
-            Err(_) => {
-                tracing::debug!("bus close: endpoint still shared, leaving Drop to clean up");
-            }
-        }
+        self.transport.close().await;
         Ok(())
     }
 
-    /// Pull the next sequence number and dial the peer to ship a
-    /// single envelope carrying `msg`.
-    async fn send_to(&self, peer_fp: Fingerprint, msg: BusMessage) -> Result<()> {
-        let conn = dial_peer(&self.endpoint, &self.resolver, peer_fp).await?;
-        send_one(
-            &conn,
-            self.agent.cert(),
-            self.agent.as_ref(),
-            peer_fp,
-            &self.sequence,
-            msg,
-        )
-        .await
+    /// Sign + sequence `msg` into an envelope for `peer_fp` and hand it to the
+    /// transport for the named route.
+    async fn send_via(&self, route: DialRoute, msg: BusMessage) -> Result<()> {
+        match route {
+            DialRoute::Resolve(peer_fp) => {
+                let env = make_envelope(&self.agent, &self.sequence, peer_fp, msg)?;
+                self.transport.send_to(peer_fp, env).await
+            }
+            DialRoute::Direct(peer) => {
+                let env = make_envelope(&self.agent, &self.sequence, peer.fingerprint(), msg)?;
+                self.transport.send_to_endpoint(&peer, env).await
+            }
+        }
     }
+}
+
+/// Sign + sequence a [`BusMessage`] into a [`SignedEnvelope`] addressed to
+/// `peer_fp`. The bus owns this (the envelope is bus policy); the transport
+/// only carries the finished envelope.
+fn make_envelope(
+    agent: &AgentKey,
+    sequence: &AtomicU64,
+    peer_fp: Fingerprint,
+    msg: BusMessage,
+) -> Result<SignedEnvelope> {
+    let seq = sequence.fetch_add(1, Ordering::SeqCst);
+    let payload = serde_json::to_vec(&msg)?;
+    Ok(SignedEnvelope::new(
+        agent,
+        Recipient::Direct { agent_fp: peer_fp },
+        seq,
+        payload,
+    ))
+}
+
+/// How an outbound message names its destination: resolve a
+/// [`Fingerprint`] over mDNS, or dial a known [`PeerEndpoint`]
+/// directly.
+#[derive(Debug, Clone, Copy)]
+enum DialRoute {
+    /// Look the peer up by fingerprint over mDNS, then dial.
+    Resolve(Fingerprint),
+    /// Dial a known agent pubkey + socket address, no resolver.
+    Direct(PeerEndpoint),
+}
+
+/// Dial a known [`PeerEndpoint`] directly — no mDNS. Reuses the same
+/// transport connect path as the resolver dial and the reply
+/// dial-back: convert the agent pubkey to an iroh node id and
+/// [`Endpoint::dial`] it at the supplied address.
+async fn dial_endpoint(endpoint: &Endpoint, peer: PeerEndpoint) -> Result<Connection> {
+    let iroh_pk = agent_pubkey_to_iroh(&peer.agent_pubkey).ok_or_else(|| {
+        BusError::Unreachable(format!(
+            "direct-dial endpoint {} has an invalid ed25519 pubkey",
+            peer.fingerprint().short()
+        ))
+    })?;
+    tracing::debug!(
+        peer = %peer.fingerprint().short(),
+        addr = %peer.addr,
+        "bus: direct-dialing peer endpoint (no mDNS)"
+    );
+    let conn = endpoint.dial(iroh_pk, [peer.addr]).await?;
+    Ok(conn)
 }
 
 /// Resolve `peer_fp` via mDNS, then dial the iroh endpoint.
@@ -365,14 +514,12 @@ async fn dial_peer(
 }
 
 /// Open a fresh bidi stream on `conn`, do the cert handshake, ship one
-/// envelope carrying `msg`.
-async fn send_one(
+/// already-signed envelope. (The bus signs + sequences the envelope; the
+/// transport only carries it — see [`make_envelope`].)
+async fn send_env_on_conn(
     conn: &Connection,
     our_cert: &CertChain,
-    sender: &AgentKey,
-    peer_agent_fp: Fingerprint,
-    sequence: &AtomicU64,
-    msg: BusMessage,
+    env: &SignedEnvelope,
 ) -> Result<()> {
     let (mut send, mut recv) = conn
         .open_bi()
@@ -384,18 +531,7 @@ async fn send_one(
     )
     .await
     .map_err(|_| BusError::Timeout(HANDSHAKE_TIMEOUT))??;
-
-    let seq = sequence.fetch_add(1, Ordering::SeqCst);
-    let payload = serde_json::to_vec(&msg)?;
-    let env = SignedEnvelope::new(
-        sender,
-        Recipient::Direct {
-            agent_fp: peer_agent_fp,
-        },
-        seq,
-        payload,
-    );
-    send_envelope(&mut send, &env).await?;
+    send_envelope(&mut send, env).await?;
     send.finish()
         .map_err(|e| BusError::Transport(TransportError::Iroh(format!("finish: {e}"))))?;
     // Wait for the send side to fully drain so the peer sees the
@@ -404,152 +540,53 @@ async fn send_one(
     Ok(())
 }
 
-/// Spawn the accept loop. Reads incoming connections, runs the
-/// handshake on each fresh bi-stream, feeds each envelope into the
-/// inbox, and ships any outgoing reply.
+/// The bus-level receive loop, transport-agnostic: pull each inbound envelope
+/// off the [`Transport`], run it through the [`Inbox`] (verify + dispatch), and
+/// ship any resulting reply back over the transport on the envelope's inbound
+/// route. This is the wiring the round-trip test exercises — identical whether
+/// the transport is iroh or the in-memory switchboard.
 fn spawn_accept_loop(
-    endpoint: Arc<Endpoint>,
+    transport: Arc<dyn Transport>,
     agent: Arc<AgentKey>,
     inbox: Arc<Inbox>,
-    resolver: Arc<PeerResolver>,
     sequence: Arc<AtomicU64>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        loop {
-            let Some(incoming) = endpoint.accept().await else {
-                tracing::debug!("bus accept loop: endpoint closed");
-                break;
-            };
+        while let Some(inbound) = transport.recv().await {
+            let transport = transport.clone();
             let agent = agent.clone();
             let inbox = inbox.clone();
-            let endpoint = endpoint.clone();
-            let resolver = resolver.clone();
             let sequence = sequence.clone();
+            // One task per inbound so a slow handler/reply can't stall the loop.
             tokio::spawn(async move {
-                if let Err(e) =
-                    handle_incoming(incoming, agent, inbox, endpoint, resolver, sequence).await
-                {
-                    tracing::warn!(error = %e, "bus: incoming connection error");
+                let Inbound {
+                    envelope,
+                    reply_route,
+                } = inbound;
+                match inbox.on_envelope(envelope).await {
+                    Ok(Some(reply)) => {
+                        let msg = BusMessage::Reply {
+                            correlation: reply.correlation.0,
+                            body: reply.body,
+                        };
+                        match make_envelope(&agent, &sequence, reply.peer_fp, msg) {
+                            Ok(env) => {
+                                if let Err(e) =
+                                    transport.reply(reply.peer_fp, &reply_route, env).await
+                                {
+                                    tracing::warn!(error = %e, "bus: reply ship failed");
+                                }
+                            }
+                            Err(e) => tracing::warn!(error = %e, "bus: reply encode failed"),
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(error = %e, "bus: inbox rejected envelope"),
                 }
             });
         }
+        tracing::debug!("bus accept loop: transport closed");
     })
-}
-
-/// Handle a single accepted connection: finish QUIC, then loop over
-/// bidi streams accepting envelopes.
-async fn handle_incoming(
-    incoming: Incoming,
-    agent: Arc<AgentKey>,
-    inbox: Arc<Inbox>,
-    endpoint: Arc<Endpoint>,
-    resolver: Arc<PeerResolver>,
-    sequence: Arc<AtomicU64>,
-) -> Result<()> {
-    // The UDP source the connection physically arrived from. QUIC uses
-    // one socket for both directions, so this is also where the peer
-    // can be dialed back.
-    let reverse_addr = match incoming.remote_addr() {
-        IncomingAddr::Ip(addr) => Some(addr),
-        // Relay/custom transports are not used in this mesh (the
-        // endpoint binds relay-free), but don't pretend otherwise.
-        _ => None,
-    };
-    let conn = incoming
-        .await
-        .map_err(|e| BusError::Transport(TransportError::Iroh(format!("incoming: {e}"))))?;
-    // The TLS-authenticated key of whoever dialed us — for agents this
-    // IS the agent pubkey, so replies can verify it against the
-    // envelope sender's fingerprint and dial straight back.
-    let reverse: Option<(PublicKey, SocketAddr)> =
-        reverse_addr.map(|addr| (conn.remote_id(), addr));
-    loop {
-        let (mut send, mut recv) = match conn.accept_bi().await {
-            Ok(streams) => streams,
-            Err(e) => {
-                tracing::debug!(error = %e, "bus: accept_bi ended (peer closed)");
-                return Ok(());
-            }
-        };
-        let cert = agent.cert().clone();
-        let handshake_res = tokio::time::timeout(
-            HANDSHAKE_TIMEOUT,
-            do_handshake(&cert, &mut send, &mut recv, false),
-        )
-        .await;
-        match handshake_res {
-            Ok(Ok(_peer_cert)) => {}
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "bus: handshake rejected");
-                continue;
-            }
-            Err(_) => {
-                tracing::warn!("bus: handshake timed out");
-                continue;
-            }
-        }
-        let env = match recv_envelope(&mut recv).await {
-            Ok(env) => env,
-            Err(e) => {
-                tracing::warn!(error = %e, "bus: envelope read failed");
-                continue;
-            }
-        };
-        let outgoing = match inbox.on_envelope(env).await {
-            Ok(out) => out,
-            Err(e) => {
-                tracing::warn!(error = %e, "bus: inbox rejected envelope");
-                continue;
-            }
-        };
-        if let Some(reply) = outgoing {
-            // The peer dialed us; we now dial them to ship the
-            // reply. Spawn it so the accept loop can keep
-            // draining envelopes off this connection.
-            let endpoint = endpoint.clone();
-            let resolver = resolver.clone();
-            let agent = agent.clone();
-            let sequence = sequence.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    ship_reply(endpoint, resolver, agent, sequence, reply, reverse).await
-                {
-                    tracing::warn!(error = %e, "bus: reply ship failed");
-                }
-            });
-        }
-    }
-}
-
-/// Ship an [`OutgoingReply`] back to the peer it came from.
-///
-/// `reverse` is the dial-back route observed on the request connection
-/// (the peer's TLS-authenticated key + the UDP source address). When it
-/// matches the envelope sender it is preferred over mDNS resolution —
-/// the asker may not be announced yet (cold-start race) or may never
-/// announce (quiet bind).
-async fn ship_reply(
-    endpoint: Arc<Endpoint>,
-    resolver: Arc<PeerResolver>,
-    agent: Arc<AgentKey>,
-    sequence: Arc<AtomicU64>,
-    reply: OutgoingReply,
-    reverse: Option<(PublicKey, SocketAddr)>,
-) -> Result<()> {
-    let conn = dial_reply_peer(&endpoint, &resolver, reply.peer_fp, reverse).await?;
-    let msg = BusMessage::Reply {
-        correlation: reply.correlation.0,
-        body: reply.body,
-    };
-    send_one(
-        &conn,
-        agent.cert(),
-        agent.as_ref(),
-        reply.peer_fp,
-        &sequence,
-        msg,
-    )
-    .await
 }
 
 /// Dial the peer a reply is destined for: dial-back first, mDNS second.
@@ -558,13 +595,13 @@ async fn ship_reply(
 /// hashes to the envelope sender's fingerprint (`agent_fp =
 /// blake3(agent_pubkey)`), so a reply can never be redirected to a
 /// connection peer that didn't sign the request. The subsequent cert
-/// handshake in `send_one` re-verifies the chain to the user trust
+/// handshake in `send_env_on_conn` re-verifies the chain to the user trust
 /// root either way.
 async fn dial_reply_peer(
     endpoint: &Endpoint,
     resolver: &PeerResolver,
     peer_fp: Fingerprint,
-    reverse: Option<(PublicKey, SocketAddr)>,
+    reverse: IrohReverse,
 ) -> Result<Connection> {
     if let Some((pubkey, addr)) = reverse {
         if Fingerprint::of_bytes(pubkey.as_bytes()) == peer_fp {
@@ -587,9 +624,209 @@ async fn dial_reply_peer(
     dial_peer(endpoint, resolver, peer_fp).await
 }
 
+// ── IrohTransport: the production QUIC + mDNS transport ──────────────────────
+
+/// The production [`Transport`]: iroh QUIC for delivery, mDNS for discovery.
+/// Owns the bound endpoint, the resolver, the announcer, and an internal
+/// accept loop that decodes each inbound envelope and feeds it (with its
+/// dial-back route) into a channel the bus drains via [`Transport::recv`].
+pub struct IrohTransport {
+    endpoint: Arc<Endpoint>,
+    resolver: Arc<PeerResolver>,
+    /// Our own key — its cert is presented in every handshake.
+    agent: Arc<AgentKey>,
+    /// Keeps the mDNS browser thread alive for the life of the transport.
+    _resolver_handle: ResolverHandle,
+    /// Keeps the mDNS announcer alive; `None` for a quiet ([`BusOptions`]
+    /// `announce = false`) bind.
+    _announcer: Option<AnnouncerHandle>,
+    inbound: AsyncMutex<mpsc::UnboundedReceiver<Inbound>>,
+    accept_task: JoinHandle<()>,
+}
+
+impl IrohTransport {
+    /// Bind the iroh endpoint on `port` (`0` = OS-picked), start the mDNS
+    /// resolver + (optional) announcer, and spawn the internal accept loop.
+    pub async fn bind(
+        user_fp: Fingerprint,
+        agent: Arc<AgentKey>,
+        port: u16,
+        opts: BusOptions,
+    ) -> Result<Self> {
+        let endpoint = Endpoint::bind(&agent, port).await?;
+        let local_port = endpoint.port();
+        let endpoint = Arc::new(endpoint);
+        let (resolver, resolver_handle) = PeerResolver::start()?;
+        let resolver = Arc::new(resolver);
+
+        let announcer = if opts.announce {
+            Some(
+                Announcer::start(AnnounceConfig {
+                    agent_fp: agent.fingerprint(),
+                    agent_pubkey: Some(agent.public_bytes()),
+                    user_fp,
+                    capabilities: agent.cert().metadata.capabilities.clone(),
+                    role: agent.cert().metadata.role.clone(),
+                    host: agent.cert().metadata.host.clone(),
+                    port: local_port,
+                })
+                .map_err(|e| {
+                    BusError::Transport(TransportError::Iroh(format!("announce start: {e}")))
+                })?,
+            )
+        } else {
+            None
+        };
+
+        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
+        let accept_task = spawn_iroh_accept_loop(endpoint.clone(), agent.clone(), inbound_tx);
+
+        Ok(Self {
+            endpoint,
+            resolver,
+            agent,
+            _resolver_handle: resolver_handle,
+            _announcer: announcer,
+            inbound: AsyncMutex::new(inbound_rx),
+            accept_task,
+        })
+    }
+}
+
+#[async_trait]
+impl Transport for IrohTransport {
+    async fn send_to(&self, fp: Fingerprint, env: SignedEnvelope) -> Result<()> {
+        let conn = dial_peer(&self.endpoint, &self.resolver, fp).await?;
+        send_env_on_conn(&conn, self.agent.cert(), &env).await
+    }
+
+    async fn send_to_endpoint(&self, peer: &PeerEndpoint, env: SignedEnvelope) -> Result<()> {
+        let conn = dial_endpoint(&self.endpoint, *peer).await?;
+        send_env_on_conn(&conn, self.agent.cert(), &env).await
+    }
+
+    async fn reply(&self, fp: Fingerprint, route: &ReplyRoute, env: SignedEnvelope) -> Result<()> {
+        // The opaque route is the dial-back (pubkey, addr) observed on the
+        // inbound connection; `None` (or a foreign route) falls back to mDNS.
+        let reverse: IrohReverse = route.downcast_ref::<IrohReverse>().cloned().flatten();
+        let conn = dial_reply_peer(&self.endpoint, &self.resolver, fp, reverse).await?;
+        send_env_on_conn(&conn, self.agent.cert(), &env).await
+    }
+
+    async fn recv(&self) -> Option<Inbound> {
+        self.inbound.lock().await.recv().await
+    }
+
+    fn local_port(&self) -> u16 {
+        self.endpoint.port()
+    }
+
+    async fn close(&self) {
+        self.accept_task.abort();
+        // The iroh endpoint releases its socket on Drop; it is held via `Arc`
+        // (shared with in-flight dial tasks) so we cannot consume it here.
+    }
+}
+
+/// The iroh-internal accept loop: accept connections and, per bidi stream,
+/// handshake + decode the envelope, then push it (with its dial-back route)
+/// into `inbound_tx` for the bus to drain.
+fn spawn_iroh_accept_loop(
+    endpoint: Arc<Endpoint>,
+    agent: Arc<AgentKey>,
+    inbound_tx: mpsc::UnboundedSender<Inbound>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let Some(incoming) = endpoint.accept().await else {
+                tracing::debug!("iroh transport accept loop: endpoint closed");
+                break;
+            };
+            let agent = agent.clone();
+            let inbound_tx = inbound_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = accept_conn(incoming, agent, inbound_tx).await {
+                    tracing::warn!(error = %e, "iroh transport: incoming connection error");
+                }
+            });
+        }
+    })
+}
+
+/// Handle one accepted connection: finish QUIC, then per bidi stream do the
+/// handshake, decode the envelope, and forward it into `inbound_tx`.
+async fn accept_conn(
+    incoming: Incoming,
+    agent: Arc<AgentKey>,
+    inbound_tx: mpsc::UnboundedSender<Inbound>,
+) -> Result<()> {
+    // The UDP source the connection physically arrived from. QUIC uses one
+    // socket for both directions, so this is also where the peer can be
+    // dialed back.
+    let reverse_addr = match incoming.remote_addr() {
+        IncomingAddr::Ip(addr) => Some(addr),
+        // Relay/custom transports are not used in this mesh (the endpoint
+        // binds relay-free), but don't pretend otherwise.
+        _ => None,
+    };
+    let conn = incoming
+        .await
+        .map_err(|e| BusError::Transport(TransportError::Iroh(format!("incoming: {e}"))))?;
+    // The TLS-authenticated key of whoever dialed us — for agents this IS the
+    // agent pubkey, so replies can verify it against the envelope sender's
+    // fingerprint and dial straight back. Shared by every envelope on this
+    // connection as the opaque reply route.
+    let reverse: IrohReverse = reverse_addr.map(|addr| (conn.remote_id(), addr));
+    let reply_route: ReplyRoute = Arc::new(reverse);
+    loop {
+        let (mut send, mut recv) = match conn.accept_bi().await {
+            Ok(streams) => streams,
+            Err(e) => {
+                tracing::debug!(error = %e, "iroh transport: accept_bi ended (peer closed)");
+                return Ok(());
+            }
+        };
+        let cert = agent.cert().clone();
+        match tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            do_handshake(&cert, &mut send, &mut recv, false),
+        )
+        .await
+        {
+            Ok(Ok(_peer_cert)) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "iroh transport: handshake rejected");
+                continue;
+            }
+            Err(_) => {
+                tracing::warn!("iroh transport: handshake timed out");
+                continue;
+            }
+        }
+        let env = match recv_envelope(&mut recv).await {
+            Ok(env) => env,
+            Err(e) => {
+                tracing::warn!(error = %e, "iroh transport: envelope read failed");
+                continue;
+            }
+        };
+        if inbound_tx
+            .send(Inbound {
+                envelope: env,
+                reply_route: reply_route.clone(),
+            })
+            .is_err()
+        {
+            tracing::debug!("iroh transport: bus receiver dropped; stopping");
+            return Ok(());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::MeshNet;
     use agent_mesh_protocol::{AgentMetadata, Caveats, UserKey};
 
     fn agent(user: &UserKey, role: &str) -> AgentKey {
@@ -604,6 +841,122 @@ mod tests {
                 caveats: Caveats::top(),
             },
         )
+    }
+
+    /// The request/reply round-trip driven over the **in-memory
+    /// transport** — the exact same `Bus` send / receive / inbox / reply
+    /// wiring the iroh path uses, but with no sockets, no mDNS, and no QUIC
+    /// handshake timing. Deterministic and portable, replacing the real-mDNS
+    /// `request_reply_roundtrip` in `tests/bus_roundtrip.rs` that timed out on
+    /// hosted CI runners. Single-threaded runtime so task ordering (and thus
+    /// the handler-registration flush below) is deterministic.
+    #[tokio::test]
+    async fn request_reply_roundtrip_over_in_memory_transport() {
+        let user = UserKey::generate();
+        let alice = Arc::new(agent(&user, "alice"));
+        let bob = Arc::new(agent(&user, "bob"));
+        let alice_fp = alice.fingerprint();
+        let bob_fp = bob.fingerprint();
+
+        // One switchboard; each bus gets an in-memory leg registered under its
+        // agent fingerprint (that's what `send_to`/`reply` route by).
+        let net = MeshNet::new();
+        let alice_bus = Bus::bind_with_transport(
+            alice,
+            user.fingerprint(),
+            Arc::new(net.transport_for(alice_fp)),
+        );
+        let bob_bus =
+            Bus::bind_with_transport(bob, user.fingerprint(), Arc::new(net.transport_for(bob_fp)));
+
+        let topic = Topic::new(user.fingerprint(), "echo");
+        bob_bus.handle_requests(topic.clone(), |body| async move {
+            Ok(format!("echo: {}", String::from_utf8_lossy(&body)).into_bytes())
+        });
+        // No yield/sleep needed: `handle_requests` registers the handler
+        // synchronously before it returns (see
+        // `handle_requests_registers_synchronously_no_spawn_race`).
+
+        let reply = alice_bus
+            .request(bob_fp, &topic, b"hi".to_vec(), Duration::from_secs(5))
+            .await
+            .expect("round-trip reply");
+        assert_eq!(reply, b"echo: hi");
+
+        alice_bus.close().await.unwrap();
+        bob_bus.close().await.unwrap();
+    }
+
+    /// Regression (#52 de-flake): `handle_requests` must register the
+    /// handler *before it returns*, with no spawn and no intervening
+    /// yield. It used to spawn the registration onto the runtime, so on a
+    /// `current_thread` runtime — where a spawned task is not polled until
+    /// the current task next yields — the handler was still absent the
+    /// instant `handle_requests` returned. A request dispatched into that
+    /// window found no handler and was silently dropped
+    /// (`Inbox::dispatch_request` -> `Ok(None)`), timing out the asker.
+    /// That is the exact flake the direct-dial round-trip tests used to
+    /// mask with a fixed `sleep(200ms)`.
+    ///
+    /// This test asserts the count with no yield between registration and
+    /// the check: it deterministically FAILS on the old spawn-based
+    /// implementation (count still 0) and PASSES on synchronous
+    /// registration (count 1). Run on the default single-threaded test
+    /// runtime so the "spawned task hasn't been polled yet" invariant
+    /// holds.
+    #[tokio::test]
+    async fn handle_requests_registers_synchronously_no_spawn_race() {
+        let user = UserKey::generate();
+        let bob = Arc::new(agent(&user, "bob"));
+        let bob_fp = bob.fingerprint();
+        let net = MeshNet::new();
+        let bob_bus =
+            Bus::bind_with_transport(bob, user.fingerprint(), Arc::new(net.transport_for(bob_fp)));
+
+        let topic = Topic::new(user.fingerprint(), "echo");
+        assert_eq!(
+            bob_bus.inbox.handler_count(),
+            0,
+            "no handler registered before handle_requests"
+        );
+
+        bob_bus.handle_requests(topic, |body| async move { Ok(body) });
+
+        // No sleep, no yield: on the old spawn-based code the spawned
+        // registration task has not run yet, so this would still read 0.
+        assert_eq!(
+            bob_bus.inbox.handler_count(),
+            1,
+            "handle_requests must register the handler before returning"
+        );
+
+        bob_bus.close().await.unwrap();
+    }
+
+    /// A send to a fingerprint that isn't on the switchboard is `Unreachable`
+    /// (mirrors the real transport's "peer not announced").
+    #[tokio::test]
+    async fn in_memory_send_to_unknown_peer_is_unreachable() {
+        let user = UserKey::generate();
+        let alice = Arc::new(agent(&user, "alice"));
+        let alice_fp = alice.fingerprint();
+        let net = MeshNet::new();
+        let alice_bus = Bus::bind_with_transport(
+            alice,
+            user.fingerprint(),
+            Arc::new(net.transport_for(alice_fp)),
+        );
+
+        let topic = Topic::new(user.fingerprint(), "echo");
+        let phantom = Fingerprint([0xfeu8; 32]);
+        match alice_bus
+            .request(phantom, &topic, b"x".to_vec(), Duration::from_millis(200))
+            .await
+        {
+            Err(BusError::Unreachable(_)) => {}
+            other => panic!("expected Unreachable, got {other:?}"),
+        }
+        alice_bus.close().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

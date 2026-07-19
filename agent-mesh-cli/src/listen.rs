@@ -85,6 +85,11 @@ pub async fn run(home: PathBuf, duration: Option<String>) -> Result<()> {
 
     println!("listening on udp/{port}");
     println!("  agent_fp={}", agent_fp.hex());
+    // The raw ed25519 pubkey (not just its blake3 fingerprint) is what a
+    // direct dialer needs — `amesh send --addr <ip:port> --pubkey <hex>`
+    // reaches this listener with no mDNS. `fingerprint = blake3(pubkey)`
+    // is one-way, so the fingerprint alone can't be dialed.
+    println!("  agent_pubkey={}", hex::encode(agent_pubkey));
     println!("  user_fp ={}", user_fp.hex());
     println!("  host    ={host}");
     let stop_deadline = if let Some(d) = duration {

@@ -24,6 +24,7 @@ pub mod envelope;
 pub mod error;
 pub mod fingerprint;
 pub mod github_binding;
+pub mod signer;
 pub mod user_key;
 
 #[cfg(feature = "pyo3")]
@@ -35,4 +36,5 @@ pub use envelope::{Recipient, SignedEnvelope};
 pub use error::{MeshError, Result};
 pub use fingerprint::Fingerprint;
 pub use github_binding::{ssh_pubkey_ed25519_bytes, GitHubBinding};
+pub use signer::MeshSigner;
 pub use user_key::{UserKey, UserPublic};

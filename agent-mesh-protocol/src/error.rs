@@ -38,6 +38,15 @@ pub enum MeshError {
     )]
     CaveatAmplification,
 
+    /// A cert's causal-generation scope could not be honoured (§9.1). Either it
+    /// was verified context-free (`verify()`) while declaring a *bounded*
+    /// `valid_for_generation` — which cannot be checked without a current
+    /// generation, so it is refused rather than ignored (fail-closed) — or its
+    /// scope does not include the supplied generation. Causal generation is the
+    /// authoritative revocation axis (wall-clock is not).
+    #[error("generation: {0}")]
+    Generation(String),
+
     /// A credential or envelope was rejected because it claims an
     /// expired validity window.
     #[error("expired: {0}")]
