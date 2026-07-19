@@ -663,6 +663,24 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join(OsStr::from_bytes(b"user-\xff\xfe.key"));
 
+        // Portability probe: the property under test is that the key
+        // store round-trips a non-UTF-8 *filename*, which is only
+        // observable on a filesystem that lets such a name exist. Linux
+        // CI (ext4/xfs/tmpfs) stores the bytes verbatim; macOS APFS/HFS+
+        // reject them at create with EILSEQ ("Illegal byte sequence",
+        // errno 92). Skip where the fs can't hold the name rather than
+        // panicking on a filesystem-encoding limitation we don't control.
+        match std::fs::File::create(&path) {
+            Ok(_) => std::fs::remove_file(&path).expect("remove probe file"),
+            Err(e) => {
+                eprintln!(
+                    "skipping: filesystem rejects non-UTF-8 filenames \
+                     (e.g. macOS APFS EILSEQ): {e}"
+                );
+                return;
+            }
+        }
+
         let key = UserKey::generate();
         let fp = key.fingerprint();
         key.save(&path).expect("save with non-UTF-8 filename");
