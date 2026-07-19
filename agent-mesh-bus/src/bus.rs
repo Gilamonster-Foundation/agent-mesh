@@ -1135,4 +1135,177 @@ mod tests {
         assert!(!is_scopeless_link_local(&"127.0.0.1:1".parse().unwrap()));
         assert!(!is_scopeless_link_local(&"[fec0::1]:1".parse().unwrap())); // outside /10
     }
+
+    // ── Decision probe (#61 / floating-identity) ────────────────────────────
+    //
+    // The `#[ignore]`d mDNS integration tests can't answer the sufficiency
+    // question deterministically: *what does iroh's `incoming.remote_addr()`
+    // actually report for a same-host dial, and does the `reply_dial_candidates`
+    // set actually reconnect to it?* These do. Each binds two REAL transport
+    // endpoints, dials asker→responder over a chosen local path, has the
+    // responder observe the source exactly as `accept_conn` does, and then dials
+    // the asker BACK over the candidate set — proving the reply route is
+    // reachable end to end. The observed source is logged as the empirical
+    // record for deciding whether the candidate-set fix (`#63`) suffices or the
+    // upstream scope-id-preserving work is still owed.
+
+    /// Bind two real endpoints, dial the responder at `target_ip:<responder
+    /// port>`, and return `(source the responder observed, did the dial-back
+    /// over `reply_dial_candidates` reconnect)`.
+    async fn observe_and_dial_back(target_ip: IpAddr) -> (SocketAddr, bool) {
+        let user = UserKey::generate();
+        let asker = agent(&user, "probe-asker");
+        let responder = agent(&user, "probe-responder");
+        let a_ep = Arc::new(Endpoint::bind(&asker, 0).await.expect("bind asker"));
+        let b_ep = Arc::new(Endpoint::bind(&responder, 0).await.expect("bind responder"));
+        let a_pubkey = a_ep.public_key();
+        let b_pubkey = b_ep.public_key();
+        let target = SocketAddr::new(target_ip, b_ep.port());
+
+        // Asker keeps accepting so the dial-back can finish its handshake.
+        let a_accept = a_ep.clone();
+        let a_task = tokio::spawn(async move {
+            while let Some(incoming) = a_accept.accept().await {
+                tokio::spawn(async move {
+                    let _ = incoming.await;
+                });
+            }
+        });
+
+        // Responder accepts once, records the observed source EXACTLY as
+        // `accept_conn` does, then finishes the handshake.
+        let (tx, rx) = tokio::sync::oneshot::channel::<Option<SocketAddr>>();
+        let b_accept = b_ep.clone();
+        let b_task = tokio::spawn(async move {
+            if let Some(incoming) = b_accept.accept().await {
+                let src = match incoming.remote_addr() {
+                    IncomingAddr::Ip(addr) => Some(addr),
+                    _ => None,
+                };
+                let _ = tx.send(src);
+                let _ = incoming.await;
+            }
+        });
+
+        a_ep.dial(b_pubkey, [target])
+            .await
+            .expect("asker dials responder over the chosen local path");
+
+        let observed = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("responder observed a source within 5s")
+            .expect("observation channel not dropped")
+            .expect("iroh reported an IP source (not a relay path)");
+
+        // Doctrine invariant: the reply route is a non-empty candidate set that
+        // reconnects to the *identity*, never a single load-bearing address.
+        let candidates = reply_dial_candidates(observed);
+        assert!(
+            !candidates.is_empty(),
+            "candidate set must never be empty for a same-host peer"
+        );
+        let dial_back_ok = b_ep
+            .dial(a_pubkey, candidates.iter().copied())
+            .await
+            .is_ok();
+
+        b_task.abort();
+        a_task.abort();
+        (observed, dial_back_ok)
+    }
+
+    /// Dialing the responder over IPv4 loopback: the observed source must be a
+    /// dialable (non-scopeless-link-local) address, and the candidate-set
+    /// dial-back must reconnect. Evidence for the common same-host case.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn probe_loopback_v4_source_is_dialable_and_reconnects() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let (observed, dial_back_ok) = observe_and_dial_back(Ipv4Addr::LOCALHOST.into()).await;
+        eprintln!("[#61 probe] loopback-v4 dial → iroh observed source = {observed}");
+        assert!(
+            !is_scopeless_link_local(&observed),
+            "a same-host loopback source must not be an undialable scopeless link-local"
+        );
+        assert!(
+            dial_back_ok,
+            "responder must reconnect to the asker over reply_dial_candidates({observed})"
+        );
+    }
+
+    /// Same probe over IPv6 loopback. Records what iroh reports for a v6 path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn probe_loopback_v6_source_is_dialable_and_reconnects() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let (observed, dial_back_ok) = observe_and_dial_back(Ipv6Addr::LOCALHOST.into()).await;
+        eprintln!("[#61 probe] loopback-v6 dial → iroh observed source = {observed}");
+        assert!(
+            !is_scopeless_link_local(&observed),
+            "a same-host loopback source must not be an undialable scopeless link-local"
+        );
+        assert!(
+            dial_back_ok,
+            "responder must reconnect to the asker over reply_dial_candidates({observed})"
+        );
+    }
+
+    /// **The decisive #61 case.** When iroh surfaces a *scopeless* link-local
+    /// source (`fe80::`, `scope_id == 0` — undialable; what mDNS surfaces on CI
+    /// and most Linux hosts), the candidate set must drop it yet still reach the
+    /// same-host peer. Proven end to end over REAL iroh: build the candidate set
+    /// from the exact #61-shaped source at the asker's real port, then dial the
+    /// asker back over it — the surviving loopback candidate must reconnect. This
+    /// is the deterministic answer the `#[ignore]`d mDNS test can't give: for a
+    /// same-host peer, `#63`'s fix delivers even in the worst-case source shape.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn probe_scopeless_link_local_source_reconnects_via_loopback_fallback() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let user = UserKey::generate();
+        let asker = agent(&user, "probe-asker");
+        let responder = agent(&user, "probe-responder");
+        let a_ep = Arc::new(Endpoint::bind(&asker, 0).await.expect("bind asker"));
+        let b_ep = Arc::new(Endpoint::bind(&responder, 0).await.expect("bind responder"));
+
+        // Asker keeps accepting so the dial-back can complete.
+        let a_accept = a_ep.clone();
+        let a_task = tokio::spawn(async move {
+            while let Some(incoming) = a_accept.accept().await {
+                tokio::spawn(async move {
+                    let _ = incoming.await;
+                });
+            }
+        });
+
+        // The exact #61 shape: a scopeless link-local at the asker's *real* port.
+        let scopeless_source = SocketAddr::V6(SocketAddrV6::new(
+            "fe80::dead:beef".parse().unwrap(),
+            a_ep.port(),
+            0,
+            0, // scope_id 0 → undialable
+        ));
+        assert!(
+            is_scopeless_link_local(&scopeless_source),
+            "precondition: the source is the undialable #61 shape"
+        );
+
+        let candidates = reply_dial_candidates(scopeless_source);
+        assert!(
+            !candidates.contains(&scopeless_source),
+            "the undialable scopeless link-local must be filtered out of the set"
+        );
+        assert!(
+            !candidates.is_empty(),
+            "the identity must retain a reachable candidate (loopback)"
+        );
+
+        let dial_back_ok = b_ep
+            .dial(a_ep.public_key(), candidates.iter().copied())
+            .await
+            .is_ok();
+        a_task.abort();
+        assert!(
+            dial_back_ok,
+            "responder must reach the same-host asker via loopback despite an \
+             undialable scopeless link-local source ({scopeless_source})"
+        );
+    }
 }
