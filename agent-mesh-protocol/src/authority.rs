@@ -197,6 +197,83 @@ impl ContentAddressable for Grant {
     }
 }
 
+// ── Grant ⇄ Authority content binding (the CID is load-bearing) ──────────────
+
+/// The two authority ids in an [`BindError::AuthorityCidMismatch`] (boxed so the
+/// error variant stays small).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorityMismatch {
+    /// The [`AuthorityId`] the grant commits to.
+    pub named_by_grant: AuthorityId,
+    /// The CID of the body the caller tried to bind.
+    pub of_body: AuthorityId,
+}
+
+/// Why an [`Authority`] body could not be bound to a [`Grant`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindError {
+    /// Computing the authority's CID failed (dag-cbor encoding).
+    Encoding(String),
+    /// The supplied body's CID is **not** the [`AuthorityId`] the grant names —
+    /// it is a different authority than the one the grant content-binds. A
+    /// resolver handing over a "convenient" body is rejected here, fail-closed.
+    AuthorityCidMismatch(Box<AuthorityMismatch>),
+}
+
+/// A [`Grant`] paired with the exact [`Authority`] body it names — and the
+/// pairing is **only constructible when the body's CID equals the grant's
+/// `authority` field**. This is the whole point of content addressing: the
+/// caveats an edge is judged against are provably the caveats the grant commits
+/// to, not a body a buggy or hostile resolver substituted. Every function that
+/// reasons about a grant's *authority value* takes a `ResolvedGrant`, so the
+/// mismatch case is unrepresentable rather than merely checked-somewhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedGrant {
+    grant: Grant,
+    authority: Authority,
+}
+
+impl ResolvedGrant {
+    /// Bind `authority` to `grant`, **verifying** `authority.id() ==
+    /// grant.authority()`. Fails closed on any mismatch or encoding error — the
+    /// only way to obtain a `ResolvedGrant`, so a mismatched body can never reach
+    /// the derivation/admission logic.
+    pub fn bind(grant: Grant, authority: Authority) -> Result<Self, BindError> {
+        let of_body = authority
+            .id()
+            .map_err(|e| BindError::Encoding(e.to_string()))?;
+        if of_body != grant.authority() {
+            return Err(BindError::AuthorityCidMismatch(Box::new(
+                AuthorityMismatch {
+                    named_by_grant: grant.authority(),
+                    of_body,
+                },
+            )));
+        }
+        Ok(Self { grant, authority })
+    }
+
+    /// The grant.
+    #[must_use]
+    pub fn grant(&self) -> &Grant {
+        &self.grant
+    }
+
+    /// The authority body — provably the one `grant` names.
+    #[must_use]
+    pub fn authority(&self) -> &Authority {
+        &self.authority
+    }
+
+    /// The grant's content id.
+    ///
+    /// # Errors
+    /// Propagates a dag-cbor encoding error.
+    pub fn id(&self) -> Result<GrantId, ContentError> {
+        self.grant.id()
+    }
+}
+
 // ── L6 AUTHORIZATION: attenuation algebra / elevation signature ──────────────
 
 /// The verifier contract for operator Elevation attestations (L6). Real
@@ -232,13 +309,17 @@ pub enum DerivationReject {
     /// An attenuation edge whose child authority is NOT `⊑` the parent (it
     /// widens) — algebra forbids it (I5).
     AttenuationWidens,
-    /// The declared parent grant id does not match the parent supplied.
+    /// The parent grant supplied does not have the [`GrantId`] the child's
+    /// derivation names (computed from the parent grant, not trusted from a
+    /// caller-passed id).
     ParentMismatch,
     /// An elevation whose attestation the verifier rejected (or the deferred
     /// default, which rejects all).
     ElevationUnauthorized,
-    /// The parent authority value was needed to check the edge but not supplied.
-    MissingParentAuthority,
+    /// A non-root edge needs its parent grant, but none was supplied.
+    MissingParent,
+    /// A CID needed to check the edge could not be computed (fail-closed).
+    CidUnavailable,
 }
 
 /// Result of checking one derivation edge (L6 + L7).
@@ -250,8 +331,14 @@ pub enum DerivationDecision {
     Reject(DerivationReject),
 }
 
-/// Check a single derivation edge for `child`, given the resolved parent
-/// (authority value + its id), against `verifier` (L6).
+/// Check a single derivation edge for `child` against its `parent` (L6).
+///
+/// Both are [`ResolvedGrant`]s, so each carries an authority body that is
+/// **CID-bound to its grant** — the caveats compared are provably the ones the
+/// grants name, closing the substitution attack where a resolver validates an
+/// edge against a convenient body the grant does not commit to. The parent's
+/// [`GrantId`] is recomputed from the parent grant here and matched against the
+/// id the child's derivation names; it is never trusted from the caller.
 ///
 /// * `Root` is always valid (no parent).
 /// * `Attenuation` requires the parent id to match AND `child ⊑ parent`
@@ -260,24 +347,44 @@ pub enum DerivationDecision {
 ///   to accept — the algebra deliberately cannot bless a widening.
 #[must_use]
 pub fn check_derivation(
-    child: &Grant,
-    child_authority: &Authority,
-    parent: Option<(&GrantId, &Authority)>,
+    child: &ResolvedGrant,
+    parent: Option<&ResolvedGrant>,
     verifier: &dyn AttestationVerifier,
 ) -> DerivationDecision {
     use DerivationReject as R;
-    match child.derivation() {
+    // The parent's identity is COMPUTED from the parent grant and matched against
+    // the id the child's derivation names — never trusted from a caller. Combined
+    // with `ResolvedGrant` (each authority body is CID-bound to its grant at
+    // construction), every caveat compared below is provably the caveats the
+    // grants commit to. That is what makes the algebra sound; an unchecked CID
+    // would be decorative.
+    let matched_parent = |declared: &GrantId| -> Result<&ResolvedGrant, DerivationDecision> {
+        let parent = parent.ok_or(DerivationDecision::Reject(R::MissingParent))?;
+        let parent_id = parent
+            .id()
+            .map_err(|_| DerivationDecision::Reject(R::CidUnavailable))?;
+        if &parent_id != declared {
+            return Err(DerivationDecision::Reject(R::ParentMismatch));
+        }
+        Ok(parent)
+    };
+
+    match child.grant().derivation() {
         Derivation::Root => DerivationDecision::Valid,
         Derivation::Attenuation {
             parent: declared_parent,
         } => {
-            let Some((parent_id, parent_authority)) = parent else {
-                return DerivationDecision::Reject(R::MissingParentAuthority);
+            let parent = match matched_parent(declared_parent) {
+                Ok(p) => p,
+                Err(reject) => return reject,
             };
-            if parent_id != declared_parent {
-                return DerivationDecision::Reject(R::ParentMismatch);
-            }
-            if child_authority.caveats().leq(parent_authority.caveats()) {
+            // Both authorities are CID-bound to their grants (ResolvedGrant), so
+            // this `⊑` is over the exact caveats the grants name.
+            if child
+                .authority()
+                .caveats()
+                .leq(parent.authority().caveats())
+            {
                 DerivationDecision::Valid
             } else {
                 DerivationDecision::Reject(R::AttenuationWidens)
@@ -287,13 +394,15 @@ pub fn check_derivation(
             parent: declared_parent,
             attestation,
         } => {
-            let Some((parent_id, _parent_authority)) = parent else {
-                return DerivationDecision::Reject(R::MissingParentAuthority);
+            let parent = match matched_parent(declared_parent) {
+                Ok(p) => p,
+                Err(reject) => return reject,
             };
-            if parent_id != declared_parent {
-                return DerivationDecision::Reject(R::ParentMismatch);
-            }
-            if verifier.verify_elevation(*parent_id, child, *attestation) {
+            let parent_id = match parent.id() {
+                Ok(id) => id,
+                Err(_) => return DerivationDecision::Reject(R::CidUnavailable),
+            };
+            if verifier.verify_elevation(parent_id, child.grant(), *attestation) {
                 DerivationDecision::Valid
             } else {
                 DerivationDecision::Reject(R::ElevationUnauthorized)
@@ -545,9 +654,20 @@ mod tests {
 
     /// A parent grant `(GrantId, Authority)` over `auth`, as a Root — the shape
     /// `check_derivation` consumes (derivations reference the parent GRANT).
-    fn parent_grant(auth: &Authority) -> (GrantId, Authority) {
+    /// A ROOT [`ResolvedGrant`] over `c` — a grant paired with its CID-bound
+    /// authority (the only way `check_derivation` accepts an authority body).
+    fn root_grant(c: Caveats) -> ResolvedGrant {
+        let auth = Authority::new(c);
         let grant = Grant::new(auth.id().unwrap(), Derivation::Root);
-        (grant.id().unwrap(), auth.clone())
+        ResolvedGrant::bind(grant, auth).unwrap()
+    }
+
+    /// A derived [`ResolvedGrant`] over `c` with derivation `d`, honestly bound to
+    /// its own authority body.
+    fn derived_grant(c: Caveats, d: Derivation) -> ResolvedGrant {
+        let auth = Authority::new(c);
+        let grant = Grant::new(auth.id().unwrap(), d);
+        ResolvedGrant::bind(grant, auth).unwrap()
     }
 
     // ── L1 identity: determinism + typed-domain separation ───────────────────
@@ -608,53 +728,46 @@ mod tests {
 
     #[test]
     fn attenuation_admits_only_when_child_leq_parent() {
-        let parent_auth = Authority::new(caveats(
+        let parent = root_grant(caveats(
             Scope::only(["/repo".into(), "/tmp".into()]),
             Scope::only(["git".into()]),
             Scope::none(),
         ));
-        let (parent_id, parent) = parent_grant(&parent_auth);
+        let parent_id = parent.id().unwrap();
         // Child ⊑ parent (narrower fs_read) — valid.
-        let child = Authority::new(caveats(
-            Scope::only(["/repo".into()]),
-            Scope::only(["git".into()]),
-            Scope::none(),
-        ));
-        let g = Grant::new(
-            child.id().unwrap(),
+        let child = derived_grant(
+            caveats(
+                Scope::only(["/repo".into()]),
+                Scope::only(["git".into()]),
+                Scope::none(),
+            ),
             Derivation::Attenuation { parent: parent_id },
         );
         assert_eq!(
-            check_derivation(&g, &child, Some((&parent_id, &parent)), &DenyAllElevations),
+            check_derivation(&child, Some(&parent), &DenyAllElevations),
             DerivationDecision::Valid
         );
         // Child ⋠ parent (adds /etc) — a widening masquerading as attenuation.
-        let widening = Authority::new(caveats(
-            Scope::only(["/repo".into(), "/etc".into()]),
-            Scope::only(["git".into()]),
-            Scope::none(),
-        ));
-        let bad = Grant::new(
-            widening.id().unwrap(),
+        let widening = derived_grant(
+            caveats(
+                Scope::only(["/repo".into(), "/etc".into()]),
+                Scope::only(["git".into()]),
+                Scope::none(),
+            ),
             Derivation::Attenuation { parent: parent_id },
         );
         assert_eq!(
-            check_derivation(
-                &bad,
-                &widening,
-                Some((&parent_id, &parent)),
-                &DenyAllElevations
-            ),
+            check_derivation(&widening, Some(&parent), &DenyAllElevations),
             DerivationDecision::Reject(DerivationReject::AttenuationWidens)
         );
     }
 
     #[test]
     fn elevation_is_fail_closed_without_a_verifier() {
-        let (parent_id, parent) = parent_grant(&Authority::new(Caveats::top()));
-        let child = Authority::new(Caveats::top());
-        let g = Grant::new(
-            child.id().unwrap(),
+        let parent = root_grant(Caveats::top());
+        let parent_id = parent.id().unwrap();
+        let child = derived_grant(
+            Caveats::top(),
             Derivation::Elevation {
                 parent: parent_id,
                 attestation: AttestationId(parent_id.0),
@@ -662,27 +775,100 @@ mod tests {
         );
         // The deferred default rejects every elevation (L7).
         assert_eq!(
-            check_derivation(&g, &child, Some((&parent_id, &parent)), &DenyAllElevations),
+            check_derivation(&child, Some(&parent), &DenyAllElevations),
             DerivationDecision::Reject(DerivationReject::ElevationUnauthorized)
         );
     }
 
     #[test]
-    fn attenuation_rejects_a_parent_id_mismatch() {
-        let (parent_id, parent) = parent_grant(&Authority::new(Caveats::top()));
-        let (wrong, _) = parent_grant(&Authority::new(caveats(
+    fn derivation_rejects_a_parent_that_is_not_the_named_grant() {
+        let parent = root_grant(Caveats::top());
+        let parent_id = parent.id().unwrap();
+        // A DIFFERENT resolved grant, whose computed id ≠ the declared parent id.
+        let impostor = root_grant(caveats(Scope::none(), Scope::none(), Scope::none()));
+        assert_ne!(impostor.id().unwrap(), parent_id);
+        let child = derived_grant(
+            Caveats::top(),
+            Derivation::Attenuation { parent: parent_id },
+        );
+        // Supplying the impostor as the parent is rejected — the parent id is
+        // recomputed from the grant, not trusted.
+        assert_eq!(
+            check_derivation(&child, Some(&impostor), &DenyAllElevations),
+            DerivationDecision::Reject(DerivationReject::ParentMismatch)
+        );
+    }
+
+    // ── Content binding: the CID is load-bearing (the #72 review) ────────────
+
+    #[test]
+    fn bind_rejects_a_body_the_grant_does_not_name() {
+        // A grant that commits to a WIDE authority (/repo + /etc)…
+        let named = Authority::new(caveats(
+            Scope::only(["/repo".into(), "/etc".into()]),
             Scope::none(),
             Scope::none(),
+        ));
+        let grant = Grant::new(named.id().unwrap(), Derivation::Root);
+        // …cannot be paired with a convenient, narrower body — bind fails closed.
+        let convenient = Authority::new(caveats(
+            Scope::only(["/repo".into()]),
             Scope::none(),
-        )));
-        let child = Authority::new(Caveats::top());
-        let g = Grant::new(
-            child.id().unwrap(),
-            Derivation::Attenuation { parent: wrong },
+            Scope::none(),
+        ));
+        match ResolvedGrant::bind(grant, convenient) {
+            Err(BindError::AuthorityCidMismatch(_)) => {}
+            other => panic!("a mismatched body must be rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attenuation_cannot_be_validated_against_a_substituted_body() {
+        // The reviewer's attack, end to end: a child grant NAMES a widening
+        // authority (/repo + /etc, which ⋠ the parent), but the attacker wants it
+        // judged against a convenient narrow body (/repo, which ⊑ parent).
+        let parent = root_grant(caveats(
+            Scope::only(["/repo".into()]),
+            Scope::none(),
+            Scope::none(),
+        ));
+        let parent_id = parent.id().unwrap();
+        let widening = Authority::new(caveats(
+            Scope::only(["/repo".into(), "/etc".into()]),
+            Scope::none(),
+            Scope::none(),
+        ));
+        let child_grant = Grant::new(
+            widening.id().unwrap(),
+            Derivation::Attenuation { parent: parent_id },
+        );
+        // The substitution is impossible: binding the convenient body to the grant
+        // fails (its CID ≠ the grant's authority field).
+        let convenient = Authority::new(caveats(
+            Scope::only(["/repo".into()]),
+            Scope::none(),
+            Scope::none(),
+        ));
+        assert!(ResolvedGrant::bind(child_grant.clone(), convenient).is_err());
+        // The only admissible pairing uses the grant's REAL (widening) body, which
+        // check_derivation then rejects — the widening cannot hide.
+        let honest = ResolvedGrant::bind(child_grant, widening).unwrap();
+        assert_eq!(
+            check_derivation(&honest, Some(&parent), &DenyAllElevations),
+            DerivationDecision::Reject(DerivationReject::AttenuationWidens)
+        );
+    }
+
+    #[test]
+    fn derivation_without_a_parent_fails_closed() {
+        let parent_id = root_grant(Caveats::top()).id().unwrap();
+        let child = derived_grant(
+            Caveats::top(),
+            Derivation::Attenuation { parent: parent_id },
         );
         assert_eq!(
-            check_derivation(&g, &child, Some((&parent_id, &parent)), &DenyAllElevations),
-            DerivationDecision::Reject(DerivationReject::ParentMismatch)
+            check_derivation(&child, None, &DenyAllElevations),
+            DerivationDecision::Reject(DerivationReject::MissingParent)
         );
     }
 
