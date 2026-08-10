@@ -39,6 +39,22 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
+  # macOS platform coverage. The Linux jobs above cannot execute the
+  # `#[cfg(target_os = "macos")]` tests (e.g. the APFS filename behavior in
+  # `user_key`), so their green is not evidence for macOS. Narrow to the one
+  # crate that carries platform-gated tests to keep CI cost low. This is NOT a
+  # new check command — a macOS developer's `just check` / pre-push already runs
+  # these — so it needs no justfile/pre-push parity mirror.
+  test-macos:
+    name: Rust tests (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (agent-mesh-protocol, macOS-gated tests)
+        run: cargo test -p agent-mesh-protocol --locked
+
   coverage:
     name: Workspace coverage (cargo-llvm-cov)
     runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
