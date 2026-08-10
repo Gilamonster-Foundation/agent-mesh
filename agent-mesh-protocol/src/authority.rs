@@ -443,6 +443,110 @@ pub fn check_derivation(
     }
 }
 
+// ── L5 PROVENANCE: chain termination at an externally-trusted root ───────────
+
+/// Why a derivation chain is not trusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainReject {
+    /// An empty chain proves nothing (fail-closed).
+    Empty,
+    /// Edge `index` (child `chain[index]` → parent `chain[index + 1]`) failed
+    /// [`check_derivation`] for the carried reason.
+    Edge {
+        index: usize,
+        reason: DerivationReject,
+    },
+    /// `chain[index]` is a [`Derivation::Root`] but is not the terminus — a root
+    /// may only appear at the end of a chain (it derives from nothing).
+    RootNotTerminal { index: usize },
+    /// The terminus is not a [`Derivation::Root`]: the chain does not bottom out
+    /// at a self-standing root, so there is nothing to anchor trust to.
+    NonRootTerminus,
+    /// The chain is structurally valid **and** terminates at a root, but that
+    /// root is not the externally-configured trusted anchor. Structural validity
+    /// is not trust: a CID identifies, it does not authorize. This is the reject
+    /// that stops an attacker's self-authored, internally-consistent chain.
+    UntrustedRoot { found: GrantId, expected: GrantId },
+    /// A CID needed to anchor the chain could not be computed (fail-closed).
+    CidUnavailable,
+}
+
+/// Whether a derivation chain is trusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainDecision {
+    /// Every edge is a valid derivation AND the chain terminates at the exact
+    /// externally-trusted root.
+    Trusted,
+    /// The chain is rejected, fail-closed.
+    Reject(ChainReject),
+}
+
+/// **Verify a full derivation chain against an externally-trusted root (L5).**
+///
+/// `chain` is ordered leaf → root: `chain[0]` is the grant whose trust is in
+/// question, `chain[i + 1]` is the parent of `chain[i]`, and the last element is
+/// the claimed root. Every element is a [`ResolvedGrant`], so each authority body
+/// is CID-bound to its grant.
+///
+/// A chain is [`ChainDecision::Trusted`] iff **both** hold:
+///
+/// 1. **Every edge is a valid derivation.** For each non-terminal `chain[i]`,
+///    [`check_derivation`] against `chain[i + 1]` succeeds — which recomputes the
+///    parent id and rejects any link whose declared parent is not the actual next
+///    grant. The terminus must be a [`Derivation::Root`]; a root may not appear
+///    anywhere else.
+/// 2. **The root is the configured trust anchor.** The terminal root's [`GrantId`]
+///    must equal `trusted_root`. **This is the load-bearing step of L5.** A
+///    structurally perfect, internally-consistent chain an attacker authored
+///    themselves is *rejected here* — a CID identifies the root, it does not make
+///    the root trusted. Trust enters the system only by an operator configuring
+///    which root [`GrantId`] is the anchor; it is never inferred from structure.
+#[must_use]
+pub fn verify_chain(
+    chain: &[ResolvedGrant],
+    trusted_root: GrantId,
+    verifier: &dyn AttestationVerifier,
+) -> ChainDecision {
+    let Some(terminus) = chain.last() else {
+        return ChainDecision::Reject(ChainReject::Empty);
+    };
+    // Walk every edge leaf → root. `chain[i]` (i < last) must derive validly from
+    // `chain[i + 1]`, and must not itself be a Root (a root derives from nothing,
+    // so it can only be the terminus).
+    for (index, child) in chain.iter().enumerate() {
+        if index == chain.len() - 1 {
+            break;
+        }
+        if matches!(child.grant().derivation(), Derivation::Root) {
+            return ChainDecision::Reject(ChainReject::RootNotTerminal { index });
+        }
+        let parent = &chain[index + 1];
+        match check_derivation(child, Some(parent), verifier) {
+            DerivationDecision::Valid => {}
+            DerivationDecision::Reject(reason) => {
+                return ChainDecision::Reject(ChainReject::Edge { index, reason });
+            }
+        }
+    }
+
+    // The terminus must be a root...
+    if !matches!(terminus.grant().derivation(), Derivation::Root) {
+        return ChainDecision::Reject(ChainReject::NonRootTerminus);
+    }
+    // ...and it must be THE trusted root. Structural validity ≠ trust.
+    let root_id = match terminus.id() {
+        Ok(id) => id,
+        Err(_) => return ChainDecision::Reject(ChainReject::CidUnavailable),
+    };
+    if root_id != trusted_root {
+        return ChainDecision::Reject(ChainReject::UntrustedRoot {
+            found: root_id,
+            expected: trusted_root,
+        });
+    }
+    ChainDecision::Trusted
+}
+
 // ── L3 BOUND: the resolved-authority lattice + pure admission ────────────────
 
 /// What a native fence actually permits on ONE axis, expressed portably (the
@@ -946,6 +1050,136 @@ mod tests {
         assert_eq!(
             check_derivation(&child, None, &DenyAllElevations),
             DerivationDecision::Reject(DerivationReject::MissingParent)
+        );
+    }
+
+    // ── L5 provenance: chain termination at a trusted root ───────────────────
+
+    /// Build a valid leaf → root chain: a root over `parent_c`, and an
+    /// attenuation child over `child_c` whose declared parent is that root.
+    fn root_and_child(parent_c: Caveats, child_c: Caveats) -> (ResolvedGrant, ResolvedGrant) {
+        let root = root_grant(parent_c);
+        let child = derived_grant(
+            child_c,
+            Derivation::Attenuation {
+                parent: root.id().unwrap(),
+            },
+        );
+        (root, child)
+    }
+
+    #[test]
+    fn chain_is_trusted_only_when_it_terminates_at_the_configured_root() {
+        // A legitimate root the operator has anchored, with an honest attenuation
+        // beneath it, is trusted.
+        let (root, child) = root_and_child(
+            caveats(
+                Scope::only(["/repo".into(), "/tmp".into()]),
+                Scope::only(["git".into()]),
+                Scope::none(),
+            ),
+            caveats(
+                Scope::only(["/repo".into()]),
+                Scope::only(["git".into()]),
+                Scope::none(),
+            ),
+        );
+        let trusted = root.id().unwrap();
+        let chain = [child, root];
+        assert_eq!(
+            verify_chain(&chain, trusted, &DenyAllElevations),
+            ChainDecision::Trusted
+        );
+    }
+
+    #[test]
+    fn a_self_authored_root_is_rejected_unless_it_is_the_configured_anchor() {
+        // The attacker builds a *structurally perfect* chain: a well-formed root
+        // and a genuine attenuation beneath it. Every edge validates. But the root
+        // is one they minted themselves, not the operator's anchor — so it is NOT
+        // trusted. A CID identifies the root; it does not authorize it.
+        let (attacker_root, child) = root_and_child(
+            Caveats::top(),
+            caveats(Scope::only(["/repo".into()]), Scope::none(), Scope::none()),
+        );
+        // The edge itself is perfectly valid...
+        assert_eq!(
+            check_derivation(&child, Some(&attacker_root), &DenyAllElevations),
+            DerivationDecision::Valid
+        );
+        // ...but a DIFFERENT root is the configured trust anchor.
+        let real_anchor = root_grant(caveats(
+            Scope::only(["/srv".into()]),
+            Scope::none(),
+            Scope::none(),
+        ))
+        .id()
+        .unwrap();
+        let attacker_root_id = attacker_root.id().unwrap();
+        let chain = [child, attacker_root];
+        assert_eq!(
+            verify_chain(&chain, real_anchor, &DenyAllElevations),
+            ChainDecision::Reject(ChainReject::UntrustedRoot {
+                found: attacker_root_id,
+                expected: real_anchor,
+            })
+        );
+    }
+
+    #[test]
+    fn a_chain_that_does_not_bottom_out_at_a_root_is_rejected() {
+        // A single-element chain whose only element is an attenuation (no root
+        // beneath it) has nothing to anchor — fail-closed.
+        let orphan = derived_grant(
+            Caveats::top(),
+            Derivation::Attenuation {
+                parent: root_grant(Caveats::top()).id().unwrap(),
+            },
+        );
+        let anchor = root_grant(Caveats::top()).id().unwrap();
+        assert_eq!(
+            verify_chain(&[orphan], anchor, &DenyAllElevations),
+            ChainDecision::Reject(ChainReject::NonRootTerminus)
+        );
+    }
+
+    #[test]
+    fn a_broken_link_in_the_chain_is_rejected() {
+        // The child names a parent that is not the grant actually sitting above it
+        // in the chain — check_derivation recomputes the parent id and rejects.
+        let real_root = root_grant(Caveats::top());
+        let other_parent_id = root_grant(caveats(
+            Scope::only(["/elsewhere".into()]),
+            Scope::none(),
+            Scope::none(),
+        ))
+        .id()
+        .unwrap();
+        // Child claims descent from `other_parent_id`, but the chain places
+        // `real_root` above it.
+        let child = derived_grant(
+            Caveats::top(),
+            Derivation::Attenuation {
+                parent: other_parent_id,
+            },
+        );
+        let trusted = real_root.id().unwrap();
+        let chain = [child, real_root];
+        assert_eq!(
+            verify_chain(&chain, trusted, &DenyAllElevations),
+            ChainDecision::Reject(ChainReject::Edge {
+                index: 0,
+                reason: DerivationReject::ParentMismatch,
+            })
+        );
+    }
+
+    #[test]
+    fn an_empty_chain_proves_nothing() {
+        let anchor = root_grant(Caveats::top()).id().unwrap();
+        assert_eq!(
+            verify_chain(&[], anchor, &DenyAllElevations),
+            ChainDecision::Reject(ChainReject::Empty)
         );
     }
 

@@ -33,10 +33,11 @@ pub mod pyo3_module;
 
 pub use agent_key::{AgentKey, AgentMetadata, CertChain, Issuer, SerdeSig};
 pub use authority::{
-    admit, check_derivation, empty_closure, relate, AdmissionDecision, AdmissionReject,
-    AttestationId, AttestationVerifier, Authority, AuthorityId, AuthorityMismatch, BindError,
-    ConfinedAxis, DenyAllElevations, Derivation, DerivationDecision, DerivationReject, Grant,
-    GrantId, ResolvedAuthority, ResolvedGrant, ResolvedScope, ScopeRelation,
+    admit, check_derivation, empty_closure, relate, verify_chain, AdmissionDecision,
+    AdmissionReject, AttestationId, AttestationVerifier, Authority, AuthorityId, AuthorityMismatch,
+    BindError, ChainDecision, ChainReject, ConfinedAxis, DenyAllElevations, Derivation,
+    DerivationDecision, DerivationReject, Grant, GrantId, ResolvedAuthority, ResolvedGrant,
+    ResolvedScope, ScopeRelation,
 };
 pub use caveats::{Caveats, CountBound, Scope};
 pub use envelope::{Recipient, SignedEnvelope};
