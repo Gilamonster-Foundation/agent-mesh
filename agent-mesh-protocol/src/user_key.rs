@@ -93,10 +93,7 @@ impl UserKey {
 
         let mut f = opts.open(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
-                MeshError::Io(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    format!("refusing to overwrite existing key at {}", path.display()),
-                ))
+                refuse_overwrite_error(path)
             } else {
                 MeshError::Io(e)
             }
@@ -112,6 +109,18 @@ impl UserKey {
             SigningKey::from_pkcs8_pem(&pem).map_err(|e| MeshError::InvalidKey(e.to_string()))?;
         Ok(Self { signing })
     }
+}
+
+/// The `AlreadyExists` refusal [`save`](UserKey::save) returns rather than
+/// overwrite an existing key. Formats `path` via `Path::display()`, which is
+/// **lossy** for a non-UTF-8 path (the offending bytes render as U+FFFD) and
+/// never panics — the single source of truth for that message, so the formatting
+/// contract can be tested without forcing an illegal filename onto the disk.
+fn refuse_overwrite_error(path: &Path) -> MeshError {
+    MeshError::Io(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("refusing to overwrite existing key at {}", path.display()),
+    ))
 }
 
 impl std::fmt::Debug for UserKey {
@@ -650,13 +659,19 @@ mod tests {
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    /// Contract pin: non-UTF-8 filenames round-trip through save/load
-    /// and the refuse-to-overwrite path (the error message formats the
-    /// path lossily via `display()` without panicking). This workspace
-    /// has been bitten by encoding assumptions before; the key store
-    /// must not be.
+    /// Contract pin (Linux / non-macOS unix): a **non-UTF-8** filename
+    /// round-trips through save/load and the refuse-to-overwrite path (the
+    /// error message formats the path lossily via `display()` without
+    /// panicking). This workspace has been bitten by encoding assumptions
+    /// before; the key store must not be.
+    ///
+    /// Excluded on macOS: APFS rejects a non-UTF-8 filename at creation
+    /// (`EILSEQ` / "Illegal byte sequence"), so the stressor cannot exist on
+    /// disk there. The `save_load_roundtrip_unusual_unicode_filename` test
+    /// below covers the identical save→load→refuse sequence on macOS with an
+    /// unusual — but APFS-valid — Unicode filename.
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn save_load_roundtrip_non_utf8_filename() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
@@ -692,6 +707,69 @@ mod tests {
         assert!(
             msg.contains("refusing to overwrite existing key at "),
             "lossy display must still produce the refuse message: {msg}"
+        );
+    }
+
+    /// Contract pin (macOS): the filesystem-behavior counterpart of
+    /// `save_load_roundtrip_non_utf8_filename`. APFS requires **valid UTF-8**
+    /// filenames, so a non-UTF-8 name cannot exist on disk there; the
+    /// platform-appropriate stressor is an unusual but valid Unicode filename —
+    /// non-ASCII, an emoji, and a combining diacritic. (APFS preserves the byte
+    /// representation as written and performs normalization-*insensitive* lookup,
+    /// so re-opening the exact path we wrote round-trips regardless of form.)
+    ///
+    /// This proves the **filesystem** half of the contract on macOS — save → load
+    /// round-trips, and the refuse-to-overwrite path formats a valid-Unicode path
+    /// and produces its message. It deliberately does NOT exercise lossy
+    /// formatting of *invalid* UTF-8 (this filename is valid UTF-8); that
+    /// formatting/error behavior is covered platform-independently by
+    /// `refuse_overwrite_message_is_lossy_for_a_non_utf8_path` below, and the
+    /// on-disk invalid-UTF-8 case by the Linux/non-macOS test above.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn save_load_roundtrip_unusual_unicode_filename() {
+        let dir = TempDir::new().unwrap();
+        // café (NFC é), a key emoji, and a bare combining acute accent — all
+        // valid UTF-8 that APFS accepts, stressing path handling with non-ASCII,
+        // multi-byte, and combining sequences.
+        let path = dir.path().join("user-caf\u{00e9}-\u{1f511}-a\u{0301}.key");
+
+        let key = UserKey::generate();
+        let fp = key.fingerprint();
+        key.save(&path)
+            .expect("save with an unusual Unicode filename");
+        let loaded = UserKey::load(&path).expect("load with an unusual Unicode filename");
+        assert_eq!(loaded.fingerprint(), fp);
+
+        let err = UserKey::generate().save(&path).expect_err("must refuse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refusing to overwrite existing key at "),
+            "display must still produce the refuse message for a Unicode path: {msg}"
+        );
+    }
+
+    /// Platform-independent pin for the **formatting/error** behavior (as opposed
+    /// to filesystem behavior): the refuse-to-overwrite message renders a
+    /// **non-UTF-8** path lossily and never panics. The invalid `OsStr` is built
+    /// in memory and passed straight to `refuse_overwrite_error` — it is never
+    /// written to disk, so this runs identically on Linux and macOS (where APFS
+    /// would reject the name). This isolates the lossy-`display()` contract from
+    /// any filesystem round-trip.
+    #[test]
+    #[cfg(unix)]
+    fn refuse_overwrite_message_is_lossy_for_a_non_utf8_path() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let path = Path::new(OsStr::from_bytes(b"user-\xff\xfe.key"));
+        let msg = refuse_overwrite_error(path).to_string();
+        assert!(
+            msg.contains("refusing to overwrite existing key at "),
+            "the refuse message must survive a non-UTF-8 path: {msg}"
+        );
+        assert!(
+            msg.contains('\u{FFFD}'),
+            "non-UTF-8 bytes must render as the U+FFFD replacement char (lossy), not panic: {msg}"
         );
     }
 
