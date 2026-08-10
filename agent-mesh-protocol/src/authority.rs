@@ -46,6 +46,16 @@ const GRANT_KIND: &str = "agent-mesh/provenance/grant/v1";
 /// A domain-tagged body: `{ kind, body }`. dag-cbor sorts map keys, so field
 /// order is irrelevant to the canonical form; the tag's presence is what
 /// separates domains. Serialize-only (never round-tripped as a value).
+///
+/// **The canonical form is a hash preimage, not a value codec.** [`Authority`]
+/// and [`Grant`] have *two distinct* serializations: their derived `serde`
+/// (`{ caveats }` / `{ authority, derivation }`), used for transport, and this
+/// tagged [`ContentAddressable::canonical_form`], used *only* to compute the CID.
+/// The two are intentionally different shapes, so `from_canonical_dagcbor` of the
+/// canonical bytes as the value type does **not** round-trip — decoding always
+/// goes through the value's own `serde`, after which identity is re-established by
+/// recomputing the CID (never trusted from the received bytes). The
+/// `canonical_form_is_a_hash_preimage_not_a_value_codec` test pins this boundary.
 #[derive(Serialize)]
 struct Tagged<'a, B: Serialize> {
     kind: &'a str,
@@ -74,6 +84,17 @@ pub struct GrantId(ContentId);
 
 /// The content identity of an operator Attestation (signing is deferred — the id
 /// is stable now so an Elevation edge can name it before the verifier lands).
+///
+/// **Acyclicity invariant (must hold when the real attestation body lands).** A
+/// [`Grant`] names its [`AttestationId`] (via [`Derivation::Elevation`]), so the
+/// grant's CID depends on the attestation's CID. The attestation body must
+/// therefore **not** include the child [`GrantId`] it authorizes — that would
+/// create the cycle `GrantId → AttestationId → GrantId`, which is uncomputable
+/// under content addressing (neither CID can be formed without the other). The
+/// attestation binds *upward and sideways only*: the parent [`GrantId`], the
+/// child's [`AuthorityId`] (the authority the elevation grants, which exists
+/// independently of the grant), and any operator context — never the child grant
+/// id. The dependency DAG stays acyclic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AttestationId(ContentId);
 
@@ -159,6 +180,10 @@ pub enum Derivation {
     /// it — it is legal *only* through a valid operator `attestation`
     /// (signature). Signatures are deferred (contract §8); until a verifier
     /// lands, [`check_derivation`] fail-closes every elevation.
+    ///
+    /// Because this grant's CID depends on `attestation`, the attestation body
+    /// must not name this grant's id in turn — see the acyclicity invariant on
+    /// [`AttestationId`].
     Elevation {
         parent: GrantId,
         attestation: AttestationId,
@@ -1092,6 +1117,91 @@ mod tests {
         assert_eq!(
             check_derivation(&child, None, &DenyAllElevations),
             DerivationDecision::Reject(DerivationReject::MissingParent)
+        );
+    }
+
+    #[test]
+    fn canonical_form_is_a_hash_preimage_not_a_value_codec() {
+        use content_addressable::canonical::{from_canonical_dagcbor, to_canonical_dagcbor};
+
+        let auth = golden_authority();
+
+        // 1. The canonical (hash) bytes carry the domain tag and are the tagged
+        //    `{kind, body}` shape — decoding them AS an Authority does not
+        //    reproduce the value: the hash preimage is not a value codec.
+        let hash_preimage = auth.canonical_form().unwrap();
+        let decoded_as_value: Result<Authority, _> = from_canonical_dagcbor(&hash_preimage);
+        assert!(
+            decoded_as_value.is_err(),
+            "the tagged hash preimage must not decode as the bare value type"
+        );
+
+        // 2. Transport uses the value's OWN derived serde, which round-trips
+        //    cleanly, and identity is re-established by recomputing the CID from
+        //    the decoded value — never read from the wire.
+        let wire = to_canonical_dagcbor(&auth).unwrap();
+        let back: Authority = from_canonical_dagcbor(&wire).unwrap();
+        assert_eq!(auth, back);
+        assert_eq!(auth.id().unwrap(), back.id().unwrap());
+
+        // 3. The same boundary holds for Grant.
+        let grant = Grant::new(auth.id().unwrap(), Derivation::Root);
+        let grant_wire = to_canonical_dagcbor(&grant).unwrap();
+        let grant_back: Grant = from_canonical_dagcbor(&grant_wire).unwrap();
+        assert_eq!(grant, grant_back);
+        assert_eq!(grant.id().unwrap(), grant_back.id().unwrap());
+        // Grant's hash preimage is likewise not its value codec.
+        assert!(from_canonical_dagcbor::<Grant>(&grant.canonical_form().unwrap()).is_err());
+    }
+
+    // ── v1 CID golden corpus: drift detection ────────────────────────────────
+    //
+    // These literal CIDs pin the v1 wire representation. If the canonical dag-cbor
+    // form, the domain tags, the BLAKE3/CIDv1 codec choice, or a field name/order
+    // in Caveats/Authority/Grant ever changes, these break — which is the point.
+    // A silent representation drift would re-key every previously-issued authority
+    // and grant. Regenerating these literals is a DELIBERATE, reviewed act (bump
+    // the domain-tag version), never a reflexive "update the golden file".
+
+    /// The single fixed authority the golden grants below reference.
+    fn golden_authority() -> Authority {
+        Authority::new(caveats(
+            Scope::only(["/repo".into()]),
+            Scope::only(["git".into()]),
+            Scope::none(),
+        ))
+    }
+
+    #[test]
+    fn golden_authority_cid_is_pinned() {
+        assert_eq!(
+            golden_authority().id().unwrap().content_id().to_string(),
+            "bafyr4igphdy36nsau5r4pzj2qmraozhexhp4k2acxv4bymeuq4xj7kjsjq"
+        );
+    }
+
+    #[test]
+    fn golden_root_grant_cid_is_pinned() {
+        let root = Grant::new(golden_authority().id().unwrap(), Derivation::Root);
+        assert_eq!(
+            root.id().unwrap().content_id().to_string(),
+            "bafyr4ia3m4fhli2zz3lnuulufidc5qitut5wkahyguh3fjneakpgn6keqi"
+        );
+    }
+
+    #[test]
+    fn golden_attenuation_grant_cid_is_pinned() {
+        let auth_id = golden_authority().id().unwrap();
+        let root = Grant::new(auth_id, Derivation::Root);
+        let atten = Grant::new(
+            auth_id,
+            Derivation::Attenuation {
+                parent: root.id().unwrap(),
+            },
+        );
+        assert_eq!(
+            atten.id().unwrap().content_id().to_string(),
+            "bafyr4ihshpvudtgiiseiwnbezg6cwzmonkmzzdiwf54plgfzenmhbohly4"
         );
     }
 
