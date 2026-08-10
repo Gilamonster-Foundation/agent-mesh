@@ -57,19 +57,51 @@ fn typed_canonical_form<B: Serialize>(kind: &str, body: &B) -> Result<Vec<u8>, C
 }
 
 // ── Typed content IDs (L1) ───────────────────────────────────────────────────
+//
+// The inner `ContentId` is PRIVATE: domain-separated hashing is the cryptographic
+// protection, but the Rust type system reinforces it too. Without a public inner
+// field, an accidental rebrand like `GrantId(authority_id.0)` won't compile — a
+// typed id is obtained from its object's `.id()` (or deserialized), never
+// re-tagged from another domain's id. Read the underlying CID via `content_id()`.
 
 /// The content identity of an [`Authority`] value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct AuthorityId(pub ContentId);
+pub struct AuthorityId(ContentId);
 
 /// The content identity of a [`Grant`] (its authority-ref + derivation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct GrantId(pub ContentId);
+pub struct GrantId(ContentId);
 
 /// The content identity of an operator Attestation (signing is deferred — the id
 /// is stable now so an Elevation edge can name it before the verifier lands).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct AttestationId(pub ContentId);
+pub struct AttestationId(ContentId);
+
+impl AuthorityId {
+    /// The underlying content id (read-only; construction is via [`Authority::id`]).
+    #[must_use]
+    pub fn content_id(&self) -> ContentId {
+        self.0
+    }
+}
+
+impl GrantId {
+    /// The underlying content id (read-only; construction is via [`Grant::id`]).
+    #[must_use]
+    pub fn content_id(&self) -> ContentId {
+        self.0
+    }
+}
+
+impl AttestationId {
+    /// The underlying content id (read-only). Construction is deliberately narrow
+    /// while attestations are deferred: an `AttestationId` will be produced by a
+    /// future `Attestation::id()`; deserialization is the only external path today.
+    #[must_use]
+    pub fn content_id(&self) -> ContentId {
+        self.0
+    }
+}
 
 // ── Authority = the authority VALUE (a tagged `Caveats`) ──────────────────────
 
@@ -419,13 +451,17 @@ pub fn check_derivation(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolvedScope {
-    /// The mechanism permits exactly this set (e.g. canonicalized paths / hosts).
-    ConcreteScope(BTreeSet<String>),
-    /// The mechanism permits a named capability class it cannot enumerate as a
-    /// concrete set (e.g. a whole loopback interface). Comparable to another
-    /// scope only when the other names the identical class.
-    CapabilityClass(String),
-    /// The mechanism imposes no restriction on this axis (`⊤`).
+    /// Bounded authority: the union of `concrete` items the mechanism permits
+    /// (e.g. canonicalized paths / hosts) **and** named capability `classes` it
+    /// permits but cannot enumerate as a concrete set (e.g. a whole loopback
+    /// interface). The two are independent dimensions, so a fence can permit both.
+    /// The empty scope (`{}`, `{}`) is the **bottom / identity** element for
+    /// [`union`](Self::union): `∅ ∪ X = X`.
+    Bounded {
+        concrete: BTreeSet<String>,
+        classes: BTreeSet<String>,
+    },
+    /// The mechanism imposes no restriction on this axis (`⊤`, the top element).
     Unbounded,
     /// The mechanism's authority on this axis could not be resolved. **Any**
     /// comparison involving `Unknown` is `Unknown` → fail-closed (L7).
@@ -433,33 +469,69 @@ pub enum ResolvedScope {
 }
 
 impl ResolvedScope {
+    /// The bottom element: permits nothing. The identity for [`union`](Self::union).
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::Bounded {
+            concrete: BTreeSet::new(),
+            classes: BTreeSet::new(),
+        }
+    }
+
+    /// A bounded scope of concrete items only.
+    #[must_use]
+    pub fn concrete<I: IntoIterator<Item = String>>(items: I) -> Self {
+        Self::Bounded {
+            concrete: items.into_iter().collect(),
+            classes: BTreeSet::new(),
+        }
+    }
+
+    /// A bounded scope of a single named capability class only.
+    #[must_use]
+    pub fn class(name: impl Into<String>) -> Self {
+        Self::Bounded {
+            concrete: BTreeSet::new(),
+            classes: BTreeSet::from([name.into()]),
+        }
+    }
+
     /// Lift a delegated [`Scope<String>`] into the resolved lattice: `All ⇒
-    /// Unbounded`, `Only(set) ⇒ ConcreteScope(set)`.
+    /// Unbounded`, `Only(set) ⇒ Bounded{concrete: set}`.
     #[must_use]
     pub fn from_scope(scope: &Scope<String>) -> Self {
         match scope {
             Scope::All => Self::Unbounded,
-            Scope::Only(set) => Self::ConcreteScope(set.clone()),
+            Scope::Only(set) => Self::Bounded {
+                concrete: set.clone(),
+                classes: BTreeSet::new(),
+            },
         }
     }
 
     /// The union `self ∪ other` — the bounding authority when combining the
-    /// delegated grant with the authorized closure. Conservative / fail-closed:
-    /// any `Unknown` ⇒ `Unknown`; any `Unbounded` ⇒ `Unbounded`; two concrete
-    /// sets ⇒ their union; equal classes ⇒ that class; a class mixed with a
-    /// concrete set (not portably combinable) ⇒ `Unknown`.
+    /// delegated grant with the authorized closure. `Unknown` propagates
+    /// (fail-closed); `Unbounded` absorbs; two bounded scopes union their concrete
+    /// and class dimensions independently. The empty scope is the identity, so
+    /// `∅ ∪ X = X` for every `X` (the composability law).
     #[must_use]
     pub fn union(&self, other: &Self) -> Self {
         match (self, other) {
             (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
             (Self::Unbounded, _) | (_, Self::Unbounded) => Self::Unbounded,
-            (Self::ConcreteScope(a), Self::ConcreteScope(b)) => {
-                Self::ConcreteScope(a.union(b).cloned().collect())
-            }
-            (Self::CapabilityClass(a), Self::CapabilityClass(b)) if a == b => {
-                Self::CapabilityClass(a.clone())
-            }
-            _ => Self::Unknown,
+            (
+                Self::Bounded {
+                    concrete: ca,
+                    classes: la,
+                },
+                Self::Bounded {
+                    concrete: cb,
+                    classes: lb,
+                },
+            ) => Self::Bounded {
+                concrete: ca.union(cb).cloned().collect(),
+                classes: la.union(lb).cloned().collect(),
+            },
         }
     }
 }
@@ -470,23 +542,24 @@ impl ResolvedScope {
 pub enum ScopeRelation {
     /// The resolved scope equals the bound.
     Equal,
-    /// The resolved scope is a strict subset of the bound (more confined — fine).
+    /// The resolved scope is a subset of the bound (more confined — fine).
     Subset,
-    /// The resolved scope is a strict superset of the bound — it **widens**
-    /// authority beyond what was granted (the OCAP bug this whole layer exists to
-    /// catch).
+    /// The resolved scope is a superset of the bound — it **widens** authority
+    /// beyond what was granted (the OCAP bug this whole layer exists to catch).
     Superset,
     /// Neither contains the other.
     Incomparable,
-    /// Not decidable in the portable lattice (a class vs a concrete set, or an
-    /// `Unknown` operand) → treated as fail-closed by [`admit`].
+    /// Not decidable in the portable lattice (an `Unknown` operand) → treated as
+    /// fail-closed by [`admit`].
     Unknown,
 }
 
 /// Relate a resolved fence scope to the bound it must stay within: does
 /// `resolved ⊆ bound`? Returns the precise relation so a widening
 /// ([`ScopeRelation::Superset`]) is a distinct, reportable fact from an
-/// undecidable comparison ([`ScopeRelation::Unknown`]).
+/// undecidable comparison ([`ScopeRelation::Unknown`]). Containment is per
+/// dimension: `Bounded ⊆ Bounded` iff both `concrete ⊆ concrete` and
+/// `classes ⊆ classes`.
 #[must_use]
 pub fn relate(resolved: &ResolvedScope, bound: &ResolvedScope) -> ScopeRelation {
     use ResolvedScope as S;
@@ -495,24 +568,28 @@ pub fn relate(resolved: &ResolvedScope, bound: &ResolvedScope) -> ScopeRelation 
         (S::Unbounded, S::Unbounded) => ScopeRelation::Equal,
         // The fence permits everything but the bound does not — a widening.
         (S::Unbounded, _) => ScopeRelation::Superset,
-        // The bound permits everything, the fence is narrower (or equal-if-also-⊤,
-        // handled above) — within bounds.
+        // The bound permits everything, the fence is narrower — within bounds.
         (_, S::Unbounded) => ScopeRelation::Subset,
-        (S::ConcreteScope(a), S::ConcreteScope(b)) => {
-            if a == b {
+        (
+            S::Bounded {
+                concrete: ca,
+                classes: la,
+            },
+            S::Bounded {
+                concrete: cb,
+                classes: lb,
+            },
+        ) => {
+            if ca == cb && la == lb {
                 ScopeRelation::Equal
-            } else if a.is_subset(b) {
+            } else if ca.is_subset(cb) && la.is_subset(lb) {
                 ScopeRelation::Subset
-            } else if a.is_superset(b) {
+            } else if ca.is_superset(cb) && la.is_superset(lb) {
                 ScopeRelation::Superset
             } else {
                 ScopeRelation::Incomparable
             }
         }
-        (S::CapabilityClass(a), S::CapabilityClass(b)) if a == b => ScopeRelation::Equal,
-        // A class vs a concrete set (or differing classes) cannot be decided
-        // portably — fail-closed.
-        _ => ScopeRelation::Unknown,
     }
 }
 
@@ -625,10 +702,10 @@ pub fn admit(
 #[must_use]
 pub fn empty_closure() -> ResolvedAuthority {
     ResolvedAuthority {
-        fs_read: ResolvedScope::ConcreteScope(BTreeSet::new()),
-        fs_write: ResolvedScope::ConcreteScope(BTreeSet::new()),
-        exec: ResolvedScope::ConcreteScope(BTreeSet::new()),
-        net: ResolvedScope::ConcreteScope(BTreeSet::new()),
+        fs_read: ResolvedScope::empty(),
+        fs_write: ResolvedScope::empty(),
+        exec: ResolvedScope::empty(),
+        net: ResolvedScope::empty(),
     }
 }
 
@@ -638,7 +715,7 @@ mod tests {
     use crate::caveats::CountBound;
 
     fn concrete(items: &[&str]) -> ResolvedScope {
-        ResolvedScope::ConcreteScope(items.iter().map(|s| s.to_string()).collect())
+        ResolvedScope::concrete(items.iter().map(|s| s.to_string()))
     }
 
     fn caveats(fs_read: Scope<String>, exec: Scope<String>, net: Scope<String>) -> Caveats {
@@ -902,12 +979,21 @@ mod tests {
             relate(&ResolvedScope::Unknown, &concrete(&["a"])),
             ScopeRelation::Unknown
         );
+        // A capability class and a concrete set live on independent dimensions:
+        // neither contains the other, so the relation is Incomparable — which
+        // `admit` refuses just as firmly as Unknown (fail-closed), but it is an
+        // honest structural fact, not an undecidable one.
+        assert_eq!(
+            relate(&ResolvedScope::class("loopback"), &concrete(&["127.0.0.1"])),
+            ScopeRelation::Incomparable
+        );
+        // A class within the same class dimension relates cleanly.
         assert_eq!(
             relate(
-                &ResolvedScope::CapabilityClass("loopback".into()),
-                &concrete(&["127.0.0.1"])
+                &ResolvedScope::class("loopback"),
+                &ResolvedScope::class("loopback")
             ),
-            ScopeRelation::Unknown
+            ScopeRelation::Equal
         );
     }
 
@@ -1006,5 +1092,128 @@ mod tests {
                 relation: ScopeRelation::Unknown,
             })
         );
+    }
+
+    // ── L3 lattice laws: the resolved-authority algebra needs the same
+    //    property-test rigor as the caveat lattice, because a broken union or
+    //    a non-monotone bound would let a widening slip past `admit`. ──────────
+    mod lattice_laws {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// A generator over the whole `ResolvedScope` domain: the empty bottom,
+        /// arbitrary bounded concrete/class mixes, `Unbounded`, and `Unknown`.
+        fn scope() -> impl Strategy<Value = ResolvedScope> {
+            prop_oneof![
+                Just(ResolvedScope::Unbounded),
+                Just(ResolvedScope::Unknown),
+                (
+                    prop::collection::btree_set("[a-d]", 0..4),
+                    prop::collection::btree_set("class-[x-z]", 0..3),
+                )
+                    .prop_map(|(concrete, classes)| ResolvedScope::Bounded { concrete, classes }),
+            ]
+        }
+
+        proptest! {
+            /// The empty scope is the identity for union: `∅ ∪ X = X` and
+            /// `X ∪ ∅ = X`. This is the exact law the old `ConcreteScope /
+            /// CapabilityClass` split violated (`∅ ∪ class(X)` collapsed to
+            /// `Unknown`), which is why a legitimate closure-authorized widening
+            /// could be mis-classified.
+            #[test]
+            fn empty_is_the_union_identity(x in scope()) {
+                prop_assert_eq!(ResolvedScope::empty().union(&x), x.clone());
+                prop_assert_eq!(x.union(&ResolvedScope::empty()), x);
+            }
+
+            /// Union is commutative: `a ∪ b = b ∪ a`.
+            #[test]
+            fn union_is_commutative(a in scope(), b in scope()) {
+                prop_assert_eq!(a.union(&b), b.union(&a));
+            }
+
+            /// Union is associative: `(a ∪ b) ∪ c = a ∪ (b ∪ c)`.
+            #[test]
+            fn union_is_associative(a in scope(), b in scope(), c in scope()) {
+                prop_assert_eq!(a.union(&b).union(&c), a.union(&b.union(&c)));
+            }
+
+            /// Union is idempotent: `a ∪ a = a`.
+            #[test]
+            fn union_is_idempotent(a in scope()) {
+                prop_assert_eq!(a.union(&a), a.clone());
+            }
+
+            /// `Unknown` is absorbing under union — fail-closed propagation: an
+            /// unresolved axis can never be cleaned up by combining it with
+            /// anything.
+            #[test]
+            fn unknown_propagates_through_union(a in scope()) {
+                prop_assert_eq!(a.union(&ResolvedScope::Unknown), ResolvedScope::Unknown);
+                prop_assert_eq!(ResolvedScope::Unknown.union(&a), ResolvedScope::Unknown);
+            }
+
+            /// `Unbounded` absorbs every *resolved* scope (bottom..Unbounded).
+            /// Only `Unknown` overrides it (checked above): `⊤ ∪ bounded = ⊤`.
+            #[test]
+            fn unbounded_absorbs_bounded(
+                concrete in prop::collection::btree_set("[a-d]", 0..4),
+                classes in prop::collection::btree_set("class-[x-z]", 0..3),
+            ) {
+                let b = ResolvedScope::Bounded { concrete, classes };
+                prop_assert_eq!(ResolvedScope::Unbounded.union(&b), ResolvedScope::Unbounded);
+                prop_assert_eq!(b.union(&ResolvedScope::Unbounded), ResolvedScope::Unbounded);
+            }
+
+            /// No-widening / monotonicity: the union is an *upper bound*, so a
+            /// resolved scope is always `⊆` its union with anything. If this fails,
+            /// `admit`'s `resolved ⊆ delegated ∪ closure` test would be judging
+            /// against a bound that is not actually a bound.
+            #[test]
+            fn union_is_an_upper_bound(a in scope(), b in scope()) {
+                let bound = a.union(&b);
+                // `a` relative to `a ∪ b` is never a Superset (never a widening).
+                prop_assert_ne!(relate(&a, &bound), ScopeRelation::Superset);
+                prop_assert_ne!(relate(&b, &bound), ScopeRelation::Superset);
+            }
+
+            /// `relate` is reflexive: every scope equals itself (including
+            /// `Unbounded`; `Unknown` is the sole exception — it is never
+            /// decidably equal, by fail-closed design).
+            #[test]
+            fn relate_is_reflexive(a in scope()) {
+                match a {
+                    ResolvedScope::Unknown => {
+                        prop_assert_eq!(relate(&a, &a), ScopeRelation::Unknown);
+                    }
+                    _ => prop_assert_eq!(relate(&a, &a), ScopeRelation::Equal),
+                }
+            }
+
+            /// `relate` is antisymmetric in direction: if `a ⊆ b` is `Subset`
+            /// then `b ⊆ a` is `Superset`, and vice-versa (mirrored view).
+            #[test]
+            fn relate_direction_is_mirrored(a in scope(), b in scope()) {
+                match relate(&a, &b) {
+                    ScopeRelation::Subset => {
+                        prop_assert_eq!(relate(&b, &a), ScopeRelation::Superset);
+                    }
+                    ScopeRelation::Superset => {
+                        prop_assert_eq!(relate(&b, &a), ScopeRelation::Subset);
+                    }
+                    ScopeRelation::Equal => {
+                        prop_assert_eq!(relate(&b, &a), ScopeRelation::Equal);
+                    }
+                    ScopeRelation::Incomparable => {
+                        prop_assert_eq!(relate(&b, &a), ScopeRelation::Incomparable);
+                    }
+                    // Any Unknown operand keeps both directions Unknown.
+                    ScopeRelation::Unknown => {
+                        prop_assert_eq!(relate(&b, &a), ScopeRelation::Unknown);
+                    }
+                }
+            }
+        }
     }
 }
