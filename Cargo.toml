@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.3"
+version = "0.6.4"
 edition = "2021"
 rust-version = "1.75"
 license = "Apache-2.0"
@@ -81,11 +81,11 @@ bytes = "1"
 futures = "0.3"
 
 # Internal crates
-agent-mesh-protocol = { path = "agent-mesh-protocol", version = "=0.6.3" }
-agent-mesh-bus = { path = "agent-mesh-bus", version = "=0.6.3" }
-agent-mesh-discovery = { path = "agent-mesh-discovery", version = "=0.6.3" }
-agent-mesh-ratchet = { path = "agent-mesh-ratchet", version = "=0.6.3" }
-agent-mesh-transport = { path = "agent-mesh-transport", version = "=0.6.3" }
+agent-mesh-protocol = { path = "agent-mesh-protocol", version = "=0.6.4" }
+agent-mesh-bus = { path = "agent-mesh-bus", version = "=0.6.4" }
+agent-mesh-discovery = { path = "agent-mesh-discovery", version = "=0.6.4" }
+agent-mesh-ratchet = { path = "agent-mesh-ratchet", version = "=0.6.4" }
+agent-mesh-transport = { path = "agent-mesh-transport", version = "=0.6.4" }
 tests-common = { path = "tests/common" }
 
 # Test deps
