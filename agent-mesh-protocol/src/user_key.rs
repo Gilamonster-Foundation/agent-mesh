@@ -650,13 +650,19 @@ mod tests {
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    /// Contract pin: non-UTF-8 filenames round-trip through save/load
-    /// and the refuse-to-overwrite path (the error message formats the
-    /// path lossily via `display()` without panicking). This workspace
-    /// has been bitten by encoding assumptions before; the key store
-    /// must not be.
+    /// Contract pin (Linux / non-macOS unix): a **non-UTF-8** filename
+    /// round-trips through save/load and the refuse-to-overwrite path (the
+    /// error message formats the path lossily via `display()` without
+    /// panicking). This workspace has been bitten by encoding assumptions
+    /// before; the key store must not be.
+    ///
+    /// Excluded on macOS: APFS rejects a non-UTF-8 filename at creation
+    /// (`EILSEQ` / "Illegal byte sequence"), so the stressor cannot exist on
+    /// disk there. The `save_load_roundtrip_unusual_unicode_filename` test
+    /// below covers the identical save→load→refuse sequence on macOS with an
+    /// unusual — but APFS-valid — Unicode filename.
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn save_load_roundtrip_non_utf8_filename() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
@@ -674,6 +680,38 @@ mod tests {
         assert!(
             msg.contains("refusing to overwrite existing key at "),
             "lossy display must still produce the refuse message: {msg}"
+        );
+    }
+
+    /// Contract pin (macOS): the macOS counterpart of
+    /// `save_load_roundtrip_non_utf8_filename`. APFS refuses non-UTF-8
+    /// filenames, so the platform-appropriate stressor is an unusual but
+    /// **valid** Unicode filename — non-ASCII, an emoji, and a combining
+    /// diacritic (a form APFS silently NFD-normalizes). The SAME sequence is
+    /// exercised: save → load round-trips the key, and the refuse-to-overwrite
+    /// path formats the path via `display()` and still produces its message.
+    /// Together the two tests cover this contract on both Linux and macOS.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn save_load_roundtrip_unusual_unicode_filename() {
+        let dir = TempDir::new().unwrap();
+        // café (NFC é), a key emoji, and a bare combining acute accent — all
+        // valid UTF-8 that APFS accepts (and normalizes) but that stresses path
+        // handling / lossy display exactly as the non-UTF-8 case does elsewhere.
+        let path = dir.path().join("user-caf\u{00e9}-\u{1f511}-a\u{0301}.key");
+
+        let key = UserKey::generate();
+        let fp = key.fingerprint();
+        key.save(&path)
+            .expect("save with an unusual Unicode filename");
+        let loaded = UserKey::load(&path).expect("load with an unusual Unicode filename");
+        assert_eq!(loaded.fingerprint(), fp);
+
+        let err = UserKey::generate().save(&path).expect_err("must refuse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refusing to overwrite existing key at "),
+            "display must still produce the refuse message for a Unicode path: {msg}"
         );
     }
 
