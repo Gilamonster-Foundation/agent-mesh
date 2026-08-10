@@ -891,8 +891,10 @@ mod tests {
         let auth = Authority::new(Caveats::top());
         let auth_id = auth.id().unwrap();
         let grant = Grant::new(auth_id, Derivation::Root);
-        // Different typed ids (distinct kinds in the hashed body).
-        assert_ne!(auth_id.0, grant.id().unwrap().0);
+        // Different typed ids (distinct kinds in the hashed body). Compared via
+        // the public `content_id()` accessor — the inner CID is private precisely
+        // so an id can only come from its object.
+        assert_ne!(auth_id.content_id(), grant.id().unwrap().content_id());
     }
 
     #[test]
@@ -917,14 +919,20 @@ mod tests {
     fn grant_id_splits_authority_from_derivation() {
         // Same authority, two derivations → two distinct grants (the id-split).
         let auth_id = Authority::new(Caveats::top()).id().unwrap();
-        let other = Authority::new(caveats(Scope::none(), Scope::none(), Scope::none()))
-            .id()
-            .unwrap();
+        // A real parent grant id, obtained the only supported way — from a grant.
+        let other_parent = Grant::new(
+            Authority::new(caveats(Scope::none(), Scope::none(), Scope::none()))
+                .id()
+                .unwrap(),
+            Derivation::Root,
+        )
+        .id()
+        .unwrap();
         let root = Grant::new(auth_id, Derivation::Root);
         let attenuated = Grant::new(
             auth_id,
             Derivation::Attenuation {
-                parent: GrantId(other.0),
+                parent: other_parent,
             },
         );
         assert_ne!(root.id().unwrap(), attenuated.id().unwrap());
@@ -976,7 +984,10 @@ mod tests {
             Caveats::top(),
             Derivation::Elevation {
                 parent: parent_id,
-                attestation: AttestationId(parent_id.0),
+                // A placeholder attestation id — the deferred default verifier
+                // rejects regardless of its value. Built in-module (the module
+                // owns the type) from a real content id via the public accessor.
+                attestation: AttestationId(parent_id.content_id()),
             },
         );
         // The deferred default rejects every elevation (L7).
