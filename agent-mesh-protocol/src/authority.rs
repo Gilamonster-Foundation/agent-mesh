@@ -1041,6 +1041,48 @@ mod tests {
     }
 
     #[test]
+    fn attenuation_cannot_be_validated_against_a_substituted_parent_body() {
+        // The mirror attack, on the PARENT side. The child honestly holds /repo +
+        // /etc. The real parent grant commits to a NARROW body (/repo only), so the
+        // child widens and must be rejected. The attacker wants the check to run
+        // against a convenient WIDE parent body (/repo + /etc + /srv) that would
+        // make the child look like a valid attenuation.
+        let child_caveats = caveats(
+            Scope::only(["/repo".into(), "/etc".into()]),
+            Scope::none(),
+            Scope::none(),
+        );
+        // The genuine parent grant names a narrow authority.
+        let narrow_parent_auth = Authority::new(caveats(
+            Scope::only(["/repo".into()]),
+            Scope::none(),
+            Scope::none(),
+        ));
+        let parent_grant = Grant::new(narrow_parent_auth.id().unwrap(), Derivation::Root);
+        let child = derived_grant(
+            child_caveats,
+            Derivation::Attenuation {
+                parent: parent_grant.id().unwrap(),
+            },
+        );
+        // Attempt to pair the parent grant with a convenient WIDE body — bind fails
+        // closed: the wide body's CID ≠ the parent grant's authority field.
+        let convenient_wide = Authority::new(caveats(
+            Scope::only(["/repo".into(), "/etc".into(), "/srv".into()]),
+            Scope::none(),
+            Scope::none(),
+        ));
+        assert!(ResolvedGrant::bind(parent_grant.clone(), convenient_wide).is_err());
+        // The only admissible parent pairing uses the REAL narrow body, against
+        // which the child's widening is caught.
+        let honest_parent = ResolvedGrant::bind(parent_grant, narrow_parent_auth).unwrap();
+        assert_eq!(
+            check_derivation(&child, Some(&honest_parent), &DenyAllElevations),
+            DerivationDecision::Reject(DerivationReject::AttenuationWidens)
+        );
+    }
+
+    #[test]
     fn derivation_without_a_parent_fails_closed() {
         let parent_id = root_grant(Caveats::top()).id().unwrap();
         let child = derived_grant(
