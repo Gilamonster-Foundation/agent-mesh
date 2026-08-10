@@ -19,6 +19,7 @@
 #![doc(html_root_url = "https://docs.rs/agent-mesh-protocol")]
 
 pub mod agent_key;
+pub mod authority;
 pub mod caveats;
 pub mod envelope;
 pub mod error;
@@ -31,6 +32,12 @@ pub mod user_key;
 pub mod pyo3_module;
 
 pub use agent_key::{AgentKey, AgentMetadata, CertChain, Issuer, SerdeSig};
+pub use authority::{
+    admit, check_derivation, empty_closure, relate, AdmissionDecision, AdmissionReject,
+    AttestationId, AttestationVerifier, Authority, AuthorityId, ConfinedAxis, DenyAllElevations,
+    Derivation, DerivationDecision, DerivationReject, Grant, GrantId, ResolvedAuthority,
+    ResolvedScope, ScopeRelation,
+};
 pub use caveats::{Caveats, CountBound, Scope};
 pub use envelope::{Recipient, SignedEnvelope};
 pub use error::{MeshError, Result};
