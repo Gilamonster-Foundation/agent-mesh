@@ -28,7 +28,7 @@
 //! (cold-start race) or when the asker never announces at all (a
 //! quiet [`BusOptions`] bind).
 
-use crate::inbox::{BusMessage, Inbox};
+use crate::inbox::{BusMessage, Inbox, RequestContext};
 use crate::reply::CorrelationId;
 use crate::transport::{Inbound, ReplyRoute, Transport};
 use crate::{BusError, Result, Topic};
@@ -323,6 +323,20 @@ impl Bus {
         // round-trip tests papered over that window with a fixed
         // `sleep`; synchronous registration removes the race outright.
         self.inbox.register_handler(topic, handler);
+    }
+
+    /// Register a request handler that also receives the verified caller
+    /// [`RequestContext`] (the authenticated user + agent fingerprints of
+    /// whoever signed the request). Use this when the handler must authorize
+    /// *who* is calling — e.g. a capability-gated responder — rather than serve
+    /// any same-mesh peer. Same synchronous-registration guarantee as
+    /// [`Self::handle_requests`].
+    pub fn handle_requests_with_context<F, Fut>(&self, topic: Topic, handler: F)
+    where
+        F: Fn(RequestContext, Vec<u8>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<u8>>> + Send + 'static,
+    {
+        self.inbox.register_handler_with_context(topic, handler);
     }
 
     /// Publish a body to `peer_fp` on `topic`. Fire-and-forget — the
@@ -932,6 +946,47 @@ mod tests {
             .await
             .expect("round-trip reply");
         assert_eq!(reply, b"echo: hi");
+
+        alice_bus.close().await.unwrap();
+        bob_bus.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn context_handler_sees_the_calling_agent_over_the_transport() {
+        let user = UserKey::generate();
+        let alice = Arc::new(agent(&user, "alice"));
+        let bob = Arc::new(agent(&user, "bob"));
+        let alice_fp = alice.fingerprint();
+        let bob_fp = bob.fingerprint();
+
+        let net = MeshNet::new();
+        let alice_bus = Bus::bind_with_transport(
+            alice,
+            user.fingerprint(),
+            Arc::new(net.transport_for(alice_fp)),
+        );
+        let bob_bus =
+            Bus::bind_with_transport(bob, user.fingerprint(), Arc::new(net.transport_for(bob_fp)));
+
+        let topic = Topic::new(user.fingerprint(), "whoami");
+        bob_bus.handle_requests_with_context(
+            topic.clone(),
+            |ctx: RequestContext, _body| async move {
+                // The responder learns WHO called from the verified envelope, not
+                // from anything the caller put in the body.
+                Ok(ctx.caller_agent_fp.hex().into_bytes())
+            },
+        );
+
+        let reply = alice_bus
+            .request(bob_fp, &topic, b"".to_vec(), Duration::from_secs(5))
+            .await
+            .expect("round-trip reply");
+        assert_eq!(
+            String::from_utf8(reply).unwrap(),
+            alice_fp.hex(),
+            "the responder must see ALICE as the caller"
+        );
 
         alice_bus.close().await.unwrap();
         bob_bus.close().await.unwrap();
