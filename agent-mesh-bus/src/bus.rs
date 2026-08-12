@@ -28,7 +28,7 @@
 //! (cold-start race) or when the asker never announces at all (a
 //! quiet [`BusOptions`] bind).
 
-use crate::inbox::{BusMessage, Inbox};
+use crate::inbox::{BusMessage, Inbox, RequestContext};
 use crate::reply::CorrelationId;
 use crate::transport::{Inbound, ReplyRoute, Transport};
 use crate::{BusError, Result, Topic};
@@ -323,6 +323,20 @@ impl Bus {
         // round-trip tests papered over that window with a fixed
         // `sleep`; synchronous registration removes the race outright.
         self.inbox.register_handler(topic, handler);
+    }
+
+    /// Register a request handler that also receives the verified caller
+    /// [`RequestContext`] (the authenticated user + agent fingerprints of
+    /// whoever signed the request). Use this when the handler must authorize
+    /// *who* is calling — e.g. a capability-gated responder — rather than serve
+    /// any same-mesh peer. Same synchronous-registration guarantee as
+    /// [`Self::handle_requests`].
+    pub fn handle_requests_with_context<F, Fut>(&self, topic: Topic, handler: F)
+    where
+        F: Fn(RequestContext, Vec<u8>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<u8>>> + Send + 'static,
+    {
+        self.inbox.register_handler_with_context(topic, handler);
     }
 
     /// Publish a body to `peer_fp` on `topic`. Fire-and-forget — the
@@ -803,6 +817,18 @@ fn spawn_iroh_accept_loop(
     })
 }
 
+/// Whether `env` may be admitted on a QUIC session TLS-authenticated as
+/// `session_id`. The envelope's claimed signer (`cert_chain.agent_pubkey`,
+/// already proven to hold that key by `recv_envelope`'s `env.verify()`) must be
+/// the SAME key that owns the transport session. This binds the application
+/// principal to the session, so a validly-signed envelope replayed or relayed
+/// over a *different* peer's connection is refused rather than authorized as its
+/// original signer. `false` if the claimed pubkey is not a valid ed25519 point
+/// (fail-closed).
+fn envelope_matches_session(session_id: &PublicKey, env: &SignedEnvelope) -> bool {
+    agent_pubkey_to_iroh(&env.cert_chain.agent_pubkey).is_some_and(|signer| &signer == session_id)
+}
+
 /// Handle one accepted connection: finish QUIC, then per bidi stream do the
 /// handshake, decode the envelope, and forward it into `inbound_tx`.
 async fn accept_conn(
@@ -860,6 +886,18 @@ async fn accept_conn(
                 continue;
             }
         };
+        // Bind the principal to the QUIC session (defense in depth over the
+        // signature verify() `recv_envelope` already did): the envelope's signer
+        // must be the key that TLS-authenticated THIS connection, so a
+        // validly-signed envelope relayed/replayed over another peer's session
+        // is dropped here instead of being authorized as its original signer.
+        if !envelope_matches_session(&conn.remote_id(), &env) {
+            tracing::warn!(
+                signer = %env.sender_agent_fp().short(),
+                "iroh transport: envelope signer is not bound to the QUIC session identity; dropping"
+            );
+            continue;
+        }
         if inbound_tx
             .send(Inbound {
                 envelope: env,
@@ -891,6 +929,34 @@ mod tests {
                 caveats: Caveats::top(),
             },
         )
+    }
+
+    /// The QUIC-session binding: an envelope is admitted only on a session
+    /// authenticated as its own signer. A validly-signed envelope presented over
+    /// a *sibling's* session (relay/replay) is refused — the principal is bound
+    /// to the transport session, not only to the envelope signature. Pure
+    /// regression for the `accept_conn` session-binding hardening (newt#1643 /
+    /// agent-mesh#75 follow-up).
+    #[test]
+    fn an_envelope_is_bound_to_its_signers_quic_session() {
+        let user = UserKey::generate();
+        let a = agent(&user, "a");
+        let b = agent(&user, "b");
+        let a_session = agent_pubkey_to_iroh(&a.public_bytes()).expect("valid ed25519 key");
+        let b_session = agent_pubkey_to_iroh(&b.public_bytes()).expect("valid ed25519 key");
+        let env = SignedEnvelope::new(
+            &a,
+            Recipient::Direct {
+                agent_fp: Fingerprint::of_bytes(&b.public_bytes()),
+            },
+            1,
+            b"payload".to_vec(),
+        );
+        // Admitted on A's own session (the signer owns the transport)…
+        assert!(envelope_matches_session(&a_session, &env));
+        // …refused on B's session — a relayed/replayed envelope can't borrow B's
+        // connection to speak as A.
+        assert!(!envelope_matches_session(&b_session, &env));
     }
 
     /// The request/reply round-trip driven over the **in-memory
@@ -932,6 +998,47 @@ mod tests {
             .await
             .expect("round-trip reply");
         assert_eq!(reply, b"echo: hi");
+
+        alice_bus.close().await.unwrap();
+        bob_bus.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn context_handler_sees_the_calling_agent_over_the_transport() {
+        let user = UserKey::generate();
+        let alice = Arc::new(agent(&user, "alice"));
+        let bob = Arc::new(agent(&user, "bob"));
+        let alice_fp = alice.fingerprint();
+        let bob_fp = bob.fingerprint();
+
+        let net = MeshNet::new();
+        let alice_bus = Bus::bind_with_transport(
+            alice,
+            user.fingerprint(),
+            Arc::new(net.transport_for(alice_fp)),
+        );
+        let bob_bus =
+            Bus::bind_with_transport(bob, user.fingerprint(), Arc::new(net.transport_for(bob_fp)));
+
+        let topic = Topic::new(user.fingerprint(), "whoami");
+        bob_bus.handle_requests_with_context(
+            topic.clone(),
+            |ctx: RequestContext, _body| async move {
+                // The responder learns WHO called from the verified envelope, not
+                // from anything the caller put in the body.
+                Ok(ctx.caller_agent_fp.hex().into_bytes())
+            },
+        );
+
+        let reply = alice_bus
+            .request(bob_fp, &topic, b"".to_vec(), Duration::from_secs(5))
+            .await
+            .expect("round-trip reply");
+        assert_eq!(
+            String::from_utf8(reply).unwrap(),
+            alice_fp.hex(),
+            "the responder must see ALICE as the caller"
+        );
 
         alice_bus.close().await.unwrap();
         bob_bus.close().await.unwrap();

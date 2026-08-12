@@ -28,7 +28,7 @@ pub mod pyo3_module;
 
 pub use bus::{Bus, BusOptions, IrohTransport, PeerEndpoint};
 pub use error::{BusError, Result};
-pub use inbox::{BusMessage, Inbox, OutgoingReply};
+pub use inbox::{BusMessage, Inbox, OutgoingReply, RequestContext};
 pub use reply::CorrelationId;
 pub use topic::Topic;
 pub use transport::{InMemoryTransport, Inbound, MeshNet, ReplyRoute, Transport};

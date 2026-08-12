@@ -74,10 +74,34 @@ pub enum BusMessage {
     },
 }
 
-/// Type of a registered request handler. Takes the request body,
-/// returns the reply body asynchronously.
-pub type RequestHandler =
-    Arc<dyn Fn(Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>>> + Send + Sync + 'static>;
+/// The verified principal behind an inbound request: who signed the envelope.
+///
+/// Both fingerprints are authenticated, not claimed. Every inbound envelope is
+/// `verify()`-ed at the transport boundary (`recv_envelope`) before it reaches
+/// the inbox — the agent signature is checked against the envelope's cert chain,
+/// and the chain proves the user→agent delegation. So `caller_agent_fp` is
+/// `BLAKE3(cert_chain.agent_pubkey)` of whoever actually signed this request,
+/// and `caller_user_fp` is their operator root. A handler may authorize on these
+/// without re-verifying anything.
+///
+/// This is the *signer* of the request, which is the correct principal for
+/// authorization: a relay can only deliver a request its signer already
+/// authorized, never mint one under another agent's key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestContext {
+    /// The caller's operator root fingerprint (`env.sender_user_fp()`).
+    pub caller_user_fp: Fingerprint,
+    /// The caller's agent fingerprint (`env.sender_agent_fp()` =
+    /// `BLAKE3(agent_pubkey)`), the handle a capability registry keys on.
+    pub caller_agent_fp: Fingerprint,
+}
+
+/// Type of a registered request handler. Takes the verified caller
+/// [`RequestContext`] and the request body, returns the reply body
+/// asynchronously.
+pub type RequestHandler = Arc<
+    dyn Fn(RequestContext, Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>>> + Send + Sync + 'static,
+>;
 
 /// What the bus should send out in response to an incoming envelope.
 ///
@@ -158,8 +182,28 @@ impl Inbox {
         F: Fn(Vec<u8>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Vec<u8>>> + Send + 'static,
     {
+        // The context-free convenience: discard the caller principal. Kept so
+        // existing body-only handlers need no change.
         let key = topic.wire();
-        let boxed: RequestHandler = Arc::new(move |body| Box::pin(handler(body)));
+        let boxed: RequestHandler = Arc::new(move |_ctx, body| Box::pin(handler(body)));
+        self.handlers
+            .write()
+            .expect("handlers lock poisoned")
+            .insert(key, boxed);
+    }
+
+    /// Register a request handler that receives the verified [`RequestContext`]
+    /// (the caller's authenticated user + agent fingerprints) alongside the
+    /// body — for handlers that must authorize *who* is calling, not just serve
+    /// the request. Same synchronous-registration guarantee as
+    /// [`Self::register_handler`].
+    pub fn register_handler_with_context<F, Fut>(&self, topic: Topic, handler: F)
+    where
+        F: Fn(RequestContext, Vec<u8>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<u8>>> + Send + 'static,
+    {
+        let key = topic.wire();
+        let boxed: RequestHandler = Arc::new(move |ctx, body| Box::pin(handler(ctx, body)));
         self.handlers
             .write()
             .expect("handlers lock poisoned")
@@ -232,16 +276,21 @@ impl Inbox {
             });
         }
 
+        // Build the verified caller principal from the (already-verified)
+        // envelope. Both fingerprints are authenticated by env.verify() at the
+        // transport boundary — see RequestContext.
+        let ctx = RequestContext {
+            caller_user_fp: env.sender_user_fp(),
+            caller_agent_fp: peer_fp,
+        };
+
         let msg: BusMessage = serde_json::from_slice(env.payload.as_ref())?;
         match msg {
             BusMessage::Request {
                 topic,
                 correlation,
                 body,
-            } => {
-                self.dispatch_request(peer_fp, topic, correlation, body)
-                    .await
-            }
+            } => self.dispatch_request(ctx, topic, correlation, body).await,
             BusMessage::Reply { correlation, body } => {
                 let cid = CorrelationId(correlation);
                 let delivered = self.waiters.deliver(cid, body);
@@ -262,7 +311,7 @@ impl Inbox {
 
     async fn dispatch_request(
         &self,
-        peer_fp: Fingerprint,
+        ctx: RequestContext,
         topic: String,
         correlation: [u8; 16],
         body: Vec<u8>,
@@ -275,7 +324,8 @@ impl Inbox {
             tracing::debug!(topic = %topic, "inbox: no handler for request topic");
             return Ok(None);
         };
-        let reply_body = handler(body).await?;
+        let peer_fp = ctx.caller_agent_fp;
+        let reply_body = handler(ctx, body).await?;
         Ok(Some(OutgoingReply {
             peer_fp,
             correlation: CorrelationId(correlation),
@@ -438,6 +488,45 @@ mod tests {
         assert_eq!(out.peer_fp, alice_fp);
         assert_eq!(out.correlation.0, [0x42; 16]);
         assert_eq!(out.body, b"echo:hi");
+    }
+
+    #[tokio::test]
+    async fn a_context_handler_receives_the_verified_caller_fingerprints() {
+        let user = UserKey::generate();
+        let alice = agent(&user, "alice");
+        let bob_fp = agent(&user, "bob").fingerprint();
+        let topic = Topic::new(user.fingerprint(), "whoami");
+
+        let inbox = Inbox::new();
+        // The handler echoes back the caller principal it was handed, so the
+        // test can prove it is the ACTUAL signer of the envelope (alice), not a
+        // value copied from the request body.
+        inbox.register_handler_with_context(
+            topic.clone(),
+            |ctx: RequestContext, _body| async move {
+                Ok(
+                    format!("{}|{}", ctx.caller_user_fp.hex(), ctx.caller_agent_fp.hex())
+                        .into_bytes(),
+                )
+            },
+        );
+
+        let req = BusMessage::Request {
+            topic: topic.wire(),
+            correlation: [0x7; 16],
+            body: b"ignored".to_vec(),
+        };
+        let out = inbox
+            .on_envelope(envelope(&alice, bob_fp, 1, &req))
+            .await
+            .unwrap()
+            .expect("reply produced");
+        let got = String::from_utf8(out.body).unwrap();
+        assert_eq!(
+            got,
+            format!("{}|{}", user.fingerprint().hex(), alice.fingerprint().hex()),
+            "the handler must see alice's authenticated user+agent fingerprints"
+        );
     }
 
     #[tokio::test]
