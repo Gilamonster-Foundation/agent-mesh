@@ -9,6 +9,8 @@ Inbound delivery is fail-closed at one transport-neutral boundary: every
 envelope's certificate, payload CID, and signature are verified before replay
 state changes, and direct deliveries must bind the original envelope signer to
 the transport-authenticated carrier and the local user's certified root.
+Request correlations are likewise bound to the intended responder, so another
+authenticated agent cannot win a reply race or consume the honest waiter.
 
 Key types:
 

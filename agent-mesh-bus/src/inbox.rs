@@ -12,7 +12,7 @@
 //! remember to invoke them.
 
 use crate::replay::{NonceCache, SequenceTracker};
-use crate::reply::{CorrelationId, ReplyWaiter};
+use crate::reply::{CorrelationId, ReplyDelivery, ReplyPeerCheck, ReplyWaiter};
 use crate::topic::Topic;
 use crate::transport::DeliveryProvenance;
 use crate::{BusError, Result};
@@ -219,11 +219,15 @@ impl Inbox {
         self.handlers.read().expect("handlers lock poisoned").len()
     }
 
-    /// Register an in-flight request waiter; returns the receiver
-    /// half of the oneshot that will resolve when the matching
-    /// [`BusMessage::Reply`] arrives.
-    pub fn register_reply(&self, id: CorrelationId) -> oneshot::Receiver<Vec<u8>> {
-        self.waiters.register(id)
+    /// Register an in-flight request waiter, atomically bound to the expected
+    /// responder; returns the receiver half of the oneshot that will resolve
+    /// when that peer's matching [`BusMessage::Reply`] arrives.
+    pub fn register_reply(
+        &self,
+        id: CorrelationId,
+        expected_peer_fp: Fingerprint,
+    ) -> oneshot::Receiver<Vec<u8>> {
+        self.waiters.register(id, expected_peer_fp)
     }
 
     /// Drop a waiter for `id` without delivering anything.
@@ -259,9 +263,11 @@ impl Inbox {
     /// then checks a direct recipient. Only after all of those immutable checks
     /// pass may nonce or sequence state be mutated.
     ///
-    /// Replay-defense order after admission: nonce check first (cheap,
-    /// in-memory hash set), then sequence check (per-peer monotonic). Both must
-    /// pass before any dispatch happens.
+    /// A reply for a known waiter then gets a non-consuming expected-peer check
+    /// so a mismatched signer cannot poison replay state with a copied nonce.
+    /// Unknown replies retain the normal nonce-first path. After admission and
+    /// that targeted precheck, replay defense checks the nonce and then the
+    /// per-peer sequence before any dispatch happens.
     pub async fn on_envelope(
         &self,
         env: SignedEnvelope,
@@ -312,6 +318,34 @@ impl Inbox {
             }
         }
 
+        let peer_fp = signer_agent_fp;
+        let parsed_msg = serde_json::from_slice::<BusMessage>(env.payload.as_ref());
+
+        // Correlations are bound to the request target, not merely unguessable.
+        // Reject a known mismatch before touching the sender-agnostic nonce
+        // cache: an observer may know both the correlation and the honest
+        // reply's nonce, but must not be able to poison replay state by signing
+        // those values as a different agent. `deliver` repeats the comparison
+        // under its remove lock after replay checks to close local races.
+        // Keep a parse failure pending until after replay state is updated, so
+        // malformed signed envelopes retain the existing nonce-first behavior.
+        if let Ok(BusMessage::Reply { correlation, .. }) = &parsed_msg {
+            let cid = CorrelationId(*correlation);
+            if let ReplyPeerCheck::PeerMismatch {
+                expected_peer_fp,
+                actual_peer_fp,
+            } = self.waiters.check_peer(cid, peer_fp)
+            {
+                tracing::warn!(
+                    correlation = %cid.hex(),
+                    expected_peer = %expected_peer_fp.short(),
+                    actual_peer = %actual_peer_fp.short(),
+                    "inbox: rejecting reply from unexpected peer"
+                );
+                return Ok(None);
+            }
+        }
+
         if !self.nonce_cache.check_and_insert(env.nonce) {
             tracing::warn!(
                 sender = %env.sender_agent_fp().short(),
@@ -319,7 +353,6 @@ impl Inbox {
             );
             return Err(BusError::Replay);
         }
-        let peer_fp = signer_agent_fp;
         if let Err((expected, actual)) = self.sequence.check_and_advance(peer_fp, env.sequence) {
             tracing::warn!(
                 sender = %peer_fp.short(),
@@ -334,6 +367,8 @@ impl Inbox {
             });
         }
 
+        let msg = parsed_msg?;
+
         // Build the verified original-signer principal. The carrier was checked
         // separately above and is not silently substituted for this identity.
         let ctx = RequestContext {
@@ -341,7 +376,6 @@ impl Inbox {
             caller_agent_fp: peer_fp,
         };
 
-        let msg: BusMessage = serde_json::from_slice(env.payload.as_ref())?;
         match msg {
             BusMessage::Request {
                 topic,
@@ -350,12 +384,25 @@ impl Inbox {
             } => self.dispatch_request(ctx, topic, correlation, body).await,
             BusMessage::Reply { correlation, body } => {
                 let cid = CorrelationId(correlation);
-                let delivered = self.waiters.deliver(cid, body);
-                if !delivered {
-                    tracing::debug!(
+                match self.waiters.deliver(cid, peer_fp, body) {
+                    ReplyDelivery::Delivered => {}
+                    ReplyDelivery::Unknown => tracing::debug!(
                         correlation = %cid.hex(),
                         "inbox: reply for unknown correlation (timed out or never registered)"
-                    );
+                    ),
+                    ReplyDelivery::PeerMismatch {
+                        expected_peer_fp,
+                        actual_peer_fp,
+                    } => tracing::warn!(
+                        correlation = %cid.hex(),
+                        expected_peer = %expected_peer_fp.short(),
+                        actual_peer = %actual_peer_fp.short(),
+                        "inbox: rejecting reply from unexpected peer"
+                    ),
+                    ReplyDelivery::ReceiverDropped => tracing::debug!(
+                        correlation = %cid.hex(),
+                        "inbox: reply receiver was dropped"
+                    ),
                 }
                 Ok(None)
             }
@@ -417,7 +464,7 @@ mod tests {
     use super::*;
     use crate::transport::AuthenticatedPeer;
     use agent_mesh_protocol::{
-        AgentKey, AgentMetadata, Caveats, MeshError, Recipient, SignedEnvelope, UserKey,
+        AgentKey, AgentMetadata, Caveats, MeshError, Recipient, SerdeSig, SignedEnvelope, UserKey,
     };
 
     fn agent(user: &UserKey, role: &str) -> AgentKey {
@@ -520,6 +567,24 @@ mod tests {
                 body: b"payload".to_vec(),
             },
         )
+    }
+
+    /// Replace an envelope nonce and re-sign it so tests can construct two
+    /// independently valid envelopes with the same nonce. This mirrors the
+    /// v1 signing transcript in `agent_mesh_protocol::SignedEnvelope`.
+    fn set_nonce_and_resign(env: &mut SignedEnvelope, sender: &AgentKey, nonce: [u8; 24]) {
+        env.nonce = nonce;
+        let recipient_bytes = serde_json::to_vec(&env.recipient).expect("encode recipient");
+        let mut message = Vec::with_capacity(
+            b"agent-mesh-envelope-v1".len() + recipient_bytes.len() + 24 + 8 + 32,
+        );
+        message.extend_from_slice(b"agent-mesh-envelope-v1");
+        message.extend_from_slice(&recipient_bytes);
+        message.extend_from_slice(&env.nonce);
+        message.extend_from_slice(&env.sequence.to_be_bytes());
+        message.extend_from_slice(&env.payload_cid);
+        env.agent_sig = SerdeSig(sender.sign(&message));
+        env.verify().expect("re-signed test envelope must verify");
     }
 
     #[test]
@@ -718,6 +783,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_signed_payload_still_consumes_replay_state() {
+        let user = UserKey::generate();
+        let alice = agent(&user, "alice");
+        let bob_fp = agent(&user, "bob").fingerprint();
+        let env = SignedEnvelope::new(
+            &alice,
+            Recipient::Direct { agent_fp: bob_fp },
+            1,
+            b"not a bus message".to_vec(),
+        );
+        let inbox = Inbox::new();
+
+        let first = inbox
+            .on_envelope(env.clone(), direct(&alice), user.fingerprint(), bob_fp)
+            .await
+            .expect_err("malformed payload must fail decoding");
+        assert!(matches!(first, BusError::Json(_)));
+        assert_eq!(inbox.nonce_cache().len(), 1);
+        assert_eq!(
+            inbox.sequence_tracker().last_seen(&alice.fingerprint()),
+            Some(1)
+        );
+
+        let replay = inbox
+            .on_envelope(env, direct(&alice), user.fingerprint(), bob_fp)
+            .await
+            .expect_err("the same malformed signed envelope is still a replay");
+        assert!(matches!(replay, BusError::Replay));
+    }
+
+    #[tokio::test]
     async fn out_of_order_sequence_is_rejected() {
         let user = UserKey::generate();
         let alice = agent(&user, "alice");
@@ -860,7 +956,7 @@ mod tests {
 
         let inbox = Inbox::new();
         let cid = CorrelationId([0x55; 16]);
-        let rx = inbox.register_reply(cid);
+        let rx = inbox.register_reply(cid, alice.fingerprint());
         assert_eq!(inbox.pending_replies(), 1);
 
         let rep = BusMessage::Reply {
@@ -878,6 +974,107 @@ mod tests {
             .unwrap();
         assert!(out.is_none());
         assert_eq!(rx.await.unwrap(), b"ok");
+        assert_eq!(inbox.pending_replies(), 0);
+    }
+
+    #[tokio::test]
+    async fn reply_from_unexpected_signer_leaves_waiter_for_expected_peer() {
+        let user = UserKey::generate();
+        let expected = agent(&user, "expected");
+        let attacker = agent(&user, "attacker");
+        let recipient_fp = agent(&user, "recipient").fingerprint();
+
+        let inbox = Inbox::new();
+        let cid = CorrelationId([0x56; 16]);
+        let rx = inbox.register_reply(cid, expected.fingerprint());
+        let forged = BusMessage::Reply {
+            correlation: cid.0,
+            body: b"forged".to_vec(),
+        };
+        inbox
+            .on_envelope(
+                envelope(&attacker, recipient_fp, 1, &forged),
+                direct(&attacker),
+                user.fingerprint(),
+                recipient_fp,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            inbox.pending_replies(),
+            1,
+            "unexpected signer must not consume the waiter"
+        );
+
+        let legitimate = BusMessage::Reply {
+            correlation: cid.0,
+            body: b"legitimate".to_vec(),
+        };
+        inbox
+            .on_envelope(
+                envelope(&expected, recipient_fp, 1, &legitimate),
+                direct(&expected),
+                user.fingerprint(),
+                recipient_fp,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rx.await.unwrap(), b"legitimate");
+        assert_eq!(inbox.pending_replies(), 0);
+    }
+
+    #[tokio::test]
+    async fn mismatched_reply_cannot_poison_honest_reply_nonce() {
+        let user = UserKey::generate();
+        let expected = agent(&user, "expected");
+        let attacker = agent(&user, "attacker");
+        let recipient_fp = agent(&user, "recipient").fingerprint();
+
+        let inbox = Inbox::new();
+        let cid = CorrelationId([0x57; 16]);
+        let rx = inbox.register_reply(cid, expected.fingerprint());
+        let reply = BusMessage::Reply {
+            correlation: cid.0,
+            body: b"legitimate".to_vec(),
+        };
+        let legitimate = envelope(&expected, recipient_fp, 1, &reply);
+        legitimate.verify().expect("honest reply verifies");
+
+        let mut forged = envelope(&attacker, recipient_fp, 1, &reply);
+        set_nonce_and_resign(&mut forged, &attacker, legitimate.nonce);
+        assert_eq!(forged.nonce, legitimate.nonce, "test precondition");
+        assert_ne!(
+            forged.sender_agent_fp(),
+            legitimate.sender_agent_fp(),
+            "test precondition"
+        );
+
+        inbox
+            .on_envelope(forged, direct(&attacker), user.fingerprint(), recipient_fp)
+            .await
+            .unwrap();
+        assert_eq!(
+            inbox.nonce_cache().len(),
+            0,
+            "known signer mismatch must not mutate replay state"
+        );
+        assert_eq!(
+            inbox.sequence_tracker().last_seen(&attacker.fingerprint()),
+            None,
+            "known signer mismatch must not advance its sequence"
+        );
+        assert_eq!(inbox.pending_replies(), 1);
+
+        inbox
+            .on_envelope(
+                legitimate,
+                direct(&expected),
+                user.fingerprint(),
+                recipient_fp,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rx.await.unwrap(), b"legitimate");
         assert_eq!(inbox.pending_replies(), 0);
     }
 
@@ -959,7 +1156,7 @@ mod tests {
     async fn cancel_reply_drops_waiter() {
         let inbox = Inbox::new();
         let cid = CorrelationId([0xaa; 16]);
-        let _rx = inbox.register_reply(cid);
+        let _rx = inbox.register_reply(cid, Fingerprint([0x01; 32]));
         assert_eq!(inbox.pending_replies(), 1);
         inbox.cancel_reply(&cid);
         assert_eq!(inbox.pending_replies(), 0);

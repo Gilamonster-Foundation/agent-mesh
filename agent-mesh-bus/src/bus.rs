@@ -17,8 +17,10 @@
 //! Connection reuse is a follow-up. The cost is one QUIC handshake
 //! per message; the benefit is that the bus has no per-peer state
 //! to clean up when a peer disappears, and the inbox routes replies
-//! by correlation id (not by connection), so a reply arriving on a
-//! freshly-dialed reverse connection works exactly the same.
+//! by correlation id plus the expected responder's authenticated fingerprint
+//! (not by connection), so a reply arriving on a freshly-dialed reverse
+//! connection works exactly the same without letting another peer win the
+//! correlation race.
 //!
 //! Replies prefer **dial-back over mDNS**: the request connection's
 //! TLS-authenticated remote key doubles as the sender's agent pubkey,
@@ -301,7 +303,8 @@ impl Bus {
         timeout: Duration,
     ) -> Result<Vec<u8>> {
         let correlation = CorrelationId::new_random();
-        let waiter = self.inbox.register_reply(correlation);
+        let expected_peer_fp = route.peer_fingerprint();
+        let waiter = self.inbox.register_reply(correlation, expected_peer_fp);
 
         let msg = BusMessage::Request {
             topic: topic.wire(),
@@ -455,6 +458,16 @@ enum DialRoute {
     Resolve(Fingerprint),
     /// Dial a known agent pubkey + socket address, no resolver.
     Direct(PeerEndpoint),
+}
+
+impl DialRoute {
+    /// The authenticated agent identity an eventual reply must be signed by.
+    fn peer_fingerprint(self) -> Fingerprint {
+        match self {
+            Self::Resolve(peer_fp) => peer_fp,
+            Self::Direct(peer) => peer.fingerprint(),
+        }
+    }
 }
 
 /// Dial a known [`PeerEndpoint`] directly — no mDNS. Reuses the same
@@ -992,6 +1005,181 @@ mod tests {
         )
     }
 
+    fn direct_provenance(agent: &AgentKey) -> DeliveryProvenance {
+        DeliveryProvenance::Direct {
+            carrier: AuthenticatedPeer::new(agent.cert().user_fingerprint(), agent.fingerprint()),
+        }
+    }
+
+    enum CapturedSend {
+        Resolve(Fingerprint, SignedEnvelope),
+        Direct(PeerEndpoint, SignedEnvelope),
+    }
+
+    /// Transport test double that captures outbound envelopes and never
+    /// produces inbound traffic on its own. Tests can feed the captured
+    /// correlation back through the real inbox deterministically.
+    struct CaptureTransport {
+        sent_tx: mpsc::UnboundedSender<CapturedSend>,
+        sent_rx: AsyncMutex<mpsc::UnboundedReceiver<CapturedSend>>,
+    }
+
+    impl CaptureTransport {
+        fn new() -> Arc<Self> {
+            let (sent_tx, sent_rx) = mpsc::unbounded_channel();
+            Arc::new(Self {
+                sent_tx,
+                sent_rx: AsyncMutex::new(sent_rx),
+            })
+        }
+
+        async fn next_sent(&self) -> CapturedSend {
+            self.sent_rx
+                .lock()
+                .await
+                .recv()
+                .await
+                .expect("bus keeps capture transport alive")
+        }
+    }
+
+    #[async_trait]
+    impl Transport for CaptureTransport {
+        async fn send_to(&self, fp: Fingerprint, env: SignedEnvelope) -> Result<()> {
+            self.sent_tx
+                .send(CapturedSend::Resolve(fp, env))
+                .expect("capture receiver is alive");
+            Ok(())
+        }
+
+        async fn send_to_endpoint(&self, peer: &PeerEndpoint, env: SignedEnvelope) -> Result<()> {
+            self.sent_tx
+                .send(CapturedSend::Direct(*peer, env))
+                .expect("capture receiver is alive");
+            Ok(())
+        }
+
+        async fn reply(
+            &self,
+            _fp: Fingerprint,
+            _route: &ReplyRoute,
+            _env: SignedEnvelope,
+        ) -> Result<()> {
+            unreachable!("capture transport does not receive requests")
+        }
+
+        async fn recv(&self) -> Option<Inbound> {
+            std::future::pending().await
+        }
+
+        fn local_port(&self) -> u16 {
+            0
+        }
+
+        async fn close(&self) {}
+    }
+
+    fn reply_envelope(
+        sender: &AgentKey,
+        recipient_fp: Fingerprint,
+        correlation: CorrelationId,
+        body: &[u8],
+    ) -> SignedEnvelope {
+        let payload = serde_json::to_vec(&BusMessage::Reply {
+            correlation: correlation.0,
+            body: body.to_vec(),
+        })
+        .expect("encode reply");
+        let env = SignedEnvelope::new(
+            sender,
+            Recipient::Direct {
+                agent_fp: recipient_fp,
+            },
+            1,
+            payload,
+        );
+        env.verify().expect("test reply envelope verifies");
+        env
+    }
+
+    async fn wrong_signer_cannot_win_for_request_route(direct: bool) {
+        let user = UserKey::generate();
+        let asker = Arc::new(agent(&user, "asker"));
+        let expected = agent(&user, "expected");
+        let attacker = agent(&user, "attacker");
+        let asker_fp = asker.fingerprint();
+        let expected_fp = expected.fingerprint();
+        let transport = CaptureTransport::new();
+        let bus = Bus::bind_with_transport(asker, Arc::clone(&transport) as Arc<dyn Transport>)
+            .expect("bind asker to capture transport");
+        let route = if direct {
+            DialRoute::Direct(PeerEndpoint::new(
+                expected.public_bytes(),
+                "127.0.0.1:7".parse().unwrap(),
+            ))
+        } else {
+            DialRoute::Resolve(expected_fp)
+        };
+        let topic = Topic::new(user.fingerprint(), "bound-reply");
+
+        {
+            let request =
+                bus.request_via(route, &topic, b"request".to_vec(), Duration::from_secs(1));
+            tokio::pin!(request);
+            let captured = tokio::select! {
+                biased;
+                sent = transport.next_sent() => sent,
+                result = &mut request => panic!("request completed before a reply: {result:?}"),
+            };
+            let (was_direct, target_fp, outbound) = match captured {
+                CapturedSend::Resolve(fp, env) => (false, fp, env),
+                CapturedSend::Direct(peer, env) => (true, peer.fingerprint(), env),
+            };
+            assert_eq!(was_direct, direct, "request must use the selected route");
+            assert_eq!(target_fp, expected_fp);
+            outbound.verify().expect("outbound request verifies");
+            let correlation = match serde_json::from_slice::<BusMessage>(outbound.payload.as_ref())
+                .expect("decode captured request")
+            {
+                BusMessage::Request { correlation, .. } => CorrelationId(correlation),
+                other => panic!("expected Request, got {other:?}"),
+            };
+            assert_eq!(
+                bus.inbox.pending_replies(),
+                1,
+                "request route must register its waiter before sending"
+            );
+
+            bus.inbox
+                .on_envelope(
+                    reply_envelope(&attacker, asker_fp, correlation, b"forged"),
+                    direct_provenance(&attacker),
+                    user.fingerprint(),
+                    asker_fp,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                bus.inbox.pending_replies(),
+                1,
+                "wrong signer must not consume the route-bound waiter"
+            );
+
+            bus.inbox
+                .on_envelope(
+                    reply_envelope(&expected, asker_fp, correlation, b"legitimate"),
+                    direct_provenance(&expected),
+                    user.fingerprint(),
+                    asker_fp,
+                )
+                .await
+                .unwrap();
+            assert_eq!(request.await.unwrap(), b"legitimate");
+            assert_eq!(bus.inbox.pending_replies(), 0);
+        }
+        bus.close().await.unwrap();
+    }
+
     #[test]
     fn local_identity_requires_a_valid_cert_and_matching_user() {
         let certified_user = UserKey::generate();
@@ -1201,6 +1389,69 @@ mod tests {
 
         alice_bus.close().await.unwrap();
         bob_bus.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resolver_request_binds_reply_to_resolved_peer() {
+        wrong_signer_cannot_win_for_request_route(false).await;
+    }
+
+    #[tokio::test]
+    async fn direct_request_binds_reply_to_endpoint_peer() {
+        wrong_signer_cannot_win_for_request_route(true).await;
+    }
+
+    #[tokio::test]
+    async fn timed_out_request_removes_waiter_and_drops_late_reply() {
+        let user = UserKey::generate();
+        let asker = Arc::new(agent(&user, "asker"));
+        let expected = agent(&user, "expected");
+        let asker_fp = asker.fingerprint();
+        let expected_fp = expected.fingerprint();
+        let transport = CaptureTransport::new();
+        let bus = Bus::bind_with_transport(asker, Arc::clone(&transport) as Arc<dyn Transport>)
+            .expect("bind asker to capture transport");
+        let topic = Topic::new(user.fingerprint(), "timeout");
+
+        let result = bus
+            .request(
+                expected_fp,
+                &topic,
+                b"request".to_vec(),
+                Duration::from_millis(1),
+            )
+            .await;
+        assert!(matches!(result, Err(BusError::Timeout(_))));
+        assert_eq!(bus.inbox.pending_replies(), 0);
+
+        let outbound = match transport.next_sent().await {
+            CapturedSend::Resolve(fp, env) => {
+                assert_eq!(fp, expected_fp);
+                env
+            }
+            CapturedSend::Direct(_, _) => panic!("request used the wrong route"),
+        };
+        let correlation = match serde_json::from_slice::<BusMessage>(outbound.payload.as_ref())
+            .expect("decode captured request")
+        {
+            BusMessage::Request { correlation, .. } => CorrelationId(correlation),
+            other => panic!("expected Request, got {other:?}"),
+        };
+        bus.inbox
+            .on_envelope(
+                reply_envelope(&expected, asker_fp, correlation, b"late"),
+                direct_provenance(&expected),
+                user.fingerprint(),
+                asker_fp,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            bus.inbox.pending_replies(),
+            0,
+            "late reply must not recreate a timed-out waiter"
+        );
+        bus.close().await.unwrap();
     }
 
     #[tokio::test]
