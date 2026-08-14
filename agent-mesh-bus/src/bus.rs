@@ -30,7 +30,7 @@
 
 use crate::inbox::{BusMessage, Inbox, RequestContext};
 use crate::reply::CorrelationId;
-use crate::transport::{Inbound, ReplyRoute, Transport};
+use crate::transport::{AuthenticatedPeer, DeliveryProvenance, Inbound, ReplyRoute, Transport};
 use crate::{BusError, Result, Topic};
 use agent_mesh_discovery::{AnnounceConfig, Announcer, AnnouncerHandle};
 use agent_mesh_protocol::{AgentKey, CertChain, Fingerprint, Recipient, SignedEnvelope, UserKey};
@@ -153,6 +153,21 @@ pub struct Bus {
     accept_task: JoinHandle<()>,
 }
 
+fn verified_local_user(agent: &AgentKey) -> Result<Fingerprint> {
+    agent.cert().verify()?;
+    Ok(agent.cert().user_fingerprint())
+}
+
+fn ensure_local_user(supplied_user_fp: Fingerprint, certified_user_fp: Fingerprint) -> Result<()> {
+    if supplied_user_fp != certified_user_fp {
+        return Err(BusError::LocalIdentityMismatch {
+            supplied_user_fp: supplied_user_fp.hex(),
+            certified_user_fp: certified_user_fp.hex(),
+        });
+    }
+    Ok(())
+}
+
 impl Bus {
     /// Bind a bus on `port` (use `0` for an OS-picked port). Starts
     /// the mDNS resolver and the accept loop.
@@ -171,14 +186,13 @@ impl Bus {
         port: u16,
         opts: BusOptions,
     ) -> Result<Self> {
-        let user_fp = user.fingerprint();
+        // The verified certified root is the local admission policy. Reject a
+        // mismatched explicit UserKey consistently in debug and release builds.
+        let user_fp = verified_local_user(&agent)?;
+        ensure_local_user(user.fingerprint(), user_fp)?;
         let agent = Arc::new(agent);
         let transport = IrohTransport::bind(user_fp, agent.clone(), port, opts).await?;
-        Ok(Self::bind_with_transport(
-            agent,
-            user_fp,
-            Arc::new(transport),
-        ))
+        Self::bind_with_transport(agent, Arc::new(transport))
     }
 
     /// Bind a bus over an explicit [`Transport`], skipping iroh entirely.
@@ -189,11 +203,14 @@ impl Bus {
     /// timing (the flaky `request_reply_roundtrip` used the real stack and
     /// timed out on hosted CI runners). Production always goes through
     /// [`Self::bind_with`] → [`IrohTransport`].
+    ///
+    /// Returns an error if the local agent certificate does not verify; an
+    /// unverified certificate must never define the bus's trusted user root.
     pub fn bind_with_transport(
         agent: Arc<AgentKey>,
-        user_fp: Fingerprint,
         transport: Arc<dyn Transport>,
-    ) -> Self {
+    ) -> Result<Self> {
+        let user_fp = verified_local_user(&agent)?;
         let inbox = Arc::new(Inbox::new());
         let sequence = Arc::new(AtomicU64::new(1));
         let accept_task = spawn_accept_loop(
@@ -202,14 +219,14 @@ impl Bus {
             inbox.clone(),
             sequence.clone(),
         );
-        Self {
+        Ok(Self {
             agent,
             user_fp,
             transport,
             inbox,
             sequence,
             accept_task,
-        }
+        })
     }
 
     /// User fingerprint this bus belongs to.
@@ -521,6 +538,14 @@ async fn dial_peer(
             peer_fp.short()
         ))
     })?;
+    let advertised_fp = Fingerprint::of_bytes(&pubkey);
+    if advertised_fp != peer_fp {
+        return Err(BusError::Unreachable(format!(
+            "peer {} advertised pubkey for different agent {}",
+            peer_fp.short(),
+            advertised_fp.short()
+        )));
+    }
     let iroh_pk = agent_pubkey_to_iroh(&pubkey).ok_or_else(|| {
         BusError::Unreachable(format!(
             "peer {} advertised invalid ed25519 pubkey",
@@ -571,24 +596,65 @@ async fn dial_peer(
     Ok(conn)
 }
 
-/// Open a fresh bidi stream on `conn`, do the cert handshake, ship one
+/// Turn a verified Hello cert into carrier evidence only when its leaf key is
+/// the QUIC/TLS-authenticated session identity.
+fn authenticated_iroh_peer(
+    session_id: &PublicKey,
+    peer_cert: &CertChain,
+) -> Result<AuthenticatedPeer> {
+    // `do_handshake` verifies this too, but keep the constructor honest when
+    // used on either side of a connection: the evidence is derived only from a
+    // valid cert whose leaf key is byte-for-byte the QUIC/TLS session identity.
+    peer_cert.verify()?;
+    if &peer_cert.agent_pubkey != session_id.as_bytes() {
+        return Err(BusError::Transport(TransportError::Handshake(format!(
+            "peer Hello certificate agent {} is not bound to QUIC session {}",
+            peer_cert.agent_fingerprint().short(),
+            Fingerprint::of_bytes(session_id.as_bytes()).short(),
+        ))));
+    }
+    Ok(AuthenticatedPeer::new(
+        peer_cert.user_fingerprint(),
+        peer_cert.agent_fingerprint(),
+    ))
+}
+
+fn ensure_intended_iroh_peer(peer: AuthenticatedPeer, expected_peer_fp: Fingerprint) -> Result<()> {
+    if peer.agent_fp != expected_peer_fp {
+        return Err(BusError::Transport(TransportError::Handshake(format!(
+            "authenticated peer {} does not match intended target {}",
+            peer.agent_fp.short(),
+            expected_peer_fp.short(),
+        ))));
+    }
+    Ok(())
+}
+
+/// Open a fresh bidi stream on `conn`, do the cert handshake, bind its verified
+/// peer to both the QUIC session and `expected_peer_fp`, then ship one
 /// already-signed envelope. (The bus signs + sequences the envelope; the
 /// transport only carries it — see [`make_envelope`].)
 async fn send_env_on_conn(
     conn: &Connection,
     our_cert: &CertChain,
+    expected_peer_fp: Fingerprint,
     env: &SignedEnvelope,
 ) -> Result<()> {
     let (mut send, mut recv) = conn
         .open_bi()
         .await
         .map_err(|e| BusError::Transport(TransportError::Iroh(format!("open_bi: {e}"))))?;
-    tokio::time::timeout(
+    let peer_cert = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
         do_handshake(our_cert, &mut send, &mut recv, true),
     )
     .await
     .map_err(|_| BusError::Timeout(HANDSHAKE_TIMEOUT))??;
+    // Bind the Hello identity on the dialer side too. Otherwise a QUIC endpoint
+    // authenticated as B could present a copied, valid same-user cert for A and
+    // receive traffic intended for A.
+    let peer = authenticated_iroh_peer(&conn.remote_id(), &peer_cert)?;
+    ensure_intended_iroh_peer(peer, expected_peer_fp)?;
     send_envelope(&mut send, env).await?;
     send.finish()
         .map_err(|e| BusError::Transport(TransportError::Iroh(format!("finish: {e}"))))?;
@@ -619,9 +685,15 @@ fn spawn_accept_loop(
             tokio::spawn(async move {
                 let Inbound {
                     envelope,
+                    provenance,
                     reply_route,
                 } = inbound;
-                match inbox.on_envelope(envelope).await {
+                let local_user_fp = agent.cert().user_fingerprint();
+                let local_agent_fp = agent.fingerprint();
+                match inbox
+                    .on_envelope(envelope, provenance, local_user_fp, local_agent_fp)
+                    .await
+                {
                     Ok(Some(reply)) => {
                         let msg = BusMessage::Reply {
                             correlation: reply.correlation.0,
@@ -717,6 +789,8 @@ impl IrohTransport {
         port: u16,
         opts: BusOptions,
     ) -> Result<Self> {
+        let certified_user_fp = verified_local_user(&agent)?;
+        ensure_local_user(user_fp, certified_user_fp)?;
         let endpoint = Endpoint::bind(&agent, port).await?;
         let local_port = endpoint.port();
         let endpoint = Arc::new(endpoint);
@@ -761,12 +835,12 @@ impl IrohTransport {
 impl Transport for IrohTransport {
     async fn send_to(&self, fp: Fingerprint, env: SignedEnvelope) -> Result<()> {
         let conn = dial_peer(&self.endpoint, &self.resolver, fp).await?;
-        send_env_on_conn(&conn, self.agent.cert(), &env).await
+        send_env_on_conn(&conn, self.agent.cert(), fp, &env).await
     }
 
     async fn send_to_endpoint(&self, peer: &PeerEndpoint, env: SignedEnvelope) -> Result<()> {
         let conn = dial_endpoint(&self.endpoint, *peer).await?;
-        send_env_on_conn(&conn, self.agent.cert(), &env).await
+        send_env_on_conn(&conn, self.agent.cert(), peer.fingerprint(), &env).await
     }
 
     async fn reply(&self, fp: Fingerprint, route: &ReplyRoute, env: SignedEnvelope) -> Result<()> {
@@ -774,7 +848,7 @@ impl Transport for IrohTransport {
         // inbound connection; `None` (or a foreign route) falls back to mDNS.
         let reverse: IrohReverse = route.downcast_ref::<IrohReverse>().cloned().flatten();
         let conn = dial_reply_peer(&self.endpoint, &self.resolver, fp, reverse).await?;
-        send_env_on_conn(&conn, self.agent.cert(), &env).await
+        send_env_on_conn(&conn, self.agent.cert(), fp, &env).await
     }
 
     async fn recv(&self) -> Option<Inbound> {
@@ -817,18 +891,6 @@ fn spawn_iroh_accept_loop(
     })
 }
 
-/// Whether `env` may be admitted on a QUIC session TLS-authenticated as
-/// `session_id`. The envelope's claimed signer (`cert_chain.agent_pubkey`,
-/// already proven to hold that key by `recv_envelope`'s `env.verify()`) must be
-/// the SAME key that owns the transport session. This binds the application
-/// principal to the session, so a validly-signed envelope replayed or relayed
-/// over a *different* peer's connection is refused rather than authorized as its
-/// original signer. `false` if the claimed pubkey is not a valid ed25519 point
-/// (fail-closed).
-fn envelope_matches_session(session_id: &PublicKey, env: &SignedEnvelope) -> bool {
-    agent_pubkey_to_iroh(&env.cert_chain.agent_pubkey).is_some_and(|signer| &signer == session_id)
-}
-
 /// Handle one accepted connection: finish QUIC, then per bidi stream do the
 /// handshake, decode the envelope, and forward it into `inbound_tx`.
 async fn accept_conn(
@@ -863,13 +925,13 @@ async fn accept_conn(
             }
         };
         let cert = agent.cert().clone();
-        match tokio::time::timeout(
+        let peer_cert = match tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
             do_handshake(&cert, &mut send, &mut recv, false),
         )
         .await
         {
-            Ok(Ok(_peer_cert)) => {}
+            Ok(Ok(peer_cert)) => peer_cert,
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "iroh transport: handshake rejected");
                 continue;
@@ -878,7 +940,17 @@ async fn accept_conn(
                 tracing::warn!("iroh transport: handshake timed out");
                 continue;
             }
-        }
+        };
+        // A valid Hello cert is not proof that the QUIC peer owns its leaf key:
+        // bind it explicitly to the TLS-authenticated endpoint identity before
+        // turning it into carrier evidence.
+        let carrier = match authenticated_iroh_peer(&conn.remote_id(), &peer_cert) {
+            Ok(peer) => peer,
+            Err(e) => {
+                tracing::warn!(error = %e, "iroh transport: Hello/session identity mismatch");
+                continue;
+            }
+        };
         let env = match recv_envelope(&mut recv).await {
             Ok(env) => env,
             Err(e) => {
@@ -886,21 +958,10 @@ async fn accept_conn(
                 continue;
             }
         };
-        // Bind the principal to the QUIC session (defense in depth over the
-        // signature verify() `recv_envelope` already did): the envelope's signer
-        // must be the key that TLS-authenticated THIS connection, so a
-        // validly-signed envelope relayed/replayed over another peer's session
-        // is dropped here instead of being authorized as its original signer.
-        if !envelope_matches_session(&conn.remote_id(), &env) {
-            tracing::warn!(
-                signer = %env.sender_agent_fp().short(),
-                "iroh transport: envelope signer is not bound to the QUIC session identity; dropping"
-            );
-            continue;
-        }
         if inbound_tx
             .send(Inbound {
                 envelope: env,
+                provenance: DeliveryProvenance::Direct { carrier },
                 reply_route: reply_route.clone(),
             })
             .is_err()
@@ -931,32 +992,174 @@ mod tests {
         )
     }
 
-    /// The QUIC-session binding: an envelope is admitted only on a session
-    /// authenticated as its own signer. A validly-signed envelope presented over
-    /// a *sibling's* session (relay/replay) is refused — the principal is bound
-    /// to the transport session, not only to the envelope signature. Pure
-    /// regression for the `accept_conn` session-binding hardening (newt#1643 /
-    /// agent-mesh#75 follow-up).
     #[test]
-    fn an_envelope_is_bound_to_its_signers_quic_session() {
+    fn local_identity_requires_a_valid_cert_and_matching_user() {
+        let certified_user = UserKey::generate();
+        let different_user = UserKey::generate();
+        let local_agent = agent(&certified_user, "local");
+        let certified_fp = verified_local_user(&local_agent).expect("valid local certificate");
+
+        let mismatch = ensure_local_user(different_user.fingerprint(), certified_fp).unwrap_err();
+        assert!(matches!(mismatch, BusError::LocalIdentityMismatch { .. }));
+
+        let mut tampered_cert = local_agent.cert().clone();
+        tampered_cert.metadata.role = "tampered".into();
+        let invalid_agent =
+            AgentKey::from_seed_and_cert(&local_agent.signing_key_bytes(), tampered_cert)
+                .expect("seed still matches the unchanged leaf key");
+        assert!(
+            verified_local_user(&invalid_agent).is_err(),
+            "a matching private key must not make an invalid certificate trusted"
+        );
+    }
+
+    /// Carrier evidence can be minted only when the verified Hello cert's leaf
+    /// key is the QUIC/TLS session identity. This helper gates both dialer and
+    /// acceptor paths.
+    #[test]
+    fn hello_certificate_is_bound_to_its_quic_session() {
         let user = UserKey::generate();
         let a = agent(&user, "a");
         let b = agent(&user, "b");
         let a_session = agent_pubkey_to_iroh(&a.public_bytes()).expect("valid ed25519 key");
         let b_session = agent_pubkey_to_iroh(&b.public_bytes()).expect("valid ed25519 key");
+        let peer = authenticated_iroh_peer(&a_session, a.cert()).expect("A owns A's session");
+        assert_eq!(peer.agent_fp, a.fingerprint());
+        assert_eq!(peer.user_fp, user.fingerprint());
+        ensure_intended_iroh_peer(peer, a.fingerprint()).expect("A is the intended target");
+        let err = ensure_intended_iroh_peer(peer, b.fingerprint()).unwrap_err();
+        assert!(
+            matches!(err, BusError::Transport(TransportError::Handshake(_))),
+            "an authenticated A session must not satisfy an intended B target, got {err:?}"
+        );
+
+        let err = authenticated_iroh_peer(&b_session, a.cert()).unwrap_err();
+        assert!(
+            matches!(err, BusError::Transport(TransportError::Handshake(_))),
+            "a copied A Hello cert on B's TLS session must be rejected, got {err:?}"
+        );
+    }
+
+    /// Real-boundary regression: a valid envelope signed by A but carried over
+    /// sibling B's authenticated QUIC session must not pass common admission or
+    /// consume its nonce/sequence. The test receives each transport delivery
+    /// explicitly, so the exact same envelope can be admitted over A's own
+    /// session without a timing-based absence assertion.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relayed_envelope_on_sibling_quic_session_is_rejected_before_replay() {
+        let user = UserKey::generate();
+        let original_signer = agent(&user, "original-signer");
+        let sibling_carrier = agent(&user, "sibling-carrier");
+        let recipient = Arc::new(agent(&user, "recipient"));
+        let recipient_pubkey = recipient.public_bytes();
+        let recipient_fp = recipient.fingerprint();
+
+        let recipient_transport = IrohTransport::bind(
+            user.fingerprint(),
+            recipient.clone(),
+            0,
+            BusOptions { announce: false },
+        )
+        .await
+        .expect("bind recipient transport");
+        let inbox = Inbox::new();
+        let topic = Topic::new(user.fingerprint(), "carrier-binding");
+
+        let msg = BusMessage::Publish {
+            topic: topic.wire(),
+            body: b"authentic payload".to_vec(),
+        };
         let env = SignedEnvelope::new(
-            &a,
+            &original_signer,
             Recipient::Direct {
-                agent_fp: Fingerprint::of_bytes(&b.public_bytes()),
+                agent_fp: recipient_fp,
             },
             1,
-            b"payload".to_vec(),
+            serde_json::to_vec(&msg).expect("encode bus message"),
         );
-        // Admitted on A's own session (the signer owns the transport)…
-        assert!(envelope_matches_session(&a_session, &env));
-        // …refused on B's session — a relayed/replayed envelope can't borrow B's
-        // connection to speak as A.
-        assert!(!envelope_matches_session(&b_session, &env));
+        let recipient_id =
+            agent_pubkey_to_iroh(&recipient_pubkey).expect("recipient has a valid iroh key");
+        let recipient_addr = SocketAddr::new(
+            std::net::Ipv4Addr::LOCALHOST.into(),
+            recipient_transport.local_port(),
+        );
+
+        // B authenticates the QUIC session and its own Hello honestly, but
+        // carries A's valid envelope. The transport reports B as carrier; the
+        // common boundary must reject carrier != original signer.
+        let sibling_endpoint = Endpoint::bind(&sibling_carrier, 0)
+            .await
+            .expect("bind sibling endpoint");
+        let sibling_conn = sibling_endpoint
+            .dial(recipient_id, [recipient_addr])
+            .await
+            .expect("sibling dials recipient");
+        send_env_on_conn(&sibling_conn, sibling_carrier.cert(), recipient_fp, &env)
+            .await
+            .expect("relay bytes reach the recipient boundary");
+        drop(sibling_conn);
+        let relayed = tokio::time::timeout(Duration::from_secs(3), recipient_transport.recv())
+            .await
+            .expect("relay reaches transport boundary before timeout")
+            .expect("recipient transport remains open");
+        assert_eq!(
+            relayed.provenance,
+            DeliveryProvenance::Direct {
+                carrier: AuthenticatedPeer::new(user.fingerprint(), sibling_carrier.fingerprint(),),
+            }
+        );
+        let error = inbox
+            .on_envelope(
+                relayed.envelope,
+                relayed.provenance,
+                user.fingerprint(),
+                recipient_fp,
+            )
+            .await
+            .expect_err("a sibling carrier must not speak as the original signer");
+        assert!(matches!(error, BusError::CarrierAgentMismatch { .. }));
+        assert!(inbox.nonce_cache().is_empty());
+        assert_eq!(
+            inbox
+                .sequence_tracker()
+                .last_seen(&original_signer.fingerprint()),
+            None
+        );
+
+        // Exact same signed bytes, nonce, and sequence over A's session. This
+        // succeeds only if the rejected relay did not poison replay state.
+        let signer_endpoint = Endpoint::bind(&original_signer, 0)
+            .await
+            .expect("bind signer endpoint");
+        let signer_conn = signer_endpoint
+            .dial(recipient_id, [recipient_addr])
+            .await
+            .expect("signer dials recipient");
+        send_env_on_conn(&signer_conn, original_signer.cert(), recipient_fp, &env)
+            .await
+            .expect("honest envelope reaches recipient");
+        let honest = tokio::time::timeout(Duration::from_secs(3), recipient_transport.recv())
+            .await
+            .expect("honest delivery reaches transport boundary before timeout")
+            .expect("recipient transport remains open");
+        inbox
+            .on_envelope(
+                honest.envelope,
+                honest.provenance,
+                user.fingerprint(),
+                recipient_fp,
+            )
+            .await
+            .expect("the signer's own carrier session is admitted");
+        assert_eq!(inbox.nonce_cache().len(), 1);
+        assert_eq!(
+            inbox
+                .sequence_tracker()
+                .last_seen(&original_signer.fingerprint()),
+            Some(1)
+        );
+
+        recipient_transport.close().await;
     }
 
     /// The request/reply round-trip driven over the **in-memory
@@ -971,19 +1174,16 @@ mod tests {
         let user = UserKey::generate();
         let alice = Arc::new(agent(&user, "alice"));
         let bob = Arc::new(agent(&user, "bob"));
-        let alice_fp = alice.fingerprint();
         let bob_fp = bob.fingerprint();
 
         // One switchboard; each bus gets an in-memory leg registered under its
         // agent fingerprint (that's what `send_to`/`reply` route by).
         let net = MeshNet::new();
-        let alice_bus = Bus::bind_with_transport(
-            alice,
-            user.fingerprint(),
-            Arc::new(net.transport_for(alice_fp)),
-        );
-        let bob_bus =
-            Bus::bind_with_transport(bob, user.fingerprint(), Arc::new(net.transport_for(bob_fp)));
+        let alice_bus =
+            Bus::bind_with_transport(alice.clone(), Arc::new(net.transport_for(&alice)))
+                .expect("bind Alice to in-memory transport");
+        let bob_bus = Bus::bind_with_transport(bob.clone(), Arc::new(net.transport_for(&bob)))
+            .expect("bind Bob to in-memory transport");
 
         let topic = Topic::new(user.fingerprint(), "echo");
         bob_bus.handle_requests(topic.clone(), |body| async move {
@@ -1012,13 +1212,11 @@ mod tests {
         let bob_fp = bob.fingerprint();
 
         let net = MeshNet::new();
-        let alice_bus = Bus::bind_with_transport(
-            alice,
-            user.fingerprint(),
-            Arc::new(net.transport_for(alice_fp)),
-        );
-        let bob_bus =
-            Bus::bind_with_transport(bob, user.fingerprint(), Arc::new(net.transport_for(bob_fp)));
+        let alice_bus =
+            Bus::bind_with_transport(alice.clone(), Arc::new(net.transport_for(&alice)))
+                .expect("bind Alice to in-memory transport");
+        let bob_bus = Bus::bind_with_transport(bob.clone(), Arc::new(net.transport_for(&bob)))
+            .expect("bind Bob to in-memory transport");
 
         let topic = Topic::new(user.fingerprint(), "whoami");
         bob_bus.handle_requests_with_context(
@@ -1065,10 +1263,9 @@ mod tests {
     async fn handle_requests_registers_synchronously_no_spawn_race() {
         let user = UserKey::generate();
         let bob = Arc::new(agent(&user, "bob"));
-        let bob_fp = bob.fingerprint();
         let net = MeshNet::new();
-        let bob_bus =
-            Bus::bind_with_transport(bob, user.fingerprint(), Arc::new(net.transport_for(bob_fp)));
+        let bob_bus = Bus::bind_with_transport(bob.clone(), Arc::new(net.transport_for(&bob)))
+            .expect("bind Bob to in-memory transport");
 
         let topic = Topic::new(user.fingerprint(), "echo");
         assert_eq!(
@@ -1096,13 +1293,10 @@ mod tests {
     async fn in_memory_send_to_unknown_peer_is_unreachable() {
         let user = UserKey::generate();
         let alice = Arc::new(agent(&user, "alice"));
-        let alice_fp = alice.fingerprint();
         let net = MeshNet::new();
-        let alice_bus = Bus::bind_with_transport(
-            alice,
-            user.fingerprint(),
-            Arc::new(net.transport_for(alice_fp)),
-        );
+        let alice_bus =
+            Bus::bind_with_transport(alice.clone(), Arc::new(net.transport_for(&alice)))
+                .expect("bind Alice to in-memory transport");
 
         let topic = Topic::new(user.fingerprint(), "echo");
         let phantom = Fingerprint([0xfeu8; 32]);

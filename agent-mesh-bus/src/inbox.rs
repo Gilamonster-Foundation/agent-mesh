@@ -1,10 +1,11 @@
 //! [`Inbox`] — application-level message dispatch on top of
 //! [`SignedEnvelope`] framing.
 //!
-//! Where the transport delivers verified envelopes, the inbox decides
-//! what they *mean* — a [`BusMessage::Request`] runs a registered
-//! handler, a [`BusMessage::Reply`] resolves an in-flight oneshot,
-//! a [`BusMessage::Publish`] fans out to topic subscribers.
+//! The inbox is the common admission boundary: it verifies each envelope and
+//! binds its signer to transport-authenticated provenance before deciding what
+//! the message *means*. A [`BusMessage::Request`] runs a registered handler, a
+//! [`BusMessage::Reply`] resolves an in-flight oneshot, and a
+//! [`BusMessage::Publish`] fans out to topic subscribers.
 //!
 //! The inbox is the single place where replay + sequence checks
 //! happen. Calling code (the [`crate::bus::Bus`]) doesn't have to
@@ -13,8 +14,9 @@
 use crate::replay::{NonceCache, SequenceTracker};
 use crate::reply::{CorrelationId, ReplyWaiter};
 use crate::topic::Topic;
+use crate::transport::DeliveryProvenance;
 use crate::{BusError, Result};
-use agent_mesh_protocol::{Fingerprint, SignedEnvelope};
+use agent_mesh_protocol::{Fingerprint, Recipient, SignedEnvelope};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -77,12 +79,13 @@ pub enum BusMessage {
 /// The verified principal behind an inbound request: who signed the envelope.
 ///
 /// Both fingerprints are authenticated, not claimed. Every inbound envelope is
-/// `verify()`-ed at the transport boundary (`recv_envelope`) before it reaches
-/// the inbox — the agent signature is checked against the envelope's cert chain,
-/// and the chain proves the user→agent delegation. So `caller_agent_fp` is
-/// `BLAKE3(cert_chain.agent_pubkey)` of whoever actually signed this request,
-/// and `caller_user_fp` is their operator root. A handler may authorize on these
-/// without re-verifying anything.
+/// `verify()`-ed at this common admission boundary before replay state changes:
+/// the agent signature is checked against the envelope's cert chain, the chain
+/// proves the user→agent delegation, and direct-delivery provenance binds that
+/// original signer to the transport-authenticated carrier. So
+/// `caller_agent_fp` is `BLAKE3(cert_chain.agent_pubkey)` of whoever actually
+/// signed this request, and `caller_user_fp` is their operator root. A handler
+/// may authorize on these without re-verifying anything.
 ///
 /// This is the *signer* of the request, which is the correct principal for
 /// authorization: a relay can only deliver a request its signer already
@@ -246,14 +249,69 @@ impl Inbox {
         &self.sequence
     }
 
-    /// Feed a verified envelope into the inbox. Returns
+    /// Admit an inbound envelope into the inbox. Returns
     /// `Ok(Some(reply))` if the envelope carried a `Request` we have
     /// a handler for; the caller (the bus) ships that reply back.
     ///
-    /// Replay-defense order: nonce check first (cheap, in-memory
-    /// hash set), then sequence check (per-peer monotonic). Both
-    /// must pass before any dispatch happens.
-    pub async fn on_envelope(&self, env: SignedEnvelope) -> Result<Option<OutgoingReply>> {
+    /// Admission is deliberately transport-neutral and fail-closed. It first
+    /// verifies the envelope, then binds its original signer to the
+    /// transport-authenticated direct carrier and the local same-user policy,
+    /// then checks a direct recipient. Only after all of those immutable checks
+    /// pass may nonce or sequence state be mutated.
+    ///
+    /// Replay-defense order after admission: nonce check first (cheap,
+    /// in-memory hash set), then sequence check (per-peer monotonic). Both must
+    /// pass before any dispatch happens.
+    pub async fn on_envelope(
+        &self,
+        env: SignedEnvelope,
+        provenance: DeliveryProvenance,
+        local_user_fp: Fingerprint,
+        local_agent_fp: Fingerprint,
+    ) -> Result<Option<OutgoingReply>> {
+        // Verification belongs here even when a framing implementation already
+        // did it. A Transport implementation must never be able to bypass the
+        // cert-chain, CID, and signature checks before replay state changes.
+        env.verify()?;
+
+        // Keep these names distinct: `carrier` is authenticated by the
+        // transport session; `signer_*` comes from the verified envelope. They
+        // are equal only because today's sole delivery mode is direct. A future
+        // authorized relay must get a separate provenance variant + policy.
+        let carrier = match provenance {
+            DeliveryProvenance::Direct { carrier } => carrier,
+            DeliveryProvenance::Unbound => return Err(BusError::UnboundDelivery),
+        };
+        let signer_agent_fp = env.sender_agent_fp();
+        let signer_user_fp = env.sender_user_fp();
+
+        if carrier.agent_fp != signer_agent_fp {
+            return Err(BusError::CarrierAgentMismatch {
+                carrier_agent_fp: carrier.agent_fp.hex(),
+                signer_agent_fp: signer_agent_fp.hex(),
+            });
+        }
+        if carrier.user_fp != signer_user_fp {
+            return Err(BusError::CarrierUserMismatch {
+                carrier_user_fp: carrier.user_fp.hex(),
+                signer_user_fp: signer_user_fp.hex(),
+            });
+        }
+        if signer_user_fp != local_user_fp {
+            return Err(BusError::ForeignPeer {
+                peer_user_fp: signer_user_fp.hex(),
+                local_user_fp: local_user_fp.hex(),
+            });
+        }
+        if let Recipient::Direct { agent_fp } = &env.recipient {
+            if *agent_fp != local_agent_fp {
+                return Err(BusError::WrongRecipient {
+                    recipient_agent_fp: agent_fp.hex(),
+                    local_agent_fp: local_agent_fp.hex(),
+                });
+            }
+        }
+
         if !self.nonce_cache.check_and_insert(env.nonce) {
             tracing::warn!(
                 sender = %env.sender_agent_fp().short(),
@@ -261,7 +319,7 @@ impl Inbox {
             );
             return Err(BusError::Replay);
         }
-        let peer_fp = env.sender_agent_fp();
+        let peer_fp = signer_agent_fp;
         if let Err((expected, actual)) = self.sequence.check_and_advance(peer_fp, env.sequence) {
             tracing::warn!(
                 sender = %peer_fp.short(),
@@ -276,11 +334,10 @@ impl Inbox {
             });
         }
 
-        // Build the verified caller principal from the (already-verified)
-        // envelope. Both fingerprints are authenticated by env.verify() at the
-        // transport boundary — see RequestContext.
+        // Build the verified original-signer principal. The carrier was checked
+        // separately above and is not silently substituted for this identity.
         let ctx = RequestContext {
-            caller_user_fp: env.sender_user_fp(),
+            caller_user_fp: signer_user_fp,
             caller_agent_fp: peer_fp,
         };
 
@@ -358,8 +415,9 @@ impl Default for Inbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::AuthenticatedPeer;
     use agent_mesh_protocol::{
-        AgentKey, AgentMetadata, Caveats, Recipient, SignedEnvelope, UserKey,
+        AgentKey, AgentMetadata, Caveats, MeshError, Recipient, SignedEnvelope, UserKey,
     };
 
     fn agent(user: &UserKey, role: &str) -> AgentKey {
@@ -393,6 +451,77 @@ mod tests {
         )
     }
 
+    fn direct(agent: &AgentKey) -> DeliveryProvenance {
+        DeliveryProvenance::Direct {
+            carrier: AuthenticatedPeer::new(agent.cert().user_fingerprint(), agent.fingerprint()),
+        }
+    }
+
+    async fn rejection_does_not_poison_replay_state<F>(
+        rejected_env: SignedEnvelope,
+        accepted_env: SignedEnvelope,
+        rejected_admission: (DeliveryProvenance, Fingerprint, Fingerprint),
+        accepted_admission: (DeliveryProvenance, Fingerprint, Fingerprint),
+        assert_error: F,
+    ) where
+        F: FnOnce(BusError),
+    {
+        assert_eq!(
+            rejected_env.nonce, accepted_env.nonce,
+            "negative and positive controls must exercise the same nonce"
+        );
+        assert_eq!(
+            rejected_env.sequence, accepted_env.sequence,
+            "negative and positive controls must exercise the same sequence"
+        );
+        let signer_fp = accepted_env.sender_agent_fp();
+        let inbox = Inbox::new();
+
+        let err = inbox
+            .on_envelope(
+                rejected_env,
+                rejected_admission.0,
+                rejected_admission.1,
+                rejected_admission.2,
+            )
+            .await
+            .expect_err("admission must reject the negative control");
+        assert_error(err);
+        assert!(
+            inbox.nonce_cache().is_empty(),
+            "failed admission must not insert the nonce"
+        );
+        assert_eq!(
+            inbox.sequence_tracker().last_seen(&signer_fp),
+            None,
+            "failed admission must not advance sender sequence"
+        );
+
+        inbox
+            .on_envelope(
+                accepted_env,
+                accepted_admission.0,
+                accepted_admission.1,
+                accepted_admission.2,
+            )
+            .await
+            .expect("the same nonce + sequence must remain admissible");
+        assert_eq!(inbox.nonce_cache().len(), 1);
+        assert_eq!(inbox.sequence_tracker().last_seen(&signer_fp), Some(1));
+    }
+
+    fn publish_envelope(sender: &AgentKey, recipient_fp: Fingerprint) -> SignedEnvelope {
+        envelope(
+            sender,
+            recipient_fp,
+            1,
+            &BusMessage::Publish {
+                topic: "admission:test".into(),
+                body: b"payload".to_vec(),
+            },
+        )
+    }
+
     #[test]
     fn bus_message_serde_roundtrip_all_variants() {
         for msg in [
@@ -417,6 +546,155 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unbound_delivery_is_rejected_before_replay_state() {
+        let user = UserKey::generate();
+        let alice = agent(&user, "alice");
+        let bob = agent(&user, "bob");
+        let env = publish_envelope(&alice, bob.fingerprint());
+
+        rejection_does_not_poison_replay_state(
+            env.clone(),
+            env,
+            (
+                DeliveryProvenance::Unbound,
+                user.fingerprint(),
+                bob.fingerprint(),
+            ),
+            (direct(&alice), user.fingerprint(), bob.fingerprint()),
+            |err| assert!(matches!(err, BusError::UnboundDelivery)),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn direct_carrier_must_be_the_original_signer() {
+        let user = UserKey::generate();
+        let alice = agent(&user, "alice");
+        let sibling = agent(&user, "sibling-carrier");
+        let bob = agent(&user, "bob");
+        let env = publish_envelope(&alice, bob.fingerprint());
+
+        rejection_does_not_poison_replay_state(
+            env.clone(),
+            env,
+            (direct(&sibling), user.fingerprint(), bob.fingerprint()),
+            (direct(&alice), user.fingerprint(), bob.fingerprint()),
+            |err| assert!(matches!(err, BusError::CarrierAgentMismatch { .. })),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn carrier_user_root_must_match_original_signer_root() {
+        let user = UserKey::generate();
+        let stranger = UserKey::generate();
+        let alice = agent(&user, "alice");
+        let bob = agent(&user, "bob");
+        let env = publish_envelope(&alice, bob.fingerprint());
+        let false_carrier_root = DeliveryProvenance::Direct {
+            carrier: AuthenticatedPeer::new(stranger.fingerprint(), alice.fingerprint()),
+        };
+
+        rejection_does_not_poison_replay_state(
+            env.clone(),
+            env,
+            (false_carrier_root, user.fingerprint(), bob.fingerprint()),
+            (direct(&alice), user.fingerprint(), bob.fingerprint()),
+            |err| assert!(matches!(err, BusError::CarrierUserMismatch { .. })),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn stranger_root_is_rejected_by_local_same_user_policy() {
+        let local_user = UserKey::generate();
+        let stranger_user = UserKey::generate();
+        let stranger = agent(&stranger_user, "stranger");
+        let recipient = agent(&stranger_user, "recipient");
+        let env = publish_envelope(&stranger, recipient.fingerprint());
+
+        rejection_does_not_poison_replay_state(
+            env.clone(),
+            env,
+            (
+                direct(&stranger),
+                local_user.fingerprint(),
+                recipient.fingerprint(),
+            ),
+            (
+                direct(&stranger),
+                stranger_user.fingerprint(),
+                recipient.fingerprint(),
+            ),
+            |err| assert!(matches!(err, BusError::ForeignPeer { .. })),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn bad_signature_is_rejected_before_replay_state() {
+        let user = UserKey::generate();
+        let alice = agent(&user, "alice");
+        let bob = agent(&user, "bob");
+        let env = publish_envelope(&alice, bob.fingerprint());
+        let mut bad = env.clone();
+        bad.recipient = Recipient::Direct {
+            agent_fp: Fingerprint([0x5a; 32]),
+        };
+
+        rejection_does_not_poison_replay_state(
+            bad,
+            env,
+            (direct(&alice), user.fingerprint(), bob.fingerprint()),
+            (direct(&alice), user.fingerprint(), bob.fingerprint()),
+            |err| assert!(matches!(err, BusError::Core(MeshError::BadSignature))),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cid_mismatch_is_rejected_before_replay_state() {
+        let user = UserKey::generate();
+        let alice = agent(&user, "alice");
+        let bob = agent(&user, "bob");
+        let env = publish_envelope(&alice, bob.fingerprint());
+        let mut bad = env.clone();
+        bad.payload[0] ^= 0xff;
+
+        rejection_does_not_poison_replay_state(
+            bad,
+            env,
+            (direct(&alice), user.fingerprint(), bob.fingerprint()),
+            (direct(&alice), user.fingerprint(), bob.fingerprint()),
+            |err| {
+                assert!(matches!(
+                    err,
+                    BusError::Core(MeshError::MalformedEnvelope(_))
+                ));
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn direct_recipient_must_name_the_local_agent() {
+        let user = UserKey::generate();
+        let alice = agent(&user, "alice");
+        let bob = agent(&user, "bob");
+        let charlie = agent(&user, "charlie");
+        let env = publish_envelope(&alice, charlie.fingerprint());
+
+        rejection_does_not_poison_replay_state(
+            env.clone(),
+            env,
+            (direct(&alice), user.fingerprint(), bob.fingerprint()),
+            (direct(&alice), user.fingerprint(), charlie.fingerprint()),
+            |err| assert!(matches!(err, BusError::WrongRecipient { .. })),
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn replay_nonce_is_rejected() {
         let user = UserKey::generate();
         let alice = agent(&user, "alice");
@@ -428,8 +706,14 @@ mod tests {
         let env = envelope(&alice, bob_fp, 1, &msg);
 
         let inbox = Inbox::new();
-        inbox.on_envelope(env.clone()).await.expect("first");
-        let err = inbox.on_envelope(env).await.unwrap_err();
+        inbox
+            .on_envelope(env.clone(), direct(&alice), user.fingerprint(), bob_fp)
+            .await
+            .expect("first");
+        let err = inbox
+            .on_envelope(env, direct(&alice), user.fingerprint(), bob_fp)
+            .await
+            .unwrap_err();
         assert!(matches!(err, BusError::Replay));
     }
 
@@ -444,11 +728,21 @@ mod tests {
         };
         let inbox = Inbox::new();
         inbox
-            .on_envelope(envelope(&alice, bob_fp, 5, &msg))
+            .on_envelope(
+                envelope(&alice, bob_fp, 5, &msg),
+                direct(&alice),
+                user.fingerprint(),
+                bob_fp,
+            )
             .await
             .unwrap();
         let err = inbox
-            .on_envelope(envelope(&alice, bob_fp, 4, &msg))
+            .on_envelope(
+                envelope(&alice, bob_fp, 4, &msg),
+                direct(&alice),
+                user.fingerprint(),
+                bob_fp,
+            )
             .await
             .unwrap_err();
         match err {
@@ -481,7 +775,7 @@ mod tests {
         };
         let env = envelope(&alice, bob_fp, 1, &req);
         let out = inbox
-            .on_envelope(env)
+            .on_envelope(env, direct(&alice), user.fingerprint(), bob_fp)
             .await
             .unwrap()
             .expect("reply produced");
@@ -517,7 +811,12 @@ mod tests {
             body: b"ignored".to_vec(),
         };
         let out = inbox
-            .on_envelope(envelope(&alice, bob_fp, 1, &req))
+            .on_envelope(
+                envelope(&alice, bob_fp, 1, &req),
+                direct(&alice),
+                user.fingerprint(),
+                bob_fp,
+            )
             .await
             .unwrap()
             .expect("reply produced");
@@ -542,7 +841,12 @@ mod tests {
         };
         let inbox = Inbox::new();
         let out = inbox
-            .on_envelope(envelope(&alice, bob_fp, 1, &req))
+            .on_envelope(
+                envelope(&alice, bob_fp, 1, &req),
+                direct(&alice),
+                user.fingerprint(),
+                bob_fp,
+            )
             .await
             .unwrap();
         assert!(out.is_none());
@@ -564,7 +868,12 @@ mod tests {
             body: b"ok".to_vec(),
         };
         let out = inbox
-            .on_envelope(envelope(&alice, bob_fp, 1, &rep))
+            .on_envelope(
+                envelope(&alice, bob_fp, 1, &rep),
+                direct(&alice),
+                user.fingerprint(),
+                bob_fp,
+            )
             .await
             .unwrap();
         assert!(out.is_none());
@@ -584,7 +893,12 @@ mod tests {
         };
         // No waiter → still Ok(None); no error.
         let out = inbox
-            .on_envelope(envelope(&alice, bob_fp, 1, &rep))
+            .on_envelope(
+                envelope(&alice, bob_fp, 1, &rep),
+                direct(&alice),
+                user.fingerprint(),
+                bob_fp,
+            )
             .await
             .unwrap();
         assert!(out.is_none());
@@ -606,7 +920,12 @@ mod tests {
             body: b"hello".to_vec(),
         };
         inbox
-            .on_envelope(envelope(&alice, bob_fp, 1, &pub_msg))
+            .on_envelope(
+                envelope(&alice, bob_fp, 1, &pub_msg),
+                direct(&alice),
+                user.fingerprint(),
+                bob_fp,
+            )
             .await
             .unwrap();
         assert_eq!(rx1.recv().await.unwrap(), b"hello");
@@ -626,7 +945,12 @@ mod tests {
         let inbox = Inbox::new();
         // Doesn't error or panic — just silently dropped.
         inbox
-            .on_envelope(envelope(&alice, bob_fp, 1, &pub_msg))
+            .on_envelope(
+                envelope(&alice, bob_fp, 1, &pub_msg),
+                direct(&alice),
+                user.fingerprint(),
+                bob_fp,
+            )
             .await
             .unwrap();
     }

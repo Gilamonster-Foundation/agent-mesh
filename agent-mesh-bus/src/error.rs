@@ -51,6 +51,64 @@ pub enum BusError {
         actual: u64,
     },
 
+    /// The caller supplied a local user identity that did not issue the local
+    /// agent's verified certificate chain.
+    #[error(
+        "local identity mismatch: supplied user {supplied_user_fp} does not match certified user {certified_user_fp}"
+    )]
+    LocalIdentityMismatch {
+        /// Fingerprint of the explicitly supplied user key.
+        supplied_user_fp: String,
+        /// Verified user root from the local agent certificate.
+        certified_user_fp: String,
+    },
+
+    /// The transport supplied no authenticated peer for an inbound delivery.
+    #[error("inbound delivery has no authenticated carrier")]
+    UnboundDelivery,
+
+    /// A direct delivery arrived over a carrier session authenticated as a
+    /// different agent from the envelope's original signer.
+    #[error(
+        "direct-delivery carrier agent {carrier_agent_fp} does not match envelope signer {signer_agent_fp}"
+    )]
+    CarrierAgentMismatch {
+        /// Transport-authenticated carrier agent fingerprint.
+        carrier_agent_fp: String,
+        /// Cryptographically verified envelope signer fingerprint.
+        signer_agent_fp: String,
+    },
+
+    /// A direct delivery's carrier and original signer root at different users.
+    #[error(
+        "direct-delivery carrier user {carrier_user_fp} does not match envelope signer user {signer_user_fp}"
+    )]
+    CarrierUserMismatch {
+        /// Transport-authenticated carrier user fingerprint.
+        carrier_user_fp: String,
+        /// Cryptographically verified envelope signer user fingerprint.
+        signer_user_fp: String,
+    },
+
+    /// A correctly carrier-bound peer belongs to a different user root from
+    /// the local bus, violating the current same-user policy.
+    #[error("peer user {peer_user_fp} does not match local user {local_user_fp}")]
+    ForeignPeer {
+        /// Verified peer user fingerprint.
+        peer_user_fp: String,
+        /// Local bus user fingerprint.
+        local_user_fp: String,
+    },
+
+    /// A direct envelope was signed for a different local agent.
+    #[error("direct envelope recipient {recipient_agent_fp} does not match local agent {local_agent_fp}")]
+    WrongRecipient {
+        /// Agent fingerprint named by `Recipient::Direct`.
+        recipient_agent_fp: String,
+        /// Agent fingerprint of the receiving bus.
+        local_agent_fp: String,
+    },
+
     /// Anything bubbling up from the transport layer (handshake, dial,
     /// envelope I/O, auto-team rejection).
     #[error("transport: {0}")]
@@ -90,6 +148,39 @@ mod tests {
         assert!(msg.contains("abc123"));
         assert!(msg.contains('5'));
         assert!(msg.contains('3'));
+    }
+
+    #[test]
+    fn admission_errors_name_carrier_signer_and_local_roles() {
+        let unbound = BusError::UnboundDelivery;
+        assert!(format!("{unbound}").contains("authenticated carrier"));
+
+        let agent = BusError::CarrierAgentMismatch {
+            carrier_agent_fp: "carrier".into(),
+            signer_agent_fp: "signer".into(),
+        };
+        let msg = format!("{agent}");
+        assert!(msg.contains("carrier"));
+        assert!(msg.contains("signer"));
+
+        let foreign = BusError::ForeignPeer {
+            peer_user_fp: "peer".into(),
+            local_user_fp: "local".into(),
+        };
+        let msg = format!("{foreign}");
+        assert!(msg.contains("peer"));
+        assert!(msg.contains("local"));
+    }
+
+    #[test]
+    fn local_identity_mismatch_names_both_roots() {
+        let error = BusError::LocalIdentityMismatch {
+            supplied_user_fp: "supplied".into(),
+            certified_user_fp: "certified".into(),
+        };
+        let message = error.to_string();
+        assert!(message.contains("supplied"));
+        assert!(message.contains("certified"));
     }
 
     #[test]

@@ -9,17 +9,17 @@
 //! whole transport stack (the flaky `request_reply_roundtrip` used real mDNS +
 //! iroh and timed out on hosted CI runners).
 //!
-//! `Bus` owns the *policy* (sign + sequence the envelope, register the reply
-//! waiter, run the inbox); the transport owns only *delivery* (get this
-//! envelope to that peer; hand me the next inbound one + a route to reply on).
-//! The reply route is an opaque [`ReplyRoute`] the transport alone interprets
-//! (iroh: the dial-back key + address; in-memory: the sender's fingerprint).
+//! `Bus` owns the *policy* (sign + sequence the envelope, verify and bind the
+//! inbound signer, register the reply waiter, run the inbox); the transport
+//! owns delivery and must report the peer its session authenticated. The reply
+//! route is an opaque [`ReplyRoute`] the transport alone interprets (iroh: the
+//! dial-back key + address; in-memory: the sender's fingerprint).
 
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use agent_mesh_protocol::{Fingerprint, SignedEnvelope};
+use agent_mesh_protocol::{AgentKey, Fingerprint, SignedEnvelope};
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
@@ -33,11 +33,61 @@ use crate::{BusError, Result};
 /// [`Transport::reply`].
 pub type ReplyRoute = Arc<dyn Any + Send + Sync>;
 
-/// One inbound envelope plus the route to reply to its sender.
+/// The peer identity authenticated by the transport carrying an envelope.
+///
+/// This is the **carrier**, not necessarily the original envelope signer. A
+/// direct delivery requires them to be identical; a future relay design can
+/// add a separate provenance variant without silently treating a relay as the
+/// signer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthenticatedPeer {
+    /// User root authenticated for the carrier session.
+    pub user_fp: Fingerprint,
+    /// Agent identity authenticated for the carrier session.
+    pub agent_fp: Fingerprint,
+}
+
+impl AuthenticatedPeer {
+    /// Record the user + agent identity a transport authenticated.
+    ///
+    /// Implementors of [`Transport`] must construct this only from their
+    /// authenticated session state, never from an envelope's claimed signer.
+    #[must_use]
+    pub fn new(user_fp: Fingerprint, agent_fp: Fingerprint) -> Self {
+        Self { user_fp, agent_fp }
+    }
+
+    fn for_agent(agent: &AgentKey) -> Self {
+        Self::new(agent.cert().user_fingerprint(), agent.fingerprint())
+    }
+}
+
+/// How a transport says an envelope reached the bus admission boundary.
+///
+/// Missing authentication is represented explicitly and rejected by the bus.
+/// Only direct delivery exists today. A future authorized-relay variant must
+/// keep its authenticated carrier separate from the envelope's original
+/// signer and define its own admission policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeliveryProvenance {
+    /// The transport directly authenticated `carrier` for this delivery.
+    Direct {
+        /// Peer authenticated by the transport session.
+        carrier: AuthenticatedPeer,
+    },
+    /// No peer identity was bound to the delivery.
+    Unbound,
+}
+
+/// One inbound envelope, its authenticated delivery provenance, and the route
+/// to reply to its sender.
 pub struct Inbound {
-    /// The signed envelope as it arrived (still to be verified by the inbox —
-    /// the transport does not interpret payloads).
+    /// The signed envelope as it arrived. The common bus boundary verifies it
+    /// independently of any transport-specific checks.
     pub envelope: SignedEnvelope,
+    /// Typed evidence about the transport-authenticated carrier.
+    pub provenance: DeliveryProvenance,
     /// Opaque route to reply back to the sender (see [`ReplyRoute`]).
     pub reply_route: ReplyRoute,
 }
@@ -55,7 +105,9 @@ pub trait Transport: Send + Sync {
     /// (dial-back) and falling back to resolving `fp`.
     async fn reply(&self, fp: Fingerprint, route: &ReplyRoute, env: SignedEnvelope) -> Result<()>;
 
-    /// The next inbound envelope, or `None` when the transport is closed.
+    /// The next inbound envelope with typed carrier provenance, or `None` when
+    /// the transport is closed. A transport without a peer binding must report
+    /// [`DeliveryProvenance::Unbound`], which the bus rejects by default.
     async fn recv(&self) -> Option<Inbound>;
 
     /// Local port peers use to reach this bus (`0` when not socket-backed).
@@ -83,11 +135,12 @@ impl MeshNet {
         Arc::new(Self::default())
     }
 
-    /// Create a transport for the agent identified by `me`, registered on this
-    /// switchboard so peers can `send_to(me)`.
-    pub fn transport_for(self: &Arc<Self>, me: Fingerprint) -> InMemoryTransport {
+    /// Create a transport for `agent`, deriving its fixed carrier identity from
+    /// the agent's certified key and registering it on this switchboard.
+    pub fn transport_for(self: &Arc<Self>, agent: &AgentKey) -> InMemoryTransport {
+        let me = AuthenticatedPeer::for_agent(agent);
         let (tx, rx) = mpsc::unbounded_channel();
-        self.peers.lock().unwrap().insert(me, tx);
+        self.peers.lock().unwrap().insert(me.agent_fp, tx);
         InMemoryTransport {
             me,
             net: Arc::clone(self),
@@ -115,7 +168,7 @@ impl MeshNet {
 
 /// One agent's leg of a [`MeshNet`] — a fully in-memory [`Transport`].
 pub struct InMemoryTransport {
-    me: Fingerprint,
+    me: AuthenticatedPeer,
     net: Arc<MeshNet>,
     inbound: AsyncMutex<mpsc::UnboundedReceiver<Inbound>>,
 }
@@ -128,7 +181,8 @@ impl InMemoryTransport {
             to,
             Inbound {
                 envelope: env,
-                reply_route: Arc::new(self.me),
+                provenance: DeliveryProvenance::Direct { carrier: self.me },
+                reply_route: Arc::new(self.me.agent_fp),
             },
         )
     }
@@ -161,7 +215,7 @@ impl Transport for InMemoryTransport {
     }
 
     async fn close(&self) {
-        self.net.remove(&self.me);
+        self.net.remove(&self.me.agent_fp);
     }
 }
 
@@ -195,12 +249,19 @@ mod tests {
         let b = agent(&user, "b");
         let (a_fp, b_fp) = (a.fingerprint(), b.fingerprint());
         let net = MeshNet::new();
-        let ta = net.transport_for(a_fp);
-        let tb = net.transport_for(b_fp);
+        let ta = net.transport_for(&a);
+        let tb = net.transport_for(&b);
 
         ta.send_to(b_fp, envelope(&a, b_fp, b"hi")).await.unwrap();
         let inbound = tb.recv().await.expect("b receives");
         assert_eq!(inbound.envelope.sender_agent_fp(), a_fp);
+        assert_eq!(
+            inbound.provenance,
+            DeliveryProvenance::Direct {
+                carrier: AuthenticatedPeer::new(user.fingerprint(), a_fp),
+            },
+            "the in-memory carrier evidence must describe the sending leg"
+        );
 
         // b replies over the inbound route; it reaches a.
         tb.reply(a_fp, &inbound.reply_route, envelope(&b, a_fp, b"yo"))
@@ -215,10 +276,10 @@ mod tests {
         let user = UserKey::generate();
         let a = agent(&user, "a");
         let b = agent(&user, "b");
-        let (a_fp, b_fp) = (a.fingerprint(), b.fingerprint());
+        let b_fp = b.fingerprint();
         let net = MeshNet::new();
-        let ta = net.transport_for(a_fp);
-        let tb = net.transport_for(b_fp);
+        let ta = net.transport_for(&a);
+        let tb = net.transport_for(&b);
 
         let peer = PeerEndpoint::new(b.public_bytes(), "127.0.0.1:1".parse().unwrap());
         ta.send_to_endpoint(&peer, envelope(&a, b_fp, b"hi"))
@@ -231,9 +292,8 @@ mod tests {
     async fn send_to_unregistered_peer_is_unreachable() {
         let user = UserKey::generate();
         let a = agent(&user, "a");
-        let a_fp = a.fingerprint();
         let net = MeshNet::new();
-        let ta = net.transport_for(a_fp);
+        let ta = net.transport_for(&a);
         let phantom = Fingerprint([0x11u8; 32]);
         match ta.send_to(phantom, envelope(&a, phantom, b"x")).await {
             Err(BusError::Unreachable(_)) => {}
@@ -247,10 +307,10 @@ mod tests {
         let user = UserKey::generate();
         let a = agent(&user, "a");
         let b = agent(&user, "b");
-        let (a_fp, b_fp) = (a.fingerprint(), b.fingerprint());
+        let b_fp = b.fingerprint();
         let net = MeshNet::new();
-        let ta = net.transport_for(a_fp);
-        let tb = net.transport_for(b_fp);
+        let ta = net.transport_for(&a);
+        let tb = net.transport_for(&b);
         tb.close().await;
         match ta.send_to(b_fp, envelope(&a, b_fp, b"x")).await {
             Err(BusError::Unreachable(_)) => {}

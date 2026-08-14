@@ -5,11 +5,18 @@ are namespaced to the issuing user's fingerprint, so two unrelated users on
 the same LAN can never collide, and a replay defense layer rejects duplicate
 nonces and out-of-order sequence numbers from known peers.
 
+Inbound delivery is fail-closed at one transport-neutral boundary: every
+envelope's certificate, payload CID, and signature are verified before replay
+state changes, and direct deliveries must bind the original envelope signer to
+the transport-authenticated carrier and the local user's certified root.
+
 Key types:
 
 - `Bus` — the high-level pub/sub + request/reply surface
 - `Topic` — pub/sub names scoped to the issuing user's fingerprint
 - `Inbox` / `BusMessage` — application-level message dispatch
+- `AuthenticatedPeer` / `DeliveryProvenance` — typed carrier evidence required
+  for inbound admission
 - `replay::NonceCache` / `replay::SequenceTracker` — replay defense
 
 Part of [agent-mesh](https://github.com/Gilamonster-Foundation/agent-mesh), cryptographic peer-to-peer agent coordination — no broker, no centralized configuration.
