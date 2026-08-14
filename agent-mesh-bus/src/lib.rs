@@ -31,4 +31,7 @@ pub use error::{BusError, Result};
 pub use inbox::{BusMessage, Inbox, OutgoingReply, RequestContext};
 pub use reply::CorrelationId;
 pub use topic::Topic;
-pub use transport::{InMemoryTransport, Inbound, MeshNet, ReplyRoute, Transport};
+pub use transport::{
+    AuthenticatedPeer, DeliveryProvenance, InMemoryTransport, Inbound, MeshNet, ReplyRoute,
+    Transport,
+};
