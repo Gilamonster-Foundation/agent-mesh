@@ -114,6 +114,13 @@ pub enum BusError {
     #[error("transport: {0}")]
     Transport(#[from] agent_mesh_transport::TransportError),
 
+    /// A non-Iroh [`crate::Transport`] backend failed. The backend keeps its
+    /// structured error at its public API boundary; the bus preserves an
+    /// actionable rendering without depending on every optional carrier
+    /// crate (which would create dependency cycles).
+    #[error("transport backend: {0}")]
+    TransportBackend(String),
+
     /// Anything bubbling up from agent-mesh-protocol (cert verify,
     /// envelope decode, etc.).
     #[error("core: {0}")]
@@ -194,6 +201,14 @@ mod tests {
         let t = agent_mesh_transport::TransportError::Iroh("bind failed".into());
         let e: BusError = t.into();
         assert!(matches!(e, BusError::Transport(_)));
+    }
+
+    #[test]
+    fn backend_error_preserves_actionable_context() {
+        let error = BusError::TransportBackend("ssh exited 255: permission denied".into());
+        let rendered = error.to_string();
+        assert!(rendered.contains("ssh exited 255"));
+        assert!(rendered.contains("permission denied"));
     }
 
     #[test]

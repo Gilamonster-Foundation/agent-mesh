@@ -29,6 +29,7 @@ Libraries:
 - `agent-mesh-protocol` — identity types, signed envelopes.
 - `agent-mesh-discovery` — LAN discovery via mDNS.
 - `agent-mesh-transport` — authenticated QUIC transport via iroh.
+- `agent-mesh-transport-ssh` — AgentKey-authenticated sessions over OpenSSH.
 - `agent-mesh-bus` — high-level pub/sub + request/reply.
 - `agent-mesh-py` — Python bindings (PyPI package `agent-mesh`).
 
@@ -149,6 +150,15 @@ amesh send <fp-from-terminal-A> --payload '{"hello":"world"}'
 If you point `amesh send` at a peer that belongs to a different
 user, the handshake closes the connection cleanly and both sides
 report `auto-team check failed: ...`.
+
+For networks reached through an SSH bastion, the optional
+`agent-mesh-transport-ssh` crate treats OpenSSH as a byte-stream carrier and
+runs a separate, mutually authenticated AgentKey session inside it. The inner
+session proves live possession, binds records to a fresh transcript, and is the
+only source of `AuthenticatedPeer` provenance; neither the SSH account nor a
+`SignedEnvelope` is treated as carrier identity. See the
+[SSH transport decision record](docs/decisions/ssh_transport.md) for the trust
+model and its explicit relay limitations.
 
 ## Python Usage
 

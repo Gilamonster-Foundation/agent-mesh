@@ -146,6 +146,7 @@ jobs:
               agent-mesh-discovery \
               agent-mesh-transport \
               agent-mesh-bus \
+              agent-mesh-transport-ssh \
               agent-mesh-cli; do
             echo "::group::publishing $crate"
             cargo publish -p "$crate" --token "$CARGO_REGISTRY_TOKEN" || {
