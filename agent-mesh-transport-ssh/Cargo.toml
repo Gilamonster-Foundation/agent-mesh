@@ -1,0 +1,33 @@
+[package]
+name = "agent-mesh-transport-ssh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "AgentKey-authenticated Agent Mesh sessions carried over OpenSSH."
+readme = "README.md"
+
+[dependencies]
+agent-mesh-bus.workspace = true
+agent-mesh-protocol.workspace = true
+
+tokio = { workspace = true }
+async-trait.workspace = true
+
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+blake3.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

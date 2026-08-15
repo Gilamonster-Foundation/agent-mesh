@@ -8,6 +8,7 @@ members = [
     "agent-mesh-py",
     "agent-mesh-ratchet",
     "agent-mesh-transport",
+    "agent-mesh-transport-ssh",
     "tests/common",
 ]
 
@@ -86,6 +87,7 @@ agent-mesh-bus = { path = "agent-mesh-bus", version = "=0.6.4" }
 agent-mesh-discovery = { path = "agent-mesh-discovery", version = "=0.6.4" }
 agent-mesh-ratchet = { path = "agent-mesh-ratchet", version = "=0.6.4" }
 agent-mesh-transport = { path = "agent-mesh-transport", version = "=0.6.4" }
+agent-mesh-transport-ssh = { path = "agent-mesh-transport-ssh", version = "=0.6.4" }
 tests-common = { path = "tests/common" }
 
 # Test deps
