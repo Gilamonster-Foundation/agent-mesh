@@ -1271,3 +1271,188 @@ Insert before stage 3, and adjust:
 - **Engagement, not code**: comment on A2A #2054 (AIP) and #1672/#1829 offering
   the **enforcement-witness** angle specifically. That is the contribution nobody
   else in those threads has.
+
+---
+
+## 18. A2A standardization trajectory — evidence
+
+*Third research pass (2026-08-18), adversarially verified: 25 candidate claims,
+3-vote refutation panel each, **11 confirmed / 14 refuted**. Confidence levels
+below are the panel's, not the author's. This section answers §14's open
+question — "should we be in the standards fight at all?" — with primary evidence,
+and it changes the answer from a hunch to a decision.*
+
+### 18.1 The pipeline has never produced an official extension
+
+**Confidence: high (3-0).** The `a2aproject` org holds exactly **17 public
+repos**. Only two match the extension/binding naming convention, and both still
+carry the `experimental-` prefix:
+
+- `experimental-ext-oid4vp-auth` — created **2025-05-14 06:43:30Z**
+- `experimental-cpb-slimrpc` — created **2025-05-14 06:46:45Z**
+
+Created three minutes apart on the same day — a single seeding event, not
+organic pipeline flow. Under A2A's own governance the rename
+`experimental-ext-*` → `ext-*` **is** the graduation marker, so the absence of
+any bare `ext-*`/`cpb-*` repo is direct proof of **zero graduations**. Roughly
+three months of observation with n=0 completions.
+
+> Methodological note carried from the verification pass: the Jul/Aug 2026 dates
+> shown in the GitHub org listing are `pushed_at`, **not** `created_at`. Anyone
+> reading the org page casually will get the age of these repos wrong.
+
+### 18.2 The gate is a named maintainer sponsor — not merit, not consensus
+
+**Confidence: high (3-0).** Two independent, non-hedged statements in
+`docs/topics/extension-and-binding-governance.md`:
+
+> "An experimental repository can **ONLY** be created with sponsorship from an
+> A2A Maintainer."
+> "…2. **Repository Creation:** The sponsoring Maintainer creates the
+> `experimental-ext-*` or `experimental-cpb-*` repository under `a2aproject`."
+
+The proposer never creates the repo. All **seven** issues carrying the
+`extension-proposal` label (#1387, #1439, #1441, #1786, #1796, #1864, #1887) are
+open with no corresponding repo. #1786 (CTEF) asked for sponsorship explicitly on
+2026-04-25 and had still not received it as of 2026-08-12.
+
+### 18.3 Comment volume is not a signal — it is close to an anti-signal
+
+**Confidence: high (3-0 / 2-1 merged).** Across every identity-adjacent
+proposal checked, comments from `MEMBER`/`OWNER`/`COLLABORATOR`/`CONTRIBUTOR`
+accounts total **zero**:
+
+| Issue | Comments | Insider comments |
+|---|---:|---:|
+| #1672 Agent Identity Verification | 657 | **0** |
+| #1786 Cryptographic Agent Identity (CTEF) | 236 | **0** |
+| #2028 actor-chain delegation | 22 | **0** |
+| #2043 DANE-anchored identity | 12 | **0** |
+| #1140 content integrity | 10 | **0** |
+| #1497 identity & trust framework | 9 | **0** |
+| #2096 `jku` trust-root bug | 2 | **0** |
+| #2054 AIP partners list | 1 | **0** |
+
+All 16 commenters on #1786 were cross-checked against `MAINTAINERS.md` **and**
+`orgs/a2aproject/public_members` — zero matches. Zero reactions on the issue;
+the timeline shows no `labeled`/`assigned`/`milestoned` events by any actor.
+Nor does enterprise weight help: **#1796** (telecom) drew in-thread support from
+a Telecom Italia senior architect and a Vodafone Group engineer, behind a
+Huawei-authored proposal with a shipped open-source reference implementation
+(A2A-T) — and still produced no repo. It progressed **outside** the org instead.
+
+One qualification the panel insisted on: Sam Betts (Cisco) *did* apply the
+`extension-proposal` label to #1796 on 2026-06-25, which requires triage rights.
+So maintainer **triage** happens; maintainer **sponsorship** does not. Governance
+treats these as distinct, and so should we.
+
+### 18.4 What the two successful proposals actually looked like
+
+**Confidence: medium** (n=2; correlation, and the causal direction is not
+established by the public record — a sponsor may have been recruited privately
+and only then commented).
+
+| | #1723 SLIMRPC | #1463 OID4VP |
+|---|---|---|
+| Comments | **3** | few |
+| Insiders in thread | `msampathkumar` (MEMBER), `Tehsmash` (CONTRIBUTOR, Cisco) | `darrelmiller` (Microsoft TSC seat), `amye` (Linux Foundation staff) |
+| Outcome | closed 2026-05-14, same day the repo was created | closed 2026-06-23 |
+| Elapsed | ~5 weeks | — |
+
+The shape is unmistakable: **quiet threads with an insider in them produce
+repos; loud threads without one do not.**
+
+### 18.5 The TSC
+
+**Confidence: high (3-0).** Eight seats, **all vendor-appointed**, no individual
+or community-elected seats:
+
+| Org | Seat |
+|---|---|
+| Google | Todd Segal (`@ToddSegal`) |
+| Microsoft | Darrel Miller (`@darrelmiller`) |
+| Cisco | Luca Muscariello (`@muscariello`) |
+| AWS | Abhimanyu Siwach (`@siwachabhi`) |
+| Salesforce | Stephen Petschulat (`@spetschulatSFDC`) |
+| ServiceNow | Sugandh Rakha (`@sugandhrakha`) |
+| SAP | Sivakumar N. (`@SivaNSAP`) |
+| IBM | Stefano Maestri (`@maeste`) |
+
+New organizations join only by majority TSC vote. "Steady state" composition is
+deferred to 18 months after inception (2025-06-23) — i.e. **~2026-12-23**, still
+future. Graduation requires a TSC vote at 50% quorum and majority of those
+present: with 8 seats, **4 present, 3 votes carry**. Corroborated mechanically by
+`.gitvote.yml` (`allowed_voters.teams: [a2a-tsc]`, `pass_threshold: 51`).
+Asynchronous voting is *harder* than in-meeting: an electronic vote without a
+meeting needs a majority of **all** members.
+
+**This procedure appears never to have been exercised.** With zero graduated
+repos there is no recorded instance of the vote running.
+
+### 18.6 `MAINTAINERS.md` cannot tell you who can sponsor you
+
+**Confidence: medium (2-1; one closely-related sub-claim about the spec repo was
+separately refuted 0-3, an internal inconsistency the panel flagged — re-verify
+before relying on that detail).**
+
+`MAINTAINERS.md` is a **1058-byte** personnel roster: bare GitHub handles under
+`role:maintain` / `role:admin` for six SDK and sample repos. `grep` for
+`tsc|steering|sponsor|extension|graduat|vote|approv|process|charter` returns
+**zero matches**. Only 3 of the 8 TSC members appear in it at all, none labeled
+as TSC. `CONTRIBUTING.md` likewise has zero hits for
+`sponsor|extension|graduat|tsc|steering|experimental`. The extension lifecycle
+lives *solely* in `docs/topics/extension-and-binding-governance.md`.
+
+Practical consequence: a newcomer following the obvious documents will not
+discover who is empowered to sponsor them.
+
+### 18.7 What was refuted
+
+Reported for honesty — 14 of 25 candidate claims did not survive, including
+several that would have been convenient:
+
+- *"A2A deliberately routes identity to external SDOs (IETF/W3C/OIDF)."*
+  **Refuted 0-3.** No primary source states such a policy, and no dedicated A2A
+  identity/security working group surfaced. The OID4VP repo is a **single
+  observation** consistent with several explanations — including simple sponsor
+  availability (a Microsoft TSC member with existing OIDF involvement).
+- *"Cisco's founding-member status is the observed path to landing an
+  extension."* **Refuted 0-3.** Cisco's footprint is real (Sam Betts authored the
+  governance doc via PR #1619; Aron Kerekes updated it via PR #2015; Tehsmash
+  triaged #1796 and participated in #1723), but two datapoints cannot separate
+  "Cisco sponsors extensions" from "Cisco **staffs** the extension process."
+- *"Multiple cross-validated reference implementations materially help."*
+  **Refuted 0-3.**
+- *"The roadmap's silence on identity proves no identity proposal was elevated."*
+  **Refuted 0-3.**
+- *"Time-in-queue is a meaningful metric."* **Refuted 0-3** — with n=0
+  graduations there is no denominator.
+
+### 18.8 What this changes
+
+1. **Do not pursue an `a2aproject` extension repo as a near-term goal.** The
+   pipeline has produced zero graduations, the vote has never run, and steady-state
+   governance is still four months out. Targeting it would be planning against a
+   process with no observed completions.
+2. **Governance explicitly blesses the alternative.** Same document: *"Anyone may
+   develop and publish extensions or custom protocol bindings independently. The
+   tiers and lifecycle described here apply specifically to those hosted under the
+   `a2aproject` GitHub organization."* Publishing `mesh-provenance/v1` under our
+   own URI namespace is not a consolation prize — it is the documented path, and
+   it is what the telecom effort (A2A-T) did after its proposal stalled.
+3. **Stop treating issue threads as advocacy channels.** #1672 has 657 comments
+   and zero insider replies. Adding a 658th is not a strategy. Comment only where
+   we have a *specific technical correction* (e.g. #2096, where our finding is a
+   verifiable spec bug with proposed normative text), not to build support.
+4. **The sponsorship path runs through code, not threads — and it points at one
+   place.** Cisco/AGNTCY authors `a2a-rs`, staffs the extension-governance
+   process, and ships a competing identity framework (Agent Badge). Our §14
+   upstream SDK PRs (extension negotiation, card JWS verification, interceptor
+   body access) are therefore not merely good citizenship: **they are the only
+   credible way to become known to the people who can sponsor us**, and they are
+   valuable to us regardless of whether sponsorship ever materialises. That is a
+   strictly better bet than a proposal issue.
+5. **Revised §14 verdict** for the row "Attenuated-authority delegation with an
+   enforcement witness": *private extension under our own namespace, published
+   spec, working implementation, no sponsorship request in the near term.*
+   Revisit after 2026-12-23 when TSC steady-state composition is settled.
