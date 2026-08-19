@@ -940,15 +940,49 @@ mod tests {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
         use std::process::Command as StdCommand;
+        use std::sync::atomic::{AtomicBool, Ordering};
         use tempfile::TempDir;
 
+        /// Materialize an executable fake OpenSSH client in a private
+        /// temporary directory.
+        ///
+        /// The script bytes are written to a staging file that is never
+        /// executed, and a child process copies them into the path this test
+        /// binary later `exec`s. That indirection is load-bearing.
+        ///
+        /// Writing the executable in-process — `fs::write(&executable, ..)` —
+        /// is racy under libtest's thread-per-test model. glibc's
+        /// `posix_spawn` issues `clone3` *without* `CLONE_FILES`, so a
+        /// sibling test thread's spawn duplicates this process's whole
+        /// descriptor table. The duplicate keeps the write descriptor's
+        /// open-file-description alive past our own `close()`, the inode's
+        /// `i_writecount` stays non-zero, and our `execve` is refused with
+        /// `ETXTBSY` ("Text file busy"). `O_CLOEXEC` does not help: it is
+        /// honored at the forked child's `exec`, not at `fork`.
+        ///
+        /// Delegating the write removes the precondition rather than
+        /// retrying around it. `status()` returns only once the copier has
+        /// exited, and `do_exit()` runs `exit_files()` and then
+        /// `exit_task_work()` — which flushes the deferred `__fput` — before
+        /// `exit_notify()` releases our wait. The write access is therefore
+        /// released before this function returns, and no descriptor for the
+        /// executable ever existed in this process to be inherited.
         fn fake_ssh(body: &str) -> (TempDir, PathBuf) {
             let directory = tempfile::tempdir().expect("tempdir");
+            let staged = directory.path().join("fake-ssh.staged");
             let executable = directory.path().join("fake-ssh");
-            fs::write(&executable, format!("#!/bin/sh\n{body}\n")).expect("write script");
-            let mut permissions = fs::metadata(&executable).expect("metadata").permissions();
-            permissions.set_mode(0o700);
-            fs::set_permissions(&executable, permissions).expect("make executable");
+            fs::write(&staged, format!("#!/bin/sh\n{body}\n")).expect("write script");
+            let copied = StdCommand::new("/bin/cp")
+                .arg(&staged)
+                .arg(&executable)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("copy script into place");
+            assert!(copied.success(), "cp fake-ssh exited {copied:?}");
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+                .expect("make executable");
             (directory, executable)
         }
 
@@ -1066,6 +1100,87 @@ mod tests {
                 time::sleep(Duration::from_millis(20)).await;
             }
             panic!("dropped carrier child {pid} was not killed and reaped");
+        }
+
+        /// Regression coverage for the `ETXTBSY` spawn race that the previous
+        /// in-process [`fake_ssh`] created; that function's comment carries
+        /// the mechanism.
+        ///
+        /// This test is *probabilistic by necessity*, and says so out loud.
+        /// The race window is the `open`/`close` pair inside the write
+        /// itself, so no safe-Rust test can schedule a sibling `fork` inside
+        /// it on demand. What it can do is make the window overwhelmingly
+        /// likely to be hit — writer threads materializing fake clients while
+        /// forker threads churn `fork`+`exec` — and assert that not one spawn
+        /// is refused with `ETXTBSY`. Against the old helper this fails on
+        /// essentially every run; against the copy-into-place helper the
+        /// refusal is impossible by construction, so the test is stable.
+        ///
+        /// Only `ETXTBSY` is asserted on. A saturated machine may
+        /// legitimately refuse a `fork` with `EAGAIN`, and failing on that
+        /// would trade one flake for another.
+        #[test]
+        fn fake_clients_are_executable_under_concurrent_fork_pressure() {
+            const WRITER_THREADS: usize = 4;
+            const SCRIPTS_PER_WRITER: usize = 40;
+            const FORKER_THREADS: usize = 4;
+            // `ETXTBSY` is 26 on Linux and macOS. `ErrorKind::
+            // ExecutableFileBusy` would read better but needs Rust 1.83, and
+            // the workspace MSRV is 1.75.
+            const ETXTBSY: i32 = 26;
+
+            let stop = Arc::new(AtomicBool::new(false));
+            let forkers: Vec<_> = (0..FORKER_THREADS)
+                .map(|_| {
+                    let stop = Arc::clone(&stop);
+                    std::thread::spawn(move || {
+                        while !stop.load(Ordering::Relaxed) {
+                            let _ = StdCommand::new("/bin/true")
+                                .stdin(Stdio::null())
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .status();
+                        }
+                    })
+                })
+                .collect();
+
+            let writers: Vec<_> = (0..WRITER_THREADS)
+                .map(|_| {
+                    std::thread::spawn(|| {
+                        let mut refused = 0_usize;
+                        for _ in 0..SCRIPTS_PER_WRITER {
+                            let (_directory, executable) = fake_ssh("exit 0");
+                            let spawned = StdCommand::new(&executable)
+                                .stdin(Stdio::null())
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .status();
+                            if let Err(error) = spawned {
+                                if error.raw_os_error() == Some(ETXTBSY) {
+                                    refused += 1;
+                                }
+                            }
+                        }
+                        refused
+                    })
+                })
+                .collect();
+
+            let refused: usize = writers
+                .into_iter()
+                .map(|writer| writer.join().expect("writer thread"))
+                .sum();
+            stop.store(true, Ordering::Relaxed);
+            for forker in forkers {
+                forker.join().expect("forker thread");
+            }
+
+            let attempted = WRITER_THREADS * SCRIPTS_PER_WRITER;
+            assert_eq!(
+                refused, 0,
+                "{refused} of {attempted} fake clients were refused with ETXTBSY"
+            );
         }
     }
 }
