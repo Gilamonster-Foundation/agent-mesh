@@ -1,7 +1,7 @@
-# Agent Mesh × OpenRig — comparison and integration direction
+# Agent Mesh × OpenRig: what each is for
 
-**Status:** research + proposed direction. No implementation commitment.
-**Date:** 2026-09-23
+**Status:** research and a scoping decision. No integration commitment.
+**Date:** 2026-09-24
 **Baseline:** agent-mesh `main` `14c145a` (v0.6.4) ·
 [OpenRig](https://github.com/mvschwarz/openrig) `main` `c8fca9d` (v0.5.14)
 
@@ -9,143 +9,90 @@
 
 ## 1. Summary
 
-OpenRig is a local control plane for multi-agent coding: a TypeScript daemon
-(Hono + SQLite) that boots Claude Code, Codex and Pi into tmux panes from a
-YAML **RigSpec**, snapshots and restores them, and relays messages between
-them. Agent Mesh is an identity and transport layer. They sit at different
-layers and barely overlap.
+**OpenRig coordinates multiple agents.** It is a TypeScript daemon
+(Hono + SQLite) that boots Claude Code, Codex and Pi into tmux sessions from a
+YAML **RigSpec**, gives each a stable seat address, relays messages between
+seats, and snapshots and restores the whole team.
 
-The useful finding is where OpenRig stops. It already runs across hosts and
-already stamps a sender on every message. But its sender is a **self-asserted
-name**, its cross-host trust is delegated to whatever network it runs on, its
-bundles are checksummed but not signed, and its topology edges are drawn but
-not enforced. Each of those is a gap Agent Mesh already fills.
+**Agent Mesh is about the conversation, not the team.** It covers messaging,
+shared state and shared memory, and moving a conversation between harnesses,
+hosts and surfaces. The in-repo statements of that purpose:
 
-**Direction:** make Agent Mesh the trust substrate under OpenRig, attached at
-the four seams OpenRig already exposes (§4), as a sidecar rather than a fork.
+- [`floating_identity.md`](../decisions/floating_identity.md): "harnesses are
+  fungible substrate — containers for conversational context; the context is
+  the durable workload that floats over them."
+- [`session_streams.md`](../decisions/session_streams.md): long-lived
+  conversations over the bus. The founding use case is an operator's phone
+  driving an agent.
+- [`agent_mesh_store.md`](../decisions/agent_mesh_store.md): peer-to-peer
+  shared knowledge for many agents bound to one identity.
 
-## 2. What OpenRig is
+The two overlap in messaging between agents. They are otherwise distinct.
+
+## 2. Scoping decision
+
+Agent Mesh had been expected to grow into multi-agent coordination: seats,
+topologies, launch, and snapshot and restore. **It will not.** OpenRig already
+does that, has real users, and is Apache-2.0. We adopt it for coordination.
+
+Agent Mesh stays focused on its own purpose (§1). The features below may be
+useful to OpenRig's community, but each is **tested on our own rigs before
+anything is proposed upstream.** Nothing here has been offered to the OpenRig
+maintainers.
+
+## 3. What OpenRig is
 
 | Concept | What it is |
 |---|---|
 | RigSpec | YAML: pods → members (runtime, agent_ref, cwd, model), edges, culture file, startup files, compose services, continuity policy |
 | Seat | Stable role address `member@rig`; cross-host it becomes `member@rig@host` |
-| Runtime adapters | `claude-code`, `codex`, `pi`, `terminal`, `stub` (`packages/daemon/src/adapters/`) |
-| Messaging | `rig send` / `broadcast` / `chatroom` → daemon → text envelope injected into the recipient's tmux pane |
+| Runtime adapters | `claude-code`, `codex`, `pi`, `terminal` (`packages/daemon/src/adapters/`) |
+| Messaging | `rig send` / `broadcast` / `chatroom` → daemon → text envelope typed into the recipient's tmux pane |
 | Snapshot / restore | `rig down --snapshot`, `rig up`; restore reports per-seat *resumed / fresh / failed* |
 | RigBundle | Portable archive: spec + vendored agent specs + per-file SHA-256 manifest |
-| Cross-host | Host registry with `transport: ssh` (runs `rig` remotely over ssh) or `transport: http` (remote daemon, optional bearer token) |
-| Surfaces | CLI, TUI, React UI, MCP server (`rig_up`, `rig_ps`, `rig_send`, …) |
+| Cross-host | Host registry with `transport: ssh` (run `rig` remotely) or `transport: http` (remote daemon, optional bearer token) |
+| Surfaces | CLI, TUI, web UI, MCP server |
 
-A companion correction to earlier notes: OpenRig is **not** single-host. It
-has had a cross-host host registry since the 0.5 line.
+## 4. Where they differ
 
-## 3. Where the trust boundary actually is
-
-Each row quotes or cites OpenRig's own code or docs.
-
-| Concern | OpenRig today | Agent Mesh equivalent |
+| Concern | OpenRig | Agent Mesh |
 |---|---|---|
-| Sender identity | `OPENRIG_SESSION_NAME` env var → `X-OpenRig-Session` header; the daemon derives `From:` from it (`cli/src/sender-identity.ts`). A header-less send is delivered and labelled `<unknown sender>`. | `AgentKey` signed by `UserKey`; every frame is a `SignedEnvelope` with replay defence |
-| Cross-host relay | The relay re-stamps the origin triple and it "rides verbatim" (`daemon/src/lib/pane-envelope.ts`) — the receiver trusts the forwarder | Cert chain checked at the QUIC handshake; the envelope signature survives relays |
-| Cross-host auth | Bearer token optional: "host+VM are one founder-owned trust domain; **the mesh is the auth boundary**" (`cli/src/host-registry.ts`) | Auto-team rule, fail-closed: different user and no pact → rejected before any payload |
-| Bundle integrity | "self-consistency verification, **not authenticity** … Future enhancement: cryptographic signing (Ed25519)" (`docs/reference/rig-bundle.md`) | ed25519 user key; `content_addressable` CIDs |
-| Topology edges | `delegates_to` / `spawned_by` only order launches; edges "do NOT route messages … do NOT enforce delegation" (`docs/reference/edge-types.md`) | `Grant` / `Authority` with typed CIDs and the attenuation algebra (`agent-mesh-protocol/src/authority.rs`) |
+| Unit of work | A team of seats, in one daemon per host | A conversation, addressable by who it is and not where it runs |
+| Continuity | Snapshot and restore a rig on its host | A conversation moves between harnesses, hosts and devices |
+| Shared memory | Per-seat context, plus files the rig shares | Peer-to-peer store bound to one user identity (proposed) |
+| Sender identity | `OPENRIG_SESSION_NAME` env var → `X-OpenRig-Session` header; header-less sends are delivered and labelled `<unknown sender>` (`cli/src/sender-identity.ts`) | `AgentKey` signed by `UserKey`; each frame a `SignedEnvelope` with replay defence |
+| Cross-host trust | Optional bearer token; "the mesh is the auth boundary" (`cli/src/host-registry.ts`) | Cert chain checked at the handshake; auto-team rule, fail-closed |
+| Bundle integrity | "self-consistency verification, not authenticity" (`docs/reference/rig-bundle.md`) | ed25519 user key; `content_addressable` CIDs |
+| Topology edges | Only `delegates_to` / `spawned_by` affect launch order; edges "do NOT route messages … do NOT enforce delegation" (`docs/reference/edge-types.md`) | `Grant` / `Authority` with typed CIDs and an attenuation algebra (`agent-mesh-protocol/src/authority.rs`) |
 
-OpenRig's "the mesh is the auth boundary" names an assumption, not a
-component. Agent Mesh can be that component.
+## 5. Candidate augmentations: test first, then decide
 
-## 4. Integration direction: four seams, in order
+Each is a hypothesis to try on our own rigs. Promote one only after it
+survives use.
 
-Ordered by value per unit of coupling. Each seam stands alone and can be
-tried, shipped or dropped without the others.
+| Candidate | What it would add to OpenRig | Test that would justify it |
+|---|---|---|
+| Conversation mobility | Hand a seat's conversation to another surface (e.g. a phone) or host and back, with its state | Move a live seat's conversation off-host and back with no lost turns |
+| Verified senders | `From:` gains *verified / unverified / unknown*, from a per-seat `AgentKey`; nothing delivered today is refused | A forged `OPENRIG_SESSION_NAME` renders *unverified*; normal sends are unchanged byte-for-byte |
+| Signed RigBundles | Author authenticity on top of the existing SHA-256 self-consistency | A tampered bundle whose digest was recomputed fails install |
+| Edges as grants | Only messages along a granted edge are admitted, each citing a content-addressed grant | A `rig send` along no edge is rejected, and the rejection is useful rather than obstructive |
+| Shared tools (toolsmith role) | Seats share one toolchain: a toolsmith agent builds each tool and signs it with its agent-mesh identity; it is distributed through a Bazel-compatible REAPI cache and resolved by signed digest per job, so no seat installs its own. See the [Bazel Toolsmith Mesh epic](https://github.com/Gilamonster-Foundation/nessie-store/issues/120) | One tool, one toolsmith, one sandboxed seat: the seat resolves and runs the signed tool, and a tampered artifact is refused |
 
-### S1 — Signed RigBundles (smallest; upstream already wants it)
-
-Sign the bundle manifest with the author's `UserKey`, and identify the manifest
-by a `content_addressable` CID instead of a hand-rolled map of SHA-256 hashes.
-`rig bundle install` verifies both. This closes the gap OpenRig names as future
-work, and it touches only the bundle path.
-
-### S2 — Verified sender (the core value)
-
-Issue one `AgentKey` per seat at `rig up`, with `AgentMetadata.role =
-member@rig`. The seat sends a `SignedEnvelope` instead of a bare header, and the
-daemon verifies it at ingress.
-
-OpenRig's existing "deliver and label" policy maps onto this without a
-behaviour break. The `From:` label gains a third state:
-
-- **verified**: the envelope checks against a known seat key.
-- **unverified**: a name was claimed with no valid signature.
-- **unknown**: nothing was claimed; this is today's `<unknown sender>`.
-
-Nothing is refused that is delivered today, so it can ship in observe mode
-first. A per-rig flag can later turn it into rejection.
-
-### S3 — `transport: amesh` host entries
-
-Add a third `HostEntry` variant beside `ssh` and `http`. Cross-host `rig`
-traffic then rides the authenticated QUIC transport, and the auto-team rule
-replaces both optional bearer tokens and the tokenless "the network is trusted"
-host. For hosts reached through a bastion, `agent-mesh-transport-ssh` already
-covers what OpenRig's `ssh` transport does, with an authenticated inner session.
-
-### S4 — Edges become grants (the product thesis; largest)
-
-Compile each RigSpec edge into an agent-mesh `Grant`: `delegates_to`,
-`escalates_to` and `collaborates_with` each become a scoped authority to
-message a peer. The daemon then admits `rig send` only along a granted edge.
-The topology the operator *draws* becomes the authority the system
-*enforces*, and every admitted message cites a content-addressed grant.
-
-This is the step that turns OpenRig's diagram into provenance. It needs its
-own design pass, including the provenance audit and how grants rotate when a
-seat's occupant changes on restore.
-
-## 5. Shape of the integration
-
-- **Sidecar, not fork.** OpenRig is TypeScript. Agent Mesh has Rust crates
-  and Python bindings, but no Node binding. Start by calling the `amesh` CLI
-  as a subprocess, which is the same pattern OpenRig's `cross-host-executor.ts`
-  already uses to spawn `ssh`. Add a napi binding only if measured latency
-  requires it.
-- **Upstream-first.** S1 and S2 are small, self-contained changes to OpenRig.
-  Propose them to the maintainer before building anything, and read the
-  maintainer's own plans for signing first.
-- **Other runtimes plug in by adapter.** OpenRig's runtime adapters are the
-  extension point. Any harness we care about joins a rig the same way `pi` does
-  (`pi-runtime-adapter.ts`), and that work is independent of this proposal.
+Mechanically, start with the `amesh` CLI as a subprocess. That is the same
+pattern OpenRig's `cross-host-executor.ts` uses for `ssh`, and it needs no Node
+binding until a measured need appears.
 
 ## 6. Non-goals
 
-- Adopting OpenRig's daemon, SQLite store or tmux transport into Agent Mesh.
-- Building an orchestration or topology layer in Agent Mesh. That is
-  OpenRig's layer; the charter keeps Agent Mesh below it, the same boundary
-  drawn against A2A in [`a2a_interop.md`](a2a_interop.md).
-- Choosing an operator cockpit. OpenRig overlaps heavily with Herdr-based
-  dispatching, and that choice is separate from this proposal.
-
-## 7. Falsification: first spike
-
-The claim to test is that S2 fits OpenRig's send path without behaviour change.
-Test it with one host and a two-seat rig:
-
-1. Wrap `rig send` so the body travels in a `SignedEnvelope`, using the
-   `amesh` CLI.
-2. In the daemon's transport route, verify the envelope before
-   `wrapPaneEnvelope` and render the three-state label.
-3. Pass if existing sends are delivered byte-for-byte as before, forged
-   `OPENRIG_SESSION_NAME` sends render **unverified**, and the added latency
-   per send is measured and recorded.
-
-If the spike needs changes beyond the transport route and `rig send`, the seam
-is in the wrong place. Revisit §4 before going further.
+- Growing Agent Mesh into seats, topologies, launch or restore. That is
+  OpenRig's job (§2).
+- Taking on OpenRig's daemon, SQLite store or tmux transport.
+- Proposing any of §5 upstream before it has been tested (§2).
 
 ## Sources
 
 - OpenRig repository and reference docs: https://github.com/mvschwarz/openrig
   (`docs/reference/rig-spec.md`, `edge-types.md`, `rig-bundle.md`)
-- Show HN, author's reply on isolation and trust:
+- Show HN, the author on isolation and trust:
   https://news.ycombinator.com/item?id=48241066
 - Show HN, first launch: https://news.ycombinator.com/item?id=47772935
