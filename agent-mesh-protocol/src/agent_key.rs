@@ -69,8 +69,24 @@ impl AgentKey {
     /// `issuer_sig` of the embedded [`CertChain`] (a root [`Issuer::User`]).
     /// Use [`AgentKey::delegate`] to mint an *attenuated* sub-agent.
     pub fn issue(user: &UserKey, metadata: AgentMetadata) -> Self {
-        let mut csprng = OsRng;
-        let signing = SigningKey::generate(&mut csprng);
+        Self::issue_with(user, SigningKey::generate(&mut OsRng), metadata)
+    }
+
+    /// Issue an agent key whose keypair is **derived** from `user` and `label`
+    /// rather than drawn at random.
+    ///
+    /// The same `(user, label)` always yields the same public key — and so the
+    /// same [`Fingerprint`] — across processes and restarts, while the cert
+    /// (metadata, signature) is freshly issued each time. This is how an
+    /// identity a peer has pinned survives a restart **without persisting the
+    /// agent's private bytes**: it is recomputed from the user key, which is
+    /// already on disk. See `UserKey::derived_agent_seed` for the derivation.
+    pub fn issue_derived(user: &UserKey, label: &str, metadata: AgentMetadata) -> Self {
+        let signing = SigningKey::from_bytes(&user.derived_agent_seed(label));
+        Self::issue_with(user, signing, metadata)
+    }
+
+    fn issue_with(user: &UserKey, signing: SigningKey, metadata: AgentMetadata) -> Self {
         let agent_pubkey_bytes: [u8; 32] = *signing.verifying_key().as_bytes();
 
         let to_sign = sign_payload(&agent_pubkey_bytes, &metadata);
@@ -497,6 +513,45 @@ mod tests {
         let agent = AgentKey::issue(&user, fixture_metadata("worker"));
         assert_eq!(agent.cert().root_user_pubkey(), user.public());
         assert_eq!(agent.cert().agent_pubkey, agent.public_bytes());
+    }
+
+    /// A derived key is stable per `(user, label)` — the property a pinned
+    /// identity needs across restarts — distinct per label and per user, and
+    /// a normal user-rooted cert that verifies.
+    #[test]
+    fn issue_derived_is_stable_per_user_and_label() {
+        let user = UserKey::generate();
+        let a = AgentKey::issue_derived(&user, "dock/hub", fixture_metadata("hub"));
+        let again = AgentKey::issue_derived(&user, "dock/hub", fixture_metadata("other-role"));
+        assert_eq!(
+            a.public_bytes(),
+            again.public_bytes(),
+            "same label, same key"
+        );
+        assert_eq!(a.fingerprint(), again.fingerprint());
+
+        let other_label = AgentKey::issue_derived(&user, "dock/host", fixture_metadata("hub"));
+        assert_ne!(
+            a.public_bytes(),
+            other_label.public_bytes(),
+            "label separates keys"
+        );
+        let other_user =
+            AgentKey::issue_derived(&UserKey::generate(), "dock/hub", fixture_metadata("hub"));
+        assert_ne!(
+            a.public_bytes(),
+            other_user.public_bytes(),
+            "user separates keys"
+        );
+        assert_ne!(
+            a.public_bytes(),
+            user.public().as_bytes(),
+            "not the user key"
+        );
+
+        a.cert().verify().expect("derived cert verifies");
+        assert_eq!(a.cert().root_user_pubkey(), user.public());
+        assert_eq!(a.cert().agent_pubkey, a.public_bytes());
     }
 
     #[test]
