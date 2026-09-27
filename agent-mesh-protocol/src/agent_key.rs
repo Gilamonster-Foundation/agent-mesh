@@ -14,6 +14,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 /// Domain-separation tag for proof-of-possession signatures, so a PoP can never
 /// be confused with a cert-issue signature or any other signed payload (§9.2).
@@ -81,8 +82,18 @@ impl AgentKey {
     /// identity a peer has pinned survives a restart **without persisting the
     /// agent's private bytes**: it is recomputed from the user key, which is
     /// already on disk. See `UserKey::derived_agent_seed` for the derivation.
+    ///
+    /// **The label is the identity.** Metadata does not enter the derivation,
+    /// so every call with one label under one user yields the *same* key:
+    /// namespace labels by application, role and instance, and keep the choice
+    /// of label under trusted control. Reissuing with narrower metadata does
+    /// not revoke a certificate already issued for that key, and restarting
+    /// does not rotate it; a compromised derived key is rotated only by moving
+    /// to a new label and re-pinning (or revoking) at every peer.
     pub fn issue_derived(user: &UserKey, label: &str, metadata: AgentMetadata) -> Self {
-        let signing = SigningKey::from_bytes(&user.derived_agent_seed(label));
+        let mut seed = user.derived_agent_seed(label);
+        let signing = SigningKey::from_bytes(&seed);
+        seed.zeroize();
         Self::issue_with(user, signing, metadata)
     }
 
