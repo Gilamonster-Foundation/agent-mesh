@@ -1234,7 +1234,12 @@ mod tests {
         }
     }
 
-    fn cancellation_timeouts() -> SessionTimeouts {
+    /// A record deadline no scheduler hiccup reaches. Tests that exchange
+    /// records use it; a test that asserts a stall times out runs on paused
+    /// time, where the deadline's length costs nothing. Only handshake-level
+    /// tests keep `short_timeouts`: a 25 ms record write lost that race on a
+    /// loaded macOS runner.
+    fn roomy_timeouts() -> SessionTimeouts {
         SessionTimeouts {
             authentication: Duration::from_secs(1),
             record: Duration::from_secs(60),
@@ -1292,7 +1297,7 @@ mod tests {
             initiator,
             responder,
             SessionParameters::default(),
-            short_timeouts(),
+            roomy_timeouts(),
             64,
         )
         .await
@@ -2430,7 +2435,7 @@ mod tests {
             alice.clone(),
             bob.clone(),
             SessionParameters::default(),
-            cancellation_timeouts(),
+            roomy_timeouts(),
             64,
         )
         .await;
@@ -2457,7 +2462,7 @@ mod tests {
             alice.clone(),
             bob,
             SessionParameters::default(),
-            cancellation_timeouts(),
+            roomy_timeouts(),
             64,
         )
         .await;
@@ -2493,7 +2498,7 @@ mod tests {
             alice.clone(),
             bob.clone(),
             SessionParameters::default(),
-            cancellation_timeouts(),
+            roomy_timeouts(),
             64,
         )
         .await;
@@ -2526,7 +2531,7 @@ mod tests {
             alice.clone(),
             bob,
             SessionParameters::default(),
-            cancellation_timeouts(),
+            roomy_timeouts(),
             64,
         )
         .await;
