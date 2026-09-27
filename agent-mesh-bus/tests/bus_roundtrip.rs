@@ -455,19 +455,42 @@ async fn reply_falls_back_to_dial_back_when_the_asker_closed_its_connection() {
 }
 
 /// Closing a bus ends the connections it still holds, including one a
-/// request's reply window keeps open, so its UDP port is released promptly
-/// rather than when that window lapses. The responder takes the request and
-/// never answers; the asker's request is cancelled; then the asker closes.
+/// request's reply window keeps open, so its UDP port is released promptly —
+/// and a replacement bus can bind it — rather than when that window lapses.
+///
+/// The asker sends through its bus's own transport with
+/// `send_request_to_endpoint`: the step `request_direct` takes before it waits
+/// for the reply, which returns only once the reply window (`await_reply_on`)
+/// is open. That window outlives any request future, so none is involved: an
+/// earlier version aborted a `request_direct` instead, and an abort landing
+/// before the send completed left no window open, passing without the fix.
+/// The responder takes the request and never answers.
+///
+/// Without the endpoint close this fails in most runs, not all: when the bus
+/// drops its last endpoint handle, iroh aborts the endpoint ungracefully
+/// ("dropped without calling `Endpoint::close`"), which sometimes frees the
+/// socket at once and usually leaves it bound until the window lapses. The
+/// explicit close is iroh's deterministic path.
 #[tokio::test(flavor = "multi_thread")]
 async fn closing_a_bus_releases_its_port_while_a_reply_is_awaited() {
     let user = UserKey::generate();
-    let asker = std::sync::Arc::new(
-        Bus::bind_outbound_only(&user, agent(&user, "asker"))
-            .await
-            .unwrap(),
+    let asker_agent = Arc::new(agent(&user, "asker"));
+    let transport = Arc::new(
+        IrohTransport::bind(
+            user.fingerprint(),
+            asker_agent.clone(),
+            0,
+            BusOptions { announce: false },
+        )
+        .await
+        .unwrap(),
     );
+    let asker = Bus::bind_with_transport(asker_agent.clone(), transport.clone()).unwrap();
     let responder_agent = agent(&user, "responder");
-    let responder_pk = responder_agent.public_bytes();
+    let (responder_pk, responder_fp) = (
+        responder_agent.public_bytes(),
+        responder_agent.fingerprint(),
+    );
     let responder = Bus::bind_with(&user, responder_agent, 0, BusOptions { announce: false })
         .await
         .unwrap();
@@ -478,27 +501,26 @@ async fn closing_a_bus_releases_its_port_while_a_reply_is_awaited() {
         std::future::pending()
     });
 
-    let asking = tokio::spawn({
-        let (asker, topic, ep) = (
-            asker.clone(),
-            topic.clone(),
-            loopback(responder_pk, &responder),
-        );
-        async move {
-            asker
-                .request_direct(ep, &topic, b"x".to_vec(), Duration::from_secs(60))
-                .await
-        }
-    });
+    let request = BusMessage::Request {
+        topic: topic.wire(),
+        correlation: [1; 16],
+        body: b"x".to_vec(),
+    };
+    transport
+        .send_request_to_endpoint(
+            &loopback(responder_pk, &responder),
+            bus_envelope(&asker_agent, responder_fp, 1, &request),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("sent; the reply window is now open");
     tokio::time::timeout(Duration::from_secs(5), taken.recv())
         .await
         .expect("the responder takes the request")
         .unwrap();
-    asking.abort();
-    let _ = asking.await;
+    drop(transport); // the bus is its transport's only owner again
 
     let port = asker.local_port();
-    let asker = std::sync::Arc::try_unwrap(asker).unwrap_or_else(|_| panic!("sole owner"));
     tokio::time::timeout(Duration::from_secs(5), asker.close())
         .await
         .expect("close returns")
@@ -512,5 +534,16 @@ async fn closing_a_bus_releases_its_port_while_a_reply_is_awaited() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(released, "port {port} still bound 2s after close");
+    // The invariant callers need: a replacement bus can take the same port.
+    let replacement = Bus::bind_with(
+        &user,
+        agent(&user, "asker"),
+        port,
+        BusOptions { announce: false },
+    )
+    .await
+    .expect("a replacement bus binds the closed bus's port");
+    assert_eq!(replacement.local_port(), port);
+    replacement.close().await.unwrap();
     responder.close().await.unwrap();
 }
