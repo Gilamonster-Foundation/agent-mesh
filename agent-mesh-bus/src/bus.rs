@@ -994,8 +994,12 @@ impl Transport for IrohTransport {
 
     async fn close(&self) {
         self.accept_task.abort();
-        // The iroh endpoint releases its socket on Drop; it is held via `Arc`
-        // (shared with in-flight dial tasks) so we cannot consume it here.
+        // Close the endpoint, not just the accept loop: that ends every open
+        // connection, including one a request's reply window still holds
+        // (`await_reply_on`), whose task would otherwise keep the connection —
+        // and the UDP socket — alive until the window lapses. The socket
+        // itself is released as the endpoint's last `Arc` drops.
+        self.endpoint.close().await;
     }
 }
 

@@ -127,9 +127,11 @@ impl Endpoint {
         &self.inner
     }
 
-    /// Graceful shutdown — closes all live connections, flushes
-    /// pending packets, and releases the UDP port.
-    pub async fn close(self) {
+    /// Graceful shutdown — closes all live connections and flushes pending
+    /// packets. The UDP port is released once the last handle to this
+    /// endpoint drops; closing ends the connections that would otherwise keep
+    /// it alive.
+    pub async fn close(&self) {
         self.inner.close().await;
     }
 }
@@ -210,5 +212,36 @@ mod tests {
             "all bound sockets must share the advertised mDNS port, got {addrs:?}"
         );
         ep.close().await;
+    }
+
+    /// `close(&self)` leaves other handles to the endpoint alive, so pin what
+    /// they see: close is terminal. A second close returns at once, a dial
+    /// through the closed endpoint fails, and accept reports it closed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn close_is_terminal_for_every_handle() {
+        let ep = std::sync::Arc::new(Endpoint::bind(&fixture_agent("worker"), 0).await.unwrap());
+        let other = ep.clone();
+        let bounded = std::time::Duration::from_secs(5);
+        tokio::time::timeout(bounded, ep.close())
+            .await
+            .expect("close returns");
+        tokio::time::timeout(bounded, other.close())
+            .await
+            .expect("a second close returns");
+
+        let peer = fixture_agent("peer");
+        let peer_key = crate::identity::agent_pubkey_to_iroh(&peer.public_bytes()).unwrap();
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 9));
+        let dial = tokio::time::timeout(bounded, other.dial(peer_key, [addr]))
+            .await
+            .expect("dial resolves");
+        assert!(dial.is_err(), "a dial through a closed endpoint must fail");
+        let accept = tokio::time::timeout(bounded, other.accept())
+            .await
+            .expect("accept resolves");
+        assert!(
+            accept.is_none(),
+            "accept on a closed endpoint reports it closed"
+        );
     }
 }
