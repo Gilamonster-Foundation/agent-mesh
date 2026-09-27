@@ -26,6 +26,29 @@ pub struct UserKey {
 }
 
 impl UserKey {
+    /// Derive the 32-byte ed25519 seed of the agent key named `label`.
+    ///
+    /// Deterministic: the same user key and label always give the same seed,
+    /// so an agent whose identity must outlive its process (a dock endpoint a
+    /// peer has pinned) is *recomputed* at start-up instead of persisted —
+    /// nothing beyond the user key is ever written to disk. Different labels,
+    /// or different user keys, give unrelated seeds.
+    ///
+    /// Only a holder of this user key can derive, and that holder can already
+    /// issue any agent key; derivation adds no authority. Rotate a derived
+    /// identity by changing its label.
+    pub(crate) fn derived_agent_seed(&self, label: &str) -> [u8; 32] {
+        // BLAKE3's KDF mode: a fixed, globally unique context string, then a
+        // keyed hash binds the caller's label under that subkey.
+        const CONTEXT: &str = "agent-mesh 2026-09-26 derived agent key v1";
+        let mut root = self.signing.to_bytes();
+        let mut subkey = blake3::derive_key(CONTEXT, &root);
+        root.zeroize();
+        let seed = *blake3::keyed_hash(&subkey, label.as_bytes()).as_bytes();
+        subkey.zeroize();
+        seed
+    }
+
     /// Generate a fresh user key from the operating system RNG.
     #[must_use]
     pub fn generate() -> Self {
@@ -197,6 +220,22 @@ mod verifying_key_serde {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Pins the derivation itself. Every identity a peer has pinned is a
+    /// function of this KDF, so an accidental change here would silently
+    /// re-key every derived agent. Changing it on purpose means a new
+    /// context string (a new `vN`) and a new vector.
+    #[test]
+    fn derived_agent_seed_matches_its_pinned_vector() {
+        let user = UserKey {
+            signing: SigningKey::from_bytes(&[7u8; 32]),
+        };
+        let seed = user.derived_agent_seed("dock/hub");
+        assert_eq!(
+            hex::encode(seed),
+            "52335d4284e638ccc1ffc036573c7d4b9e92e7c2591247a83c000fe9fc22085d"
+        );
+    }
 
     #[test]
     fn generate_different_keys() {
