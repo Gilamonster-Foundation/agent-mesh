@@ -52,10 +52,27 @@ use tokio::sync::{broadcast, mpsc, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 
 /// The dial-back route observed on an inbound iroh connection — the peer's
-/// TLS-authenticated key and the UDP source address. Carried as the opaque
-/// [`ReplyRoute`] for [`IrohTransport`]; `None` when no source address was
-/// observed (relay/custom transports, which this mesh does not use).
+/// TLS-authenticated key and the UDP source address; `None` when no source
+/// address was observed (relay/custom transports, which this mesh does not use).
 type IrohReverse = Option<(PublicKey, SocketAddr)>;
+
+/// The opaque [`ReplyRoute`] for [`IrohTransport`]: the connection an envelope
+/// arrived on, and the dial-back route to fall back to. A reply goes back on
+/// `conn` first, so an asker that accepts no inbound connection still gets it.
+struct IrohReplyRoute {
+    conn: Connection,
+    reverse: IrohReverse,
+}
+
+/// Whether an [`IrohTransport`] accepts connections it did not dial.
+#[derive(Clone, Copy)]
+enum Posture {
+    /// Accept inbound connections; announce over mDNS when `announce`.
+    Accepting { announce: bool },
+    /// Refuse every inbound connection and stay unannounced. Replies to this
+    /// bus's own requests return on the connections it dialed.
+    OutboundOnly,
+}
 
 /// How long we'll wait for a peer to appear on mDNS before giving up.
 ///
@@ -73,8 +90,10 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct BusOptions {
     /// Announce this bus over mDNS so peers can resolve it by
     /// fingerprint (the default). Quiet binds (`false`) are for
-    /// ephemeral clients that only dial out — peers can still reply
-    /// to them via dial-back on the connection the request arrived on.
+    /// ephemeral clients that only dial out — a reply still reaches them
+    /// on the connection their request went out on. A quiet bind still
+    /// *accepts* inbound connections; for one that refuses them, see
+    /// [`Bus::bind_outbound_only`].
     pub announce: bool,
 }
 
@@ -197,6 +216,23 @@ impl Bus {
         Self::bind_with_transport(agent, Arc::new(transport))
     }
 
+    /// Bind a bus that **accepts no inbound connection**: every connection a
+    /// peer tries to open to it is refused at accept time, and it is not
+    /// announced over mDNS. It can still send, and a reply to one of its
+    /// requests returns on the connection that request went out on — so it
+    /// works from behind NAT without a mapping staying open for a dial-back.
+    ///
+    /// For a host that must only dial out (a laptop docked to a hub). Binds an
+    /// OS-picked port, since nothing dials it.
+    pub async fn bind_outbound_only(user: &UserKey, agent: AgentKey) -> Result<Self> {
+        let user_fp = verified_local_user(&agent)?;
+        ensure_local_user(user.fingerprint(), user_fp)?;
+        let agent = Arc::new(agent);
+        let transport =
+            IrohTransport::bind_posture(user_fp, agent.clone(), 0, Posture::OutboundOnly).await?;
+        Self::bind_with_transport(agent, Arc::new(transport))
+    }
+
     /// Bind a bus over an explicit [`Transport`], skipping iroh entirely.
     ///
     /// This is the seam that lets the bus's request/reply/correlation/dial-back
@@ -311,7 +347,7 @@ impl Bus {
             correlation: correlation.0,
             body,
         };
-        if let Err(e) = self.send_via(route, msg).await {
+        if let Err(e) = self.send_via(route, msg, Some(timeout)).await {
             self.inbox.cancel_reply(&correlation);
             return Err(e);
         }
@@ -376,7 +412,7 @@ impl Bus {
             topic: topic.wire(),
             body,
         };
-        self.send_via(DialRoute::Resolve(peer_fp), msg).await
+        self.send_via(DialRoute::Resolve(peer_fp), msg, None).await
     }
 
     /// Publish a body directly to a known [`PeerEndpoint`] on `topic`,
@@ -396,7 +432,7 @@ impl Bus {
             topic: topic.wire(),
             body,
         };
-        self.send_via(DialRoute::Direct(peer), msg).await
+        self.send_via(DialRoute::Direct(peer), msg, None).await
     }
 
     /// Subscribe to a topic. Returns a `broadcast::Receiver` that
@@ -416,15 +452,21 @@ impl Bus {
 
     /// Sign + sequence `msg` into an envelope for `peer_fp` and hand it to the
     /// transport for the named route.
-    async fn send_via(&self, route: DialRoute, msg: BusMessage) -> Result<()> {
-        match route {
-            DialRoute::Resolve(peer_fp) => {
-                let env = make_envelope(&self.agent, &self.sequence, peer_fp, msg)?;
-                self.transport.send_to(peer_fp, env).await
-            }
-            DialRoute::Direct(peer) => {
-                let env = make_envelope(&self.agent, &self.sequence, peer.fingerprint(), msg)?;
-                self.transport.send_to_endpoint(&peer, env).await
+    /// `reply_window` is `Some` for a request (how long its reply is awaited)
+    /// and `None` for a fire-and-forget publish.
+    async fn send_via(
+        &self,
+        route: DialRoute,
+        msg: BusMessage,
+        reply_window: Option<Duration>,
+    ) -> Result<()> {
+        let env = make_envelope(&self.agent, &self.sequence, route.peer_fingerprint(), msg)?;
+        match (route, reply_window) {
+            (DialRoute::Resolve(fp), None) => self.transport.send_to(fp, env).await,
+            (DialRoute::Resolve(fp), Some(w)) => self.transport.send_request_to(fp, env, w).await,
+            (DialRoute::Direct(peer), None) => self.transport.send_to_endpoint(&peer, env).await,
+            (DialRoute::Direct(peer), Some(w)) => {
+                self.transport.send_request_to_endpoint(&peer, env, w).await
             }
         }
     }
@@ -790,6 +832,8 @@ pub struct IrohTransport {
     /// `announce = false`) bind.
     _announcer: Option<AnnouncerHandle>,
     inbound: AsyncMutex<mpsc::UnboundedReceiver<Inbound>>,
+    /// Feeds replies read off connections this transport dialed.
+    inbound_tx: mpsc::UnboundedSender<Inbound>,
     accept_task: JoinHandle<()>,
 }
 
@@ -802,6 +846,18 @@ impl IrohTransport {
         port: u16,
         opts: BusOptions,
     ) -> Result<Self> {
+        let posture = Posture::Accepting {
+            announce: opts.announce,
+        };
+        Self::bind_posture(user_fp, agent, port, posture).await
+    }
+
+    async fn bind_posture(
+        user_fp: Fingerprint,
+        agent: Arc<AgentKey>,
+        port: u16,
+        posture: Posture,
+    ) -> Result<Self> {
         let certified_user_fp = verified_local_user(&agent)?;
         ensure_local_user(user_fp, certified_user_fp)?;
         let endpoint = Endpoint::bind(&agent, port).await?;
@@ -810,7 +866,7 @@ impl IrohTransport {
         let (resolver, resolver_handle) = PeerResolver::start()?;
         let resolver = Arc::new(resolver);
 
-        let announcer = if opts.announce {
+        let announcer = if matches!(posture, Posture::Accepting { announce: true }) {
             Some(
                 Announcer::start(AnnounceConfig {
                     agent_fp: agent.fingerprint(),
@@ -830,7 +886,8 @@ impl IrohTransport {
         };
 
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
-        let accept_task = spawn_iroh_accept_loop(endpoint.clone(), agent.clone(), inbound_tx);
+        let accept_task =
+            spawn_iroh_accept_loop(endpoint.clone(), agent.clone(), inbound_tx.clone(), posture);
 
         Ok(Self {
             endpoint,
@@ -839,6 +896,7 @@ impl IrohTransport {
             _resolver_handle: resolver_handle,
             _announcer: announcer,
             inbound: AsyncMutex::new(inbound_rx),
+            inbound_tx,
             accept_task,
         })
     }
@@ -856,10 +914,49 @@ impl Transport for IrohTransport {
         send_env_on_conn(&conn, self.agent.cert(), peer.fingerprint(), &env).await
     }
 
+    async fn send_request_to(
+        &self,
+        fp: Fingerprint,
+        env: SignedEnvelope,
+        window: Duration,
+    ) -> Result<()> {
+        let conn = dial_peer(&self.endpoint, &self.resolver, fp).await?;
+        send_env_on_conn(&conn, self.agent.cert(), fp, &env).await?;
+        self.await_reply_on(conn, window);
+        Ok(())
+    }
+
+    async fn send_request_to_endpoint(
+        &self,
+        peer: &PeerEndpoint,
+        env: SignedEnvelope,
+        window: Duration,
+    ) -> Result<()> {
+        let conn = dial_endpoint(&self.endpoint, *peer).await?;
+        send_env_on_conn(&conn, self.agent.cert(), peer.fingerprint(), &env).await?;
+        self.await_reply_on(conn, window);
+        Ok(())
+    }
+
     async fn reply(&self, fp: Fingerprint, route: &ReplyRoute, env: SignedEnvelope) -> Result<()> {
-        // The opaque route is the dial-back (pubkey, addr) observed on the
-        // inbound connection; `None` (or a foreign route) falls back to mDNS.
-        let reverse: IrohReverse = route.downcast_ref::<IrohReverse>().cloned().flatten();
+        // Reply on the connection the request arrived on, if its authenticated
+        // key is the reply's addressee; `send_env_on_conn` re-binds the Hello
+        // identity to it. Otherwise (or if the asker has gone) dial back to the
+        // observed source, then mDNS.
+        let route = route.downcast_ref::<IrohReplyRoute>();
+        if let Some(route) = route {
+            if Fingerprint::of_bytes(route.conn.remote_id().as_bytes()) == fp {
+                match send_env_on_conn(&route.conn, self.agent.cert(), fp, &env).await {
+                    Ok(()) => return Ok(()),
+                    Err(e) => tracing::debug!(
+                        peer = %fp.short(),
+                        error = %e,
+                        "bus: reply on the request's connection failed; dialing back"
+                    ),
+                }
+            }
+        }
+        let reverse = route.and_then(|r| r.reverse);
         let conn = dial_reply_peer(&self.endpoint, &self.resolver, fp, reverse).await?;
         send_env_on_conn(&conn, self.agent.cert(), fp, &env).await
     }
@@ -879,13 +976,40 @@ impl Transport for IrohTransport {
     }
 }
 
+impl IrohTransport {
+    /// Keep a connection this transport dialed open for up to `window`, and
+    /// feed the first envelope the peer sends back on it — normally the reply
+    /// — into the inbound queue, where the bus verifies and admits it like any
+    /// other. The peer is the one this side chose to dial and authenticated;
+    /// the stream still re-binds its Hello identity to the connection.
+    fn await_reply_on(&self, conn: Connection, window: Duration) {
+        let (agent, inbound_tx) = (self.agent.clone(), self.inbound_tx.clone());
+        tokio::spawn(async move {
+            let route: ReplyRoute = Arc::new(IrohReplyRoute {
+                conn: conn.clone(),
+                reverse: None,
+            });
+            let first = tokio::time::timeout(window, next_envelope(&conn, &agent)).await;
+            if let Ok(Some((provenance, envelope))) = first {
+                let _ = inbound_tx.send(Inbound {
+                    envelope,
+                    provenance,
+                    reply_route: route,
+                });
+            }
+        });
+    }
+}
+
 /// The iroh-internal accept loop: accept connections and, per bidi stream,
-/// handshake + decode the envelope, then push it (with its dial-back route)
-/// into `inbound_tx` for the bus to drain.
+/// handshake + decode the envelope, then push it (with its reply route) into
+/// `inbound_tx` for the bus to drain. An outbound-only transport refuses every
+/// incoming connection instead.
 fn spawn_iroh_accept_loop(
     endpoint: Arc<Endpoint>,
     agent: Arc<AgentKey>,
     inbound_tx: mpsc::UnboundedSender<Inbound>,
+    posture: Posture,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -893,6 +1017,11 @@ fn spawn_iroh_accept_loop(
                 tracing::debug!("iroh transport accept loop: endpoint closed");
                 break;
             };
+            if matches!(posture, Posture::OutboundOnly) {
+                tracing::debug!("iroh transport: outbound-only; refusing inbound connection");
+                incoming.refuse();
+                continue;
+            }
             let agent = agent.clone();
             let inbound_tx = inbound_tx.clone();
             tokio::spawn(async move {
@@ -904,8 +1033,9 @@ fn spawn_iroh_accept_loop(
     })
 }
 
-/// Handle one accepted connection: finish QUIC, then per bidi stream do the
-/// handshake, decode the envelope, and forward it into `inbound_tx`.
+/// Handle one accepted connection: finish QUIC, then forward every envelope
+/// the peer sends on it into `inbound_tx`, each with this connection as its
+/// reply route.
 async fn accept_conn(
     incoming: Incoming,
     agent: Arc<AgentKey>,
@@ -925,16 +1055,39 @@ async fn accept_conn(
         .map_err(|e| BusError::Transport(TransportError::Iroh(format!("incoming: {e}"))))?;
     // The TLS-authenticated key of whoever dialed us — for agents this IS the
     // agent pubkey, so replies can verify it against the envelope sender's
-    // fingerprint and dial straight back. Shared by every envelope on this
-    // connection as the opaque reply route.
-    let reverse: IrohReverse = reverse_addr.map(|addr| (conn.remote_id(), addr));
-    let reply_route: ReplyRoute = Arc::new(reverse);
+    // fingerprint. Shared by every envelope on this connection.
+    let reply_route: ReplyRoute = Arc::new(IrohReplyRoute {
+        conn: conn.clone(),
+        reverse: reverse_addr.map(|addr| (conn.remote_id(), addr)),
+    });
+    while let Some((provenance, envelope)) = next_envelope(&conn, &agent).await {
+        let inbound = Inbound {
+            envelope,
+            provenance,
+            reply_route: reply_route.clone(),
+        };
+        if inbound_tx.send(inbound).is_err() {
+            tracing::debug!("iroh transport: bus receiver dropped; stopping");
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// The next envelope the peer sends on `conn`: accept a bidi stream, do the
+/// handshake, bind the Hello cert to the connection's TLS identity, and read
+/// the envelope. A stream that fails any step is logged and skipped; `None`
+/// once the peer closes the connection.
+async fn next_envelope(
+    conn: &Connection,
+    agent: &AgentKey,
+) -> Option<(DeliveryProvenance, SignedEnvelope)> {
     loop {
         let (mut send, mut recv) = match conn.accept_bi().await {
             Ok(streams) => streams,
             Err(e) => {
                 tracing::debug!(error = %e, "iroh transport: accept_bi ended (peer closed)");
-                return Ok(());
+                return None;
             }
         };
         let cert = agent.cert().clone();
@@ -964,23 +1117,9 @@ async fn accept_conn(
                 continue;
             }
         };
-        let env = match recv_envelope(&mut recv).await {
-            Ok(env) => env,
-            Err(e) => {
-                tracing::warn!(error = %e, "iroh transport: envelope read failed");
-                continue;
-            }
-        };
-        if inbound_tx
-            .send(Inbound {
-                envelope: env,
-                provenance: DeliveryProvenance::Direct { carrier },
-                reply_route: reply_route.clone(),
-            })
-            .is_err()
-        {
-            tracing::debug!("iroh transport: bus receiver dropped; stopping");
-            return Ok(());
+        match recv_envelope(&mut recv).await {
+            Ok(env) => return Some((DeliveryProvenance::Direct { carrier }, env)),
+            Err(e) => tracing::warn!(error = %e, "iroh transport: envelope read failed"),
         }
     }
 }

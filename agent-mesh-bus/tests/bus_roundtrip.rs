@@ -177,3 +177,130 @@ async fn request_reply_roundtrip_via_direct_dial_no_mdns() {
     alice_bus.close().await.unwrap();
     bob_bus.close().await.unwrap();
 }
+
+/// Loopback endpoint for a bus bound on an OS-picked port.
+fn loopback(pubkey: [u8; 32], bus: &Bus) -> PeerEndpoint {
+    PeerEndpoint::new(
+        pubkey,
+        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), bus.local_port()),
+    )
+}
+
+fn echo(bus: &Bus, topic: &Topic) {
+    bus.handle_requests(topic.clone(), |body| async move {
+        Ok(format!("echo: {}", String::from_utf8_lossy(&body)).into_bytes())
+    });
+}
+
+/// An outbound-only bus (#92) refuses every connection it did not dial. The
+/// control — the same dial to a quiet, accepting bus with the same handler —
+/// succeeds, so the refusal is the posture and not the setup.
+#[tokio::test(flavor = "multi_thread")]
+async fn outbound_only_bus_refuses_an_inbound_dial() {
+    let user = UserKey::generate();
+    let (host, host_pk) = {
+        let a = agent(&user, "host");
+        let pk = a.public_bytes();
+        (Bus::bind_outbound_only(&user, a).await.unwrap(), pk)
+    };
+    let (quiet, quiet_pk) = {
+        let a = agent(&user, "quiet");
+        let pk = a.public_bytes();
+        let bus = Bus::bind_with(&user, a, 0, BusOptions { announce: false })
+            .await
+            .unwrap();
+        (bus, pk)
+    };
+    let hub = Bus::bind_with(
+        &user,
+        agent(&user, "hub"),
+        0,
+        BusOptions { announce: false },
+    )
+    .await
+    .unwrap();
+    let topic = Topic::new(user.fingerprint(), "echo");
+    echo(&host, &topic);
+    echo(&quiet, &topic);
+
+    let refused = hub
+        .request_direct(
+            loopback(host_pk, &host),
+            &topic,
+            b"in".to_vec(),
+            Duration::from_secs(10),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(agent_mesh_bus::BusError::Transport(_))),
+        "a dial to an outbound-only bus must be refused, got {refused:?}"
+    );
+    let accepted = hub
+        .request_direct(
+            loopback(quiet_pk, &quiet),
+            &topic,
+            b"in".to_vec(),
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("control: a quiet accepting bus answers the same dial");
+    assert_eq!(accepted, b"echo: in");
+
+    for bus in [host, quiet, hub] {
+        bus.close().await.unwrap();
+    }
+}
+
+/// An outbound-only bus still gets its replies: they return on the connection
+/// its request went out on, since any dial-back to it would be refused. The
+/// responder holds the reply for a while first — the long-poll shape a docked
+/// host relies on — and the connection stays usable for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn outbound_only_bus_gets_replies_on_its_own_connection() {
+    let user = UserKey::generate();
+    let host = Bus::bind_outbound_only(&user, agent(&user, "host"))
+        .await
+        .unwrap();
+    let hub_agent = agent(&user, "hub");
+    let hub_pk = hub_agent.public_bytes();
+    let hub = Bus::bind_with(&user, hub_agent, 0, BusOptions { announce: false })
+        .await
+        .unwrap();
+    let topic = Topic::new(user.fingerprint(), "held");
+    hub.handle_requests(topic.clone(), |body| async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        Ok([b"held: ".as_slice(), &body].concat())
+    });
+
+    for n in 0..3u8 {
+        let reply = host
+            .request_direct(
+                loopback(hub_pk, &hub),
+                &topic,
+                vec![b'0' + n],
+                Duration::from_secs(10),
+            )
+            .await
+            .expect("an outbound-only asker gets its reply");
+        assert_eq!(reply, [b"held: ".as_slice(), &[b'0' + n]].concat());
+    }
+
+    // Publishing needs no reply path at all.
+    let seen = hub.subscribe(&Topic::new(user.fingerprint(), "note")).await;
+    host.publish_to_direct(
+        loopback(hub_pk, &hub),
+        &Topic::new(user.fingerprint(), "note"),
+        b"hi".to_vec(),
+    )
+    .await
+    .expect("an outbound-only bus can publish");
+    let mut seen = seen;
+    let got = tokio::time::timeout(Duration::from_secs(5), seen.recv())
+        .await
+        .expect("publish arrives")
+        .unwrap();
+    assert_eq!(got, b"hi");
+
+    host.close().await.unwrap();
+    hub.close().await.unwrap();
+}

@@ -13,7 +13,8 @@
 //! inbound signer, register the reply waiter, run the inbox); the transport
 //! owns delivery and must report the peer its session authenticated. The reply
 //! route is an opaque [`ReplyRoute`] the transport alone interprets (iroh: the
-//! dial-back key + address; in-memory: the sender's fingerprint).
+//! connection the envelope arrived on, then a dial-back key + address;
+//! in-memory: the sender's fingerprint).
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -28,8 +29,8 @@ use crate::bus::PeerEndpoint;
 use crate::{BusError, Result};
 
 /// An opaque, transport-specific handle for replying to an inbound envelope
-/// over the exact route it arrived on (iroh dial-back; in-memory direct
-/// channel). [`Bus`](crate::Bus) treats it as a black box and hands it back to
+/// over the exact route it arrived on (iroh: its connection, then dial-back;
+/// in-memory: direct channel). [`Bus`](crate::Bus) treats it as a black box and hands it back to
 /// [`Transport::reply`].
 pub type ReplyRoute = Arc<dyn Any + Send + Sync>;
 
@@ -100,6 +101,32 @@ pub trait Transport: Send + Sync {
 
     /// Deliver `env` to a known endpoint (no resolution / discovery).
     async fn send_to_endpoint(&self, peer: &PeerEndpoint, env: SignedEnvelope) -> Result<()>;
+
+    /// Deliver a **request** `env` to `fp` whose reply the caller awaits for
+    /// up to `window`. A transport that can carry the reply back on the route
+    /// the request went out on keeps that route open for the window, so the
+    /// reply needs no inbound connection to the asker. The default delivers
+    /// exactly like [`Self::send_to`] and leaves the reply to its own route.
+    async fn send_request_to(
+        &self,
+        fp: Fingerprint,
+        env: SignedEnvelope,
+        window: std::time::Duration,
+    ) -> Result<()> {
+        let _ = window;
+        self.send_to(fp, env).await
+    }
+
+    /// [`Self::send_request_to`] for a known endpoint (no resolution).
+    async fn send_request_to_endpoint(
+        &self,
+        peer: &PeerEndpoint,
+        env: SignedEnvelope,
+        window: std::time::Duration,
+    ) -> Result<()> {
+        let _ = window;
+        self.send_to_endpoint(peer, env).await
+    }
 
     /// Deliver a reply `env` to `fp`, preferring the inbound `route`
     /// (dial-back) and falling back to resolving `fp`.
