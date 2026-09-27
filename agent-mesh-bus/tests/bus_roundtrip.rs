@@ -16,7 +16,9 @@
 //!   already provided by the deterministic tests above; what they uniquely
 //!   touch is the real multicast-discovery path.
 
-use agent_mesh_bus::{Bus, BusMessage, BusOptions, IrohTransport, PeerEndpoint, Topic, Transport};
+use agent_mesh_bus::{
+    Bus, BusError, BusMessage, BusOptions, IrohTransport, PeerEndpoint, Topic, Transport,
+};
 use agent_mesh_protocol::{
     AgentKey, AgentMetadata, Caveats, Fingerprint, Recipient, SignedEnvelope, UserKey,
 };
@@ -318,13 +320,15 @@ fn read_bus_message(env: &SignedEnvelope) -> BusMessage {
     serde_json::from_slice(&env.payload).unwrap()
 }
 
-/// The peer an outbound-only bus dials may send one envelope back on that
+/// The peer an outbound-only bus dials may send an envelope back on that
 /// connection, and it need not be the reply: here the hub answers the host's
-/// request with a request of its own, which reaches the host's handler, and
-/// the host's reply returns on the same connection. That one envelope uses up
-/// the window, so the host's own request then times out.
+/// poll with a request of its own, which reaches the host's registered
+/// handler, and the host's reply returns on the same connection. The hub never
+/// replies to the poll itself, so the poll times out. (That the host reads at
+/// most one envelope back per request is proven at the transport, in
+/// `bus::tests::a_dialed_connection_admits_one_envelope_back_per_request`.)
 #[tokio::test(flavor = "multi_thread")]
-async fn peer_dialed_by_an_outbound_only_bus_can_send_one_request_back() {
+async fn peer_dialed_by_an_outbound_only_bus_can_send_a_request_back() {
     let user = UserKey::generate();
     let host_agent = agent(&user, "host");
     let host_fp = host_agent.fingerprint();
@@ -386,9 +390,13 @@ async fn peer_dialed_by_an_outbound_only_bus_can_send_one_request_back() {
         }
         other => panic!("expected the host's reply, got {other:?}"),
     }
+    let poll = tokio::time::timeout(Duration::from_secs(10), asking)
+        .await
+        .expect("the poll resolves within its own 3s timeout")
+        .unwrap();
     assert!(
-        asking.await.unwrap().is_err(),
-        "the reverse request used the window, so the host's own request gets no reply"
+        matches!(poll, Err(BusError::Timeout(_))),
+        "the hub never replied to the poll, so it times out; got {poll:?}"
     );
 }
 
