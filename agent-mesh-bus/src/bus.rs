@@ -224,6 +224,14 @@ impl Bus {
     ///
     /// For a host that must only dial out (a laptop docked to a hub). Binds an
     /// OS-picked port, since nothing dials it.
+    ///
+    /// **Outbound-only is not "no inbound commands".** While one of its
+    /// requests awaits a reply, the peer it dialed may send one envelope back
+    /// on that connection, and it need not be the reply: a request or publish
+    /// is admitted by the inbox exactly as one on an accepted connection would
+    /// be (signature, carrier/signer binding, user root, recipient, replay).
+    /// Only the peers this bus chooses to dial can do so, and handlers still
+    /// own authorization of what they are asked.
     pub async fn bind_outbound_only(user: &UserKey, agent: AgentKey) -> Result<Self> {
         let user_fp = verified_local_user(&agent)?;
         ensure_local_user(user.fingerprint(), user_fp)?;
@@ -982,6 +990,12 @@ impl IrohTransport {
     /// — into the inbound queue, where the bus verifies and admits it like any
     /// other. The peer is the one this side chose to dial and authenticated;
     /// the stream still re-binds its Hello identity to the connection.
+    ///
+    /// The reader is bounded by `window` alone: it ends at the first envelope,
+    /// when the peer closes the connection, or when the window lapses, and
+    /// cancelling the request that started it does not end it sooner. A reply
+    /// that arrives after its request was cancelled finds no live waiter and
+    /// is dropped by the inbox; it is still verified and admitted first.
     fn await_reply_on(&self, conn: Connection, window: Duration) {
         let (agent, inbound_tx) = (self.agent.clone(), self.inbound_tx.clone());
         tokio::spawn(async move {
