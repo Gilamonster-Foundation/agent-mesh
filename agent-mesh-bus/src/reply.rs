@@ -12,6 +12,7 @@ use rand::RngCore;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::task::{Context, Poll};
 use tokio::sync::oneshot;
@@ -60,6 +61,8 @@ pub enum ReplyDelivery {
 }
 
 struct PendingReply {
+    /// Which registration this is, so only its own receiver can remove it.
+    token: u64,
     expected_peer_fp: Fingerprint,
     sender: oneshot::Sender<Vec<u8>>,
 }
@@ -88,6 +91,7 @@ pub(crate) enum ReplyPeerCheck {
 #[derive(Default)]
 pub struct ReplyWaiter {
     waiters: Mutex<HashMap<CorrelationId, PendingReply>>,
+    next_token: AtomicU64,
 }
 
 impl ReplyWaiter {
@@ -102,9 +106,11 @@ impl ReplyWaiter {
     /// The waiter lives exactly as long as that receiver.
     pub fn register(&self, id: CorrelationId, expected_peer_fp: Fingerprint) -> PendingReplyRx<'_> {
         let (tx, rx) = oneshot::channel();
+        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
         self.waiters.lock().expect("reply waiter poisoned").insert(
             id,
             PendingReply {
+                token,
                 expected_peer_fp,
                 sender: tx,
             },
@@ -112,6 +118,7 @@ impl ReplyWaiter {
         PendingReplyRx {
             waiters: self,
             id,
+            token,
             rx,
         }
     }
@@ -170,11 +177,16 @@ impl ReplyWaiter {
         }
     }
 
-    fn cancel(&self, id: &CorrelationId) {
-        self.waiters
-            .lock()
-            .expect("reply waiter poisoned")
-            .remove(id);
+    /// Remove `id`'s waiter only if it is still registration `token`, so a
+    /// replaced receiver cannot remove the registration that replaced it.
+    fn cancel(&self, id: &CorrelationId, token: u64) {
+        let mut waiters = self.waiters.lock().expect("reply waiter poisoned");
+        if waiters
+            .get(id)
+            .is_some_and(|pending| pending.token == token)
+        {
+            waiters.remove(id);
+        }
     }
 
     /// Number of in-flight waiters. For tests + diagnostics.
@@ -189,6 +201,7 @@ impl ReplyWaiter {
 pub struct PendingReplyRx<'a> {
     waiters: &'a ReplyWaiter,
     id: CorrelationId,
+    token: u64,
     rx: oneshot::Receiver<Vec<u8>>,
 }
 
@@ -202,7 +215,7 @@ impl Future for PendingReplyRx<'_> {
 
 impl Drop for PendingReplyRx<'_> {
     fn drop(&mut self) {
-        self.waiters.cancel(&self.id);
+        self.waiters.cancel(&self.id, self.token);
     }
 }
 
@@ -293,6 +306,22 @@ mod tests {
             ReplyDelivery::Unknown
         );
         assert_eq!(rx.await.unwrap(), b"first");
+    }
+
+    #[tokio::test]
+    async fn dropping_a_replaced_receiver_leaves_the_newer_waiter() {
+        let w = ReplyWaiter::new();
+        let id = CorrelationId::new_random();
+        let expected = peer(1);
+        let first = w.register(id, expected);
+        let second = w.register(id, expected);
+        drop(first);
+        assert_eq!(w.pending(), 1, "the newer registration survives");
+        assert_eq!(
+            w.deliver(id, expected, b"reply".to_vec()),
+            ReplyDelivery::Delivered
+        );
+        assert_eq!(second.await.unwrap(), b"reply");
     }
 
     #[test]
