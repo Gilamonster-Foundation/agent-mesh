@@ -127,9 +127,11 @@ impl Endpoint {
         &self.inner
     }
 
-    /// Graceful shutdown — closes all live connections, flushes
-    /// pending packets, and releases the UDP port.
-    pub async fn close(self) {
+    /// Graceful shutdown — closes all live connections and flushes pending
+    /// packets. The UDP port is released once the last handle to this
+    /// endpoint drops; closing ends the connections that would otherwise keep
+    /// it alive.
+    pub async fn close(&self) {
         self.inner.close().await;
     }
 }

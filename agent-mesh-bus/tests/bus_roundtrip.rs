@@ -304,3 +304,64 @@ async fn outbound_only_bus_gets_replies_on_its_own_connection() {
     host.close().await.unwrap();
     hub.close().await.unwrap();
 }
+
+/// Closing a bus ends the connections it still holds, including one a
+/// request's reply window keeps open, so its UDP port is released promptly
+/// rather than when that window lapses. The responder takes the request and
+/// never answers; the asker's request is cancelled; then the asker closes.
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_a_bus_releases_its_port_while_a_reply_is_awaited() {
+    let user = UserKey::generate();
+    let asker = std::sync::Arc::new(
+        Bus::bind_outbound_only(&user, agent(&user, "asker"))
+            .await
+            .unwrap(),
+    );
+    let responder_agent = agent(&user, "responder");
+    let responder_pk = responder_agent.public_bytes();
+    let responder = Bus::bind_with(&user, responder_agent, 0, BusOptions { announce: false })
+        .await
+        .unwrap();
+    let topic = Topic::new(user.fingerprint(), "never");
+    let (taken_tx, mut taken) = tokio::sync::mpsc::unbounded_channel();
+    responder.handle_requests(topic.clone(), move |_body| {
+        let _ = taken_tx.send(());
+        std::future::pending()
+    });
+
+    let asking = tokio::spawn({
+        let (asker, topic, ep) = (
+            asker.clone(),
+            topic.clone(),
+            loopback(responder_pk, &responder),
+        );
+        async move {
+            asker
+                .request_direct(ep, &topic, b"x".to_vec(), Duration::from_secs(60))
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), taken.recv())
+        .await
+        .expect("the responder takes the request")
+        .unwrap();
+    asking.abort();
+    let _ = asking.await;
+
+    let port = asker.local_port();
+    let asker = std::sync::Arc::try_unwrap(asker).unwrap_or_else(|_| panic!("sole owner"));
+    tokio::time::timeout(Duration::from_secs(5), asker.close())
+        .await
+        .expect("close returns")
+        .unwrap();
+    let mut released = false;
+    for _ in 0..40 {
+        if std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok() {
+            released = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(released, "port {port} still bound 2s after close");
+    responder.close().await.unwrap();
+}
