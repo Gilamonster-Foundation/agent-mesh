@@ -370,18 +370,12 @@ impl Bus {
             correlation: correlation.0,
             body,
         };
-        if let Err(e) = self.send_via(route, msg, Some(timeout)).await {
-            self.inbox.cancel_reply(&correlation);
-            return Err(e);
-        }
-
+        // `waiter` removes its registration when dropped, on every path out.
+        self.send_via(route, msg, Some(timeout)).await?;
         match tokio::time::timeout(timeout, waiter).await {
             Ok(Ok(payload)) => Ok(payload),
             Ok(Err(_)) => Err(BusError::LostReply),
-            Err(_) => {
-                self.inbox.cancel_reply(&correlation);
-                Err(BusError::Timeout(timeout))
-            }
+            Err(_) => Err(BusError::Timeout(timeout)),
         }
     }
 
@@ -1161,6 +1155,7 @@ async fn next_envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reply::ReplyDelivery;
     use crate::transport::MeshNet;
     use agent_mesh_protocol::{AgentMetadata, Caveats, UserKey};
 
@@ -1192,17 +1187,28 @@ mod tests {
     /// Transport test double that captures outbound envelopes and never
     /// produces inbound traffic on its own. Tests can feed the captured
     /// correlation back through the real inbox deterministically.
+    /// A `stalling` one captures each send and then never completes it.
     struct CaptureTransport {
         sent_tx: mpsc::UnboundedSender<CapturedSend>,
         sent_rx: AsyncMutex<mpsc::UnboundedReceiver<CapturedSend>>,
+        stall: bool,
     }
 
     impl CaptureTransport {
         fn new() -> Arc<Self> {
+            Self::build(false)
+        }
+
+        fn stalling() -> Arc<Self> {
+            Self::build(true)
+        }
+
+        fn build(stall: bool) -> Arc<Self> {
             let (sent_tx, sent_rx) = mpsc::unbounded_channel();
             Arc::new(Self {
                 sent_tx,
                 sent_rx: AsyncMutex::new(sent_rx),
+                stall,
             })
         }
 
@@ -1222,6 +1228,9 @@ mod tests {
             self.sent_tx
                 .send(CapturedSend::Resolve(fp, env))
                 .expect("capture receiver is alive");
+            if self.stall {
+                std::future::pending::<()>().await;
+            }
             Ok(())
         }
 
@@ -1625,6 +1634,62 @@ mod tests {
             "late reply must not recreate a timed-out waiter"
         );
         bus.close().await.unwrap();
+    }
+
+    /// Drop a request future once `transport` has captured its send, and
+    /// check the waiter it registered goes with it; a late reply then finds no
+    /// waiter to revive (#97).
+    async fn cancelled_request_removes_its_waiter(transport: Arc<CaptureTransport>) {
+        let user = UserKey::generate();
+        let asker = Arc::new(agent(&user, "asker"));
+        let expected = agent(&user, "expected");
+        let bus = Bus::bind_with_transport(asker, Arc::clone(&transport) as Arc<dyn Transport>)
+            .expect("bind asker to capture transport");
+        let topic = Topic::new(user.fingerprint(), "cancelled");
+
+        let mut request = Box::pin(bus.request(
+            expected.fingerprint(),
+            &topic,
+            b"request".to_vec(),
+            Duration::from_secs(60),
+        ));
+        let outbound = tokio::select! {
+            biased;
+            result = &mut request => panic!("request completed: {result:?}"),
+            CapturedSend::Resolve(_, env) = transport.next_sent() => env,
+        };
+        assert_eq!(bus.inbox.pending_replies(), 1, "waiter registered");
+        drop(request);
+        assert_eq!(
+            bus.inbox.pending_replies(),
+            0,
+            "cancellation removes the waiter"
+        );
+
+        let BusMessage::Request { correlation, .. } =
+            serde_json::from_slice(outbound.payload.as_ref()).expect("decode captured request")
+        else {
+            panic!("expected Request");
+        };
+        assert_eq!(
+            bus.inbox
+                .waiters
+                .deliver(CorrelationId(correlation), expected.fingerprint(), vec![]),
+            ReplyDelivery::Unknown,
+            "a late reply finds no waiter"
+        );
+        assert_eq!(bus.inbox.pending_replies(), 0);
+        bus.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_cancelled_while_awaiting_its_reply_removes_its_waiter() {
+        cancelled_request_removes_its_waiter(CaptureTransport::new()).await;
+    }
+
+    #[tokio::test]
+    async fn request_cancelled_during_its_send_removes_its_waiter() {
+        cancelled_request_removes_its_waiter(CaptureTransport::stalling()).await;
     }
 
     #[tokio::test]

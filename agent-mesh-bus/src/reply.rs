@@ -10,7 +10,10 @@
 use agent_mesh_protocol::Fingerprint;
 use rand::RngCore;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 use tokio::sync::oneshot;
 
 /// A 16-byte correlation identifier.
@@ -52,7 +55,7 @@ pub enum ReplyDelivery {
         /// Verified agent fingerprint that signed the reply.
         actual_peer_fp: Fingerprint,
     },
-    /// The request receiver was dropped without explicitly cancelling its waiter.
+    /// The request was cancelled while this reply was being delivered.
     ReceiverDropped,
 }
 
@@ -77,11 +80,11 @@ pub(crate) enum ReplyPeerCheck {
 /// Holds oneshot senders for in-flight requests, keyed by correlation and
 /// bound to the expected responder fingerprint.
 ///
-/// `register` returns the receiver half of a oneshot; the bus's inbox
-/// later calls `deliver` when the matching reply arrives. If the
-/// request times out or the bus shuts down before the reply, the
-/// waiter is dropped (or explicitly cancelled) and any late reply is
-/// silently discarded.
+/// `register` returns a [`PendingReplyRx`]; the bus's inbox later calls
+/// `deliver` when the matching reply arrives. However the request ends —
+/// answered, timed out, failed to send, or cancelled by dropping its future —
+/// dropping the receiver removes the waiter, and a later reply is reported as
+/// [`ReplyDelivery::Unknown`].
 #[derive(Default)]
 pub struct ReplyWaiter {
     waiters: Mutex<HashMap<CorrelationId, PendingReply>>,
@@ -96,11 +99,8 @@ impl ReplyWaiter {
 
     /// Register a fresh correlation id, atomically binding it to
     /// `expected_peer_fp`, and return the receiver the caller will await.
-    pub fn register(
-        &self,
-        id: CorrelationId,
-        expected_peer_fp: Fingerprint,
-    ) -> oneshot::Receiver<Vec<u8>> {
+    /// The waiter lives exactly as long as that receiver.
+    pub fn register(&self, id: CorrelationId, expected_peer_fp: Fingerprint) -> PendingReplyRx<'_> {
         let (tx, rx) = oneshot::channel();
         self.waiters.lock().expect("reply waiter poisoned").insert(
             id,
@@ -109,7 +109,11 @@ impl ReplyWaiter {
                 sender: tx,
             },
         );
-        rx
+        PendingReplyRx {
+            waiters: self,
+            id,
+            rx,
+        }
     }
 
     /// Deliver a reply payload signed by `actual_peer_fp` to the waiter for
@@ -166,11 +170,7 @@ impl ReplyWaiter {
         }
     }
 
-    /// Drop the waiter for `id` without delivering anything.
-    ///
-    /// Called by the bus when a request times out — keeps the waiters
-    /// map from accumulating dead entries.
-    pub fn cancel(&self, id: &CorrelationId) {
+    fn cancel(&self, id: &CorrelationId) {
         self.waiters
             .lock()
             .expect("reply waiter poisoned")
@@ -181,6 +181,28 @@ impl ReplyWaiter {
     #[must_use]
     pub fn pending(&self) -> usize {
         self.waiters.lock().expect("reply waiter poisoned").len()
+    }
+}
+
+/// The receiver for one registered reply: awaits the payload, and removes its
+/// waiter when dropped, so no way a request ends can leave one behind (#97).
+pub struct PendingReplyRx<'a> {
+    waiters: &'a ReplyWaiter,
+    id: CorrelationId,
+    rx: oneshot::Receiver<Vec<u8>>,
+}
+
+impl Future for PendingReplyRx<'_> {
+    type Output = Result<Vec<u8>, oneshot::error::RecvError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.rx).poll(cx)
+    }
+}
+
+impl Drop for PendingReplyRx<'_> {
+    fn drop(&mut self) {
+        self.waiters.cancel(&self.id);
     }
 }
 
@@ -256,24 +278,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_removes_waiter() {
-        let w = ReplyWaiter::new();
-        let id = CorrelationId::new_random();
-        let expected = peer(1);
-        let rx = w.register(id, expected);
-        assert_eq!(w.pending(), 1);
-        w.cancel(&id);
-        assert_eq!(w.pending(), 0);
-        // Receiver gets closed → recv resolves to Err.
-        assert!(rx.await.is_err());
-        // Late delivery is silently dropped.
-        assert_eq!(
-            w.deliver(id, expected, b"late".to_vec()),
-            ReplyDelivery::Unknown
-        );
-    }
-
-    #[tokio::test]
     async fn deliver_twice_only_first_wins() {
         let w = ReplyWaiter::new();
         let id = CorrelationId::new_random();
@@ -292,16 +296,16 @@ mod tests {
     }
 
     #[test]
-    fn dropped_receiver_is_reported_and_waiter_is_removed() {
+    fn dropping_the_receiver_removes_the_waiter() {
         let w = ReplyWaiter::new();
         let id = CorrelationId::new_random();
         let expected = peer(1);
         drop(w.register(id, expected));
-
-        assert_eq!(
-            w.deliver(id, expected, b"unobserved".to_vec()),
-            ReplyDelivery::ReceiverDropped
-        );
         assert_eq!(w.pending(), 0);
+        assert_eq!(
+            w.deliver(id, expected, b"late".to_vec()),
+            ReplyDelivery::Unknown,
+            "a late reply finds no waiter"
+        );
     }
 }
