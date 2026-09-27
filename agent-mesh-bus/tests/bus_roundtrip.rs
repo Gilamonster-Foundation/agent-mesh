@@ -16,9 +16,14 @@
 //!   already provided by the deterministic tests above; what they uniquely
 //!   touch is the real multicast-discovery path.
 
-use agent_mesh_bus::{Bus, BusOptions, PeerEndpoint, Topic};
-use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, UserKey};
+use agent_mesh_bus::{
+    Bus, BusError, BusMessage, BusOptions, IrohTransport, PeerEndpoint, Topic, Transport,
+};
+use agent_mesh_protocol::{
+    AgentKey, AgentMetadata, Caveats, Fingerprint, Recipient, SignedEnvelope, UserKey,
+};
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 fn agent(user: &UserKey, role: &str) -> AgentKey {
@@ -303,6 +308,150 @@ async fn outbound_only_bus_gets_replies_on_its_own_connection() {
 
     host.close().await.unwrap();
     hub.close().await.unwrap();
+}
+
+/// A bus message signed by `from` for `to`, as a bus would send it.
+fn bus_envelope(from: &AgentKey, to: Fingerprint, seq: u64, msg: &BusMessage) -> SignedEnvelope {
+    let payload = serde_json::to_vec(msg).unwrap();
+    SignedEnvelope::new(from, Recipient::Direct { agent_fp: to }, seq, payload)
+}
+
+fn read_bus_message(env: &SignedEnvelope) -> BusMessage {
+    serde_json::from_slice(&env.payload).unwrap()
+}
+
+/// The peer an outbound-only bus dials may send an envelope back on that
+/// connection, and it need not be the reply: here the hub answers the host's
+/// poll with a request of its own, which reaches the host's registered
+/// handler, and the host's reply returns on the same connection. The hub never
+/// replies to the poll itself, so the poll times out. (That the host reads at
+/// most one envelope back per request is proven at the transport, in
+/// `bus::tests::a_dialed_connection_admits_one_envelope_back_per_request`.)
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_dialed_by_an_outbound_only_bus_can_send_a_request_back() {
+    let user = UserKey::generate();
+    let host_agent = agent(&user, "host");
+    let host_fp = host_agent.fingerprint();
+    let host = Arc::new(Bus::bind_outbound_only(&user, host_agent).await.unwrap());
+    let ping = Topic::new(user.fingerprint(), "ping");
+    host.handle_requests(ping.clone(), |body| async move {
+        Ok([b"pong: ".as_slice(), &body].concat())
+    });
+    let hub_agent = Arc::new(agent(&user, "hub"));
+    let hub = IrohTransport::bind(
+        user.fingerprint(),
+        hub_agent.clone(),
+        0,
+        BusOptions { announce: false },
+    )
+    .await
+    .unwrap();
+    let hub_ep = PeerEndpoint::new(
+        hub_agent.public_bytes(),
+        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), hub.local_port()),
+    );
+
+    let asking = tokio::spawn({
+        let (host, poll) = (host.clone(), Topic::new(user.fingerprint(), "poll"));
+        async move {
+            host.request_direct(hub_ep, &poll, b"poll".to_vec(), Duration::from_secs(3))
+                .await
+        }
+    });
+    let polled = tokio::time::timeout(Duration::from_secs(5), hub.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(polled.envelope.sender_agent_fp(), host_fp);
+
+    let correlation = [7u8; 16];
+    let request = BusMessage::Request {
+        topic: ping.wire(),
+        correlation,
+        body: b"hi".to_vec(),
+    };
+    hub.reply(
+        host_fp,
+        &polled.reply_route,
+        bus_envelope(&hub_agent, host_fp, 1, &request),
+    )
+    .await
+    .expect("sent back on the host's own connection");
+    let answered = tokio::time::timeout(Duration::from_secs(5), hub.recv())
+        .await
+        .expect("the host answers on the same connection")
+        .unwrap();
+    match read_bus_message(&answered.envelope) {
+        BusMessage::Reply {
+            correlation: c,
+            body,
+        } => {
+            assert_eq!((c, body.as_slice()), (correlation, b"pong: hi".as_slice()));
+        }
+        other => panic!("expected the host's reply, got {other:?}"),
+    }
+    let poll = tokio::time::timeout(Duration::from_secs(10), asking)
+        .await
+        .expect("the poll resolves within its own 3s timeout")
+        .unwrap();
+    assert!(
+        matches!(poll, Err(BusError::Timeout(_))),
+        "the hub never replied to the poll, so it times out; got {poll:?}"
+    );
+}
+
+/// Compatibility fallback: an asker that closes its connection right after
+/// sending (the pre-#95 behaviour, here the plain `send_to_endpoint` path) has
+/// nothing to read a reply on, so the responder's reply must fall back to a
+/// dial-back — which arrives because this asker accepts inbound connections.
+#[tokio::test(flavor = "multi_thread")]
+async fn reply_falls_back_to_dial_back_when_the_asker_closed_its_connection() {
+    let user = UserKey::generate();
+    let responder_agent = agent(&user, "responder");
+    let responder_pk = responder_agent.public_bytes();
+    let responder_fp = responder_agent.fingerprint();
+    let responder = Bus::bind_with(&user, responder_agent, 0, BusOptions { announce: false })
+        .await
+        .unwrap();
+    let topic = Topic::new(user.fingerprint(), "echo");
+    echo(&responder, &topic);
+    let asker_agent = Arc::new(agent(&user, "old-asker"));
+    let asker = IrohTransport::bind(
+        user.fingerprint(),
+        asker_agent.clone(),
+        0,
+        BusOptions { announce: false },
+    )
+    .await
+    .unwrap();
+
+    let correlation = [9u8; 16];
+    let request = BusMessage::Request {
+        topic: topic.wire(),
+        correlation,
+        body: b"hi".to_vec(),
+    };
+    asker
+        .send_to_endpoint(
+            &loopback(responder_pk, &responder),
+            bus_envelope(&asker_agent, responder_fp, 1, &request),
+        )
+        .await
+        .unwrap();
+    let back = tokio::time::timeout(Duration::from_secs(15), asker.recv())
+        .await
+        .expect("the reply arrives by dial-back")
+        .unwrap();
+    match read_bus_message(&back.envelope) {
+        BusMessage::Reply {
+            correlation: c,
+            body,
+        } => {
+            assert_eq!((c, body.as_slice()), (correlation, b"echo: hi".as_slice()));
+        }
+        other => panic!("expected the echo reply, got {other:?}"),
+    }
+    responder.close().await.unwrap();
 }
 
 /// Closing a bus ends the connections it still holds, including one a

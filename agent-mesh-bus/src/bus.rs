@@ -224,6 +224,29 @@ impl Bus {
     ///
     /// For a host that must only dial out (a laptop docked to a hub). Binds an
     /// OS-picked port, since nothing dials it.
+    ///
+    /// **Outbound-only is not "no inbound commands".** It restricts
+    /// *connection acceptance* only. Each request this bus sends opens a reply
+    /// window on the connection it dialed, and the peer it dialed may send one
+    /// envelope back in that window — not necessarily the reply. A request or
+    /// publish sent that way reaches the normal inbox and the registered
+    /// handler, the same as one on an accepted connection. Three separate
+    /// checks apply:
+    ///
+    /// - *acceptance*: only a connection this bus dialed can carry anything in;
+    /// - *admission*: the inbox verifies every envelope (signature,
+    ///   carrier/signer binding, user root, recipient, replay), which proves
+    ///   who sent it and nothing more;
+    /// - *authorization*: whether that sender may perform the operation is the
+    ///   handler's decision. Being dialed, or sharing this bus's user root,
+    ///   grants nothing by itself. A handler that must decide by caller should
+    ///   be registered with [`Self::handle_requests_with_context`], which
+    ///   passes the verified caller.
+    ///
+    /// **Cancelling a request is not revocation.** Dropping or timing out the
+    /// request future does not close its reply window: until the window
+    /// lapses, the connection closes, or one envelope has been read, a request
+    /// or publish from that peer can still arrive and run its handler.
     pub async fn bind_outbound_only(user: &UserKey, agent: AgentKey) -> Result<Self> {
         let user_fp = verified_local_user(&agent)?;
         ensure_local_user(user.fingerprint(), user_fp)?;
@@ -986,6 +1009,13 @@ impl IrohTransport {
     /// — into the inbound queue, where the bus verifies and admits it like any
     /// other. The peer is the one this side chose to dial and authenticated;
     /// the stream still re-binds its Hello identity to the connection.
+    ///
+    /// The reader is bounded by `window` alone: it ends at the first envelope,
+    /// when the peer closes the connection, or when the window lapses.
+    /// Cancelling the request that started it does not end it sooner, and is
+    /// not command revocation: a request or publish read here still reaches
+    /// the inbox and its handler (see [`Bus::bind_outbound_only`]). A late
+    /// *reply* is verified and admitted, then finds no waiter to wake.
     fn await_reply_on(&self, conn: Connection, window: Duration) {
         let (agent, inbound_tx) = (self.agent.clone(), self.inbound_tx.clone());
         tokio::spawn(async move {
@@ -2002,5 +2032,111 @@ mod tests {
             "responder must reach the same-host asker via loopback despite an \
              undialable scopeless link-local source ({scopeless_source})"
         );
+    }
+
+    /// A connection this side dialed admits exactly one envelope back per
+    /// request: `await_reply_on` reads the first and stops. The hub writes two
+    /// envelopes straight onto the host's dialed connection (no `reply`
+    /// fallback, so nothing can arrive another way). The first is the positive
+    /// control: the host reads it. The second is offered on the same, still
+    /// open connection — the host holds a handle to it — yet its handshake is
+    /// never answered, so it times out and never reaches the inbound queue.
+    /// Real loopback QUIC; bounded waits only.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dialed_connection_admits_one_envelope_back_per_request() {
+        let user = UserKey::generate();
+        let host_agent = Arc::new(agent(&user, "host"));
+        let host_fp = host_agent.fingerprint();
+        let host = IrohTransport::bind_posture(
+            user.fingerprint(),
+            host_agent.clone(),
+            0,
+            Posture::OutboundOnly,
+        )
+        .await
+        .expect("bind host");
+        let hub_agent = Arc::new(agent(&user, "hub"));
+        let hub = IrohTransport::bind(
+            user.fingerprint(),
+            hub_agent.clone(),
+            0,
+            BusOptions { announce: false },
+        )
+        .await
+        .expect("bind hub");
+        let hub_ep = PeerEndpoint::new(
+            hub_agent.public_bytes(),
+            SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), hub.local_port()),
+        );
+        let note = |from: &AgentKey, to: Fingerprint, seq: u64, body: &[u8]| {
+            let msg = BusMessage::Publish {
+                topic: Topic::new(user.fingerprint(), "note").wire(),
+                body: body.to_vec(),
+            };
+            make_envelope(from, &AtomicU64::new(seq), to, msg).expect("sign")
+        };
+        let bounded = Duration::from_secs(5);
+
+        host.send_request_to_endpoint(
+            &hub_ep,
+            note(&host_agent, hub_ep.fingerprint(), 1, b"poll"),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("host sends its request");
+        let polled = tokio::time::timeout(bounded, hub.recv())
+            .await
+            .expect("hub receives within 5s")
+            .expect("hub transport open");
+        let conn = polled
+            .reply_route
+            .downcast_ref::<IrohReplyRoute>()
+            .expect("an iroh reply route")
+            .conn
+            .clone();
+
+        send_env_on_conn(
+            &conn,
+            hub_agent.cert(),
+            host_fp,
+            &note(&hub_agent, host_fp, 1, b"first"),
+        )
+        .await
+        .expect("the first envelope back is read");
+        let first = tokio::time::timeout(bounded, host.recv())
+            .await
+            .expect("host admits the first envelope within 5s")
+            .expect("host transport open");
+        assert_eq!(first.envelope.sender_agent_fp(), hub_agent.fingerprint());
+
+        // `first` holds the host's handle on the connection, so it stays open:
+        // the second envelope is offered, not lost to a closed connection.
+        assert!(conn.close_reason().is_none(), "connection still open");
+        let second = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT + bounded,
+            send_env_on_conn(
+                &conn,
+                hub_agent.cert(),
+                host_fp,
+                &note(&hub_agent, host_fp, 2, b"second"),
+            ),
+        )
+        .await
+        .expect("the send resolves within its own handshake deadline");
+        assert!(
+            matches!(second, Err(BusError::Timeout(d)) if d == HANDSHAKE_TIMEOUT),
+            "the host must not read a second envelope; got {second:?}"
+        );
+        assert!(
+            conn.close_reason().is_none(),
+            "still open: the refusal is the cap"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), host.recv())
+                .await
+                .is_err(),
+            "nothing further reaches the host's inbound queue"
+        );
+        drop(first);
     }
 }
