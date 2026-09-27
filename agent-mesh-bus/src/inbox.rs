@@ -12,7 +12,7 @@
 //! remember to invoke them.
 
 use crate::replay::{NonceCache, SequenceTracker};
-use crate::reply::{CorrelationId, ReplyDelivery, ReplyPeerCheck, ReplyWaiter};
+use crate::reply::{CorrelationId, PendingReplyRx, ReplyDelivery, ReplyPeerCheck, ReplyWaiter};
 use crate::topic::Topic;
 use crate::transport::DeliveryProvenance;
 use crate::{BusError, Result};
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use tokio::sync::{broadcast, oneshot, RwLock};
+use tokio::sync::{broadcast, RwLock};
 
 /// Default capacity of broadcast channels backing per-topic
 /// subscriptions. Subscribers that lag behind by more than this many
@@ -126,7 +126,7 @@ pub struct OutgoingReply {
 pub struct Inbox {
     nonce_cache: NonceCache,
     sequence: SequenceTracker,
-    waiters: ReplyWaiter,
+    pub(crate) waiters: ReplyWaiter,
     subscriptions: RwLock<HashMap<String, broadcast::Sender<Vec<u8>>>>,
     // Request handlers are guarded by a *synchronous* lock, not a
     // `tokio::sync::RwLock`, so a handler can be registered without an
@@ -220,19 +220,14 @@ impl Inbox {
     }
 
     /// Register an in-flight request waiter, atomically bound to the expected
-    /// responder; returns the receiver half of the oneshot that will resolve
-    /// when that peer's matching [`BusMessage::Reply`] arrives.
+    /// responder; returns the receiver that resolves when that peer's matching
+    /// [`BusMessage::Reply`] arrives. Dropping the receiver removes the waiter.
     pub fn register_reply(
         &self,
         id: CorrelationId,
         expected_peer_fp: Fingerprint,
-    ) -> oneshot::Receiver<Vec<u8>> {
+    ) -> PendingReplyRx<'_> {
         self.waiters.register(id, expected_peer_fp)
-    }
-
-    /// Drop a waiter for `id` without delivering anything.
-    pub fn cancel_reply(&self, id: &CorrelationId) {
-        self.waiters.cancel(id);
     }
 
     /// Number of currently in-flight reply waiters.
@@ -1153,12 +1148,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_reply_drops_waiter() {
+    async fn dropping_the_reply_receiver_drops_its_waiter() {
         let inbox = Inbox::new();
-        let cid = CorrelationId([0xaa; 16]);
-        let _rx = inbox.register_reply(cid, Fingerprint([0x01; 32]));
+        let rx = inbox.register_reply(CorrelationId([0xaa; 16]), Fingerprint([0x01; 32]));
         assert_eq!(inbox.pending_replies(), 1);
-        inbox.cancel_reply(&cid);
+        drop(rx);
         assert_eq!(inbox.pending_replies(), 0);
     }
 
