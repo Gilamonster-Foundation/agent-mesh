@@ -279,10 +279,15 @@ impl Bus {
 
     /// [`Self::bind_outbound_only`], sequencing its envelopes from
     /// `reservations`, so a receiver that outlives this bus still admits a
-    /// successor bound under the same key (see [`crate::sequence`]).
+    /// successor bound under the same key (see [`crate::sequence`]). The
+    /// built-in [`crate::sequence::FileSequenceReservations`] store only
+    /// backs this durability guarantee on Unix; on other platforms it fails
+    /// every reservation rather than issue sequences it can't durably
+    /// account for.
     ///
     /// # Errors
-    /// As [`Self::bind_outbound_only`], or the reservations cannot be read.
+    /// As [`Self::bind_outbound_only`], or the reservations cannot be read
+    /// or (first send) written.
     pub async fn bind_outbound_only_reserving(
         user: &UserKey,
         agent: AgentKey,
