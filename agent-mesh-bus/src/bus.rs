@@ -32,6 +32,7 @@
 
 use crate::inbox::{BusMessage, Inbox, RequestContext};
 use crate::reply::CorrelationId;
+use crate::sequence::{SequenceReservations, Sequencer};
 use crate::transport::{AuthenticatedPeer, DeliveryProvenance, Inbound, ReplyRoute, Transport};
 use crate::{BusError, Result, Topic};
 use agent_mesh_discovery::{AnnounceConfig, Announcer, AnnouncerHandle};
@@ -45,7 +46,6 @@ use agent_mesh_transport::{
 use async_trait::async_trait;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, Mutex as AsyncMutex};
@@ -168,7 +168,7 @@ pub struct Bus {
     /// production ([`IrohTransport`]), an in-memory switchboard in tests.
     transport: Arc<dyn Transport>,
     inbox: Arc<Inbox>,
-    sequence: Arc<AtomicU64>,
+    sequence: Arc<Sequencer>,
     /// The bus-level receive loop: pulls each inbound envelope off the
     /// transport, runs it through the inbox, and ships any reply back.
     accept_task: JoinHandle<()>,
@@ -207,13 +207,39 @@ impl Bus {
         port: u16,
         opts: BusOptions,
     ) -> Result<Self> {
+        Self::bind_listening(user, agent, port, opts, Sequencer::in_memory()).await
+    }
+
+    /// [`Self::bind_with`], sequencing its envelopes from `reservations`, so a
+    /// receiver that outlives this bus still admits a successor bound under
+    /// the same key (see [`crate::sequence`]).
+    ///
+    /// # Errors
+    /// As [`Self::bind_with`], or the reservations cannot be read.
+    pub async fn bind_with_reserving(
+        user: &UserKey,
+        agent: AgentKey,
+        port: u16,
+        opts: BusOptions,
+        reservations: Arc<dyn SequenceReservations>,
+    ) -> Result<Self> {
+        Self::bind_listening(user, agent, port, opts, Sequencer::reserving(reservations)?).await
+    }
+
+    async fn bind_listening(
+        user: &UserKey,
+        agent: AgentKey,
+        port: u16,
+        opts: BusOptions,
+        sequence: Sequencer,
+    ) -> Result<Self> {
         // The verified certified root is the local admission policy. Reject a
         // mismatched explicit UserKey consistently in debug and release builds.
         let user_fp = verified_local_user(&agent)?;
         ensure_local_user(user.fingerprint(), user_fp)?;
         let agent = Arc::new(agent);
         let transport = IrohTransport::bind(user_fp, agent.clone(), port, opts).await?;
-        Self::bind_with_transport(agent, Arc::new(transport))
+        Self::assemble(agent, Arc::new(transport), sequence)
     }
 
     /// Bind a bus that **accepts no inbound connection**: every connection a
@@ -248,12 +274,35 @@ impl Bus {
     /// lapses, the connection closes, or one envelope has been read, a request
     /// or publish from that peer can still arrive and run its handler.
     pub async fn bind_outbound_only(user: &UserKey, agent: AgentKey) -> Result<Self> {
+        Self::bind_outbound(user, agent, Sequencer::in_memory()).await
+    }
+
+    /// [`Self::bind_outbound_only`], sequencing its envelopes from
+    /// `reservations`, so a receiver that outlives this bus still admits a
+    /// successor bound under the same key (see [`crate::sequence`]). The
+    /// built-in [`crate::sequence::FileSequenceReservations`] store only
+    /// backs this durability guarantee on Unix; on other platforms it fails
+    /// every reservation rather than issue sequences it can't durably
+    /// account for.
+    ///
+    /// # Errors
+    /// As [`Self::bind_outbound_only`], or the reservations cannot be read
+    /// or (first send) written.
+    pub async fn bind_outbound_only_reserving(
+        user: &UserKey,
+        agent: AgentKey,
+        reservations: Arc<dyn SequenceReservations>,
+    ) -> Result<Self> {
+        Self::bind_outbound(user, agent, Sequencer::reserving(reservations)?).await
+    }
+
+    async fn bind_outbound(user: &UserKey, agent: AgentKey, sequence: Sequencer) -> Result<Self> {
         let user_fp = verified_local_user(&agent)?;
         ensure_local_user(user.fingerprint(), user_fp)?;
         let agent = Arc::new(agent);
         let transport =
             IrohTransport::bind_posture(user_fp, agent.clone(), 0, Posture::OutboundOnly).await?;
-        Self::bind_with_transport(agent, Arc::new(transport))
+        Self::assemble(agent, Arc::new(transport), sequence)
     }
 
     /// Bind a bus over an explicit [`Transport`], skipping iroh entirely.
@@ -271,9 +320,30 @@ impl Bus {
         agent: Arc<AgentKey>,
         transport: Arc<dyn Transport>,
     ) -> Result<Self> {
+        Self::assemble(agent, transport, Sequencer::in_memory())
+    }
+
+    /// [`Self::bind_with_transport`], sequencing its envelopes from
+    /// `reservations` (see [`crate::sequence`]).
+    ///
+    /// # Errors
+    /// As [`Self::bind_with_transport`], or the reservations cannot be read.
+    pub fn bind_with_transport_reserving(
+        agent: Arc<AgentKey>,
+        transport: Arc<dyn Transport>,
+        reservations: Arc<dyn SequenceReservations>,
+    ) -> Result<Self> {
+        Self::assemble(agent, transport, Sequencer::reserving(reservations)?)
+    }
+
+    fn assemble(
+        agent: Arc<AgentKey>,
+        transport: Arc<dyn Transport>,
+        sequence: Sequencer,
+    ) -> Result<Self> {
         let user_fp = verified_local_user(&agent)?;
         let inbox = Arc::new(Inbox::new());
-        let sequence = Arc::new(AtomicU64::new(1));
+        let sequence = Arc::new(sequence);
         let accept_task = spawn_accept_loop(
             transport.clone(),
             agent.clone(),
@@ -494,11 +564,11 @@ impl Bus {
 /// only carries the finished envelope.
 fn make_envelope(
     agent: &AgentKey,
-    sequence: &AtomicU64,
+    sequence: &Sequencer,
     peer_fp: Fingerprint,
     msg: BusMessage,
 ) -> Result<SignedEnvelope> {
-    let seq = sequence.fetch_add(1, Ordering::SeqCst);
+    let seq = sequence.next()?;
     let payload = serde_json::to_vec(&msg)?;
     Ok(SignedEnvelope::new(
         agent,
@@ -745,7 +815,7 @@ fn spawn_accept_loop(
     transport: Arc<dyn Transport>,
     agent: Arc<AgentKey>,
     inbox: Arc<Inbox>,
-    sequence: Arc<AtomicU64>,
+    sequence: Arc<Sequencer>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(inbound) = transport.recv().await {
@@ -1573,6 +1643,84 @@ mod tests {
         bob_bus.close().await.unwrap();
     }
 
+    /// agent-mesh#100: a bus re-bound under the same agent key and the same
+    /// sequence reservations — the sender's process restarted — is admitted
+    /// by a receiver that kept running and still holds its predecessor's
+    /// sequence high-water mark. No clock is involved.
+    #[tokio::test]
+    async fn a_rebound_sender_is_admitted_by_a_receiver_that_kept_running() {
+        let user = UserKey::generate();
+        let alice = Arc::new(agent(&user, "alice"));
+        let bob = Arc::new(agent(&user, "bob"));
+        let bob_fp = bob.fingerprint();
+        let net = MeshNet::new();
+        let bob_bus = Bus::bind_with_transport(bob.clone(), Arc::new(net.transport_for(&bob)))
+            .expect("bind Bob to in-memory transport");
+        let topic = Topic::new(user.fingerprint(), "echo");
+        bob_bus.handle_requests(topic.clone(), |body| async move { Ok(body) });
+
+        let kept = Arc::new(crate::sequence::tests::Kept::default());
+        let bind_alice = || {
+            Bus::bind_with_transport_reserving(
+                alice.clone(),
+                Arc::new(net.transport_for(&alice)),
+                kept.clone(),
+            )
+            .expect("bind Alice to in-memory transport")
+        };
+        let first = bind_alice();
+        for _ in 0..3 {
+            first
+                .request(bob_fp, &topic, b"hi".to_vec(), Duration::from_secs(5))
+                .await
+                .expect("the first incarnation is admitted");
+        }
+        first.close().await.unwrap();
+
+        let second = bind_alice();
+        let reply = second
+            .request(bob_fp, &topic, b"again".to_vec(), Duration::from_secs(2))
+            .await
+            .expect("the re-bound sender is admitted");
+        assert_eq!(reply, b"again");
+
+        second.close().await.unwrap();
+        bob_bus.close().await.unwrap();
+    }
+
+    /// Reservations do not reopen replay: once a successor is admitted, an
+    /// envelope captured from its predecessor is still refused.
+    #[tokio::test]
+    async fn a_predecessors_envelope_is_refused_after_its_successor_is_admitted() {
+        let user = UserKey::generate();
+        let alice = agent(&user, "alice");
+        let bob_fp = agent(&user, "bob").fingerprint();
+        let kept = Arc::new(crate::sequence::tests::Kept::default());
+        let note = |sequence: &Sequencer| {
+            let msg = BusMessage::Publish {
+                topic: Topic::new(user.fingerprint(), "note").wire(),
+                body: b"note".to_vec(),
+            };
+            make_envelope(&alice, sequence, bob_fp, msg).expect("sign")
+        };
+        let captured = note(&Sequencer::reserving(kept.clone()).unwrap());
+        let successor = note(&Sequencer::reserving(kept).unwrap());
+
+        let inbox = Inbox::new();
+        let carrier = || DeliveryProvenance::Direct {
+            carrier: AuthenticatedPeer::new(user.fingerprint(), alice.fingerprint()),
+        };
+        let admit = |env| inbox.on_envelope(env, carrier(), user.fingerprint(), bob_fp);
+        admit(captured.clone())
+            .await
+            .expect("the predecessor is admitted");
+        admit(successor).await.expect("its successor is admitted");
+        assert!(
+            admit(captured).await.is_err(),
+            "the predecessor's envelope is refused on replay"
+        );
+    }
+
     #[tokio::test]
     async fn resolver_request_binds_reply_to_resolved_peer() {
         wrong_signer_cannot_win_for_request_route(false).await;
@@ -2138,7 +2286,7 @@ mod tests {
                 topic: Topic::new(user.fingerprint(), "note").wire(),
                 body: body.to_vec(),
             };
-            make_envelope(from, &AtomicU64::new(seq), to, msg).expect("sign")
+            make_envelope(from, &Sequencer::after(seq - 1), to, msg).expect("sign")
         };
         let bounded = Duration::from_secs(5);
 

@@ -24,18 +24,20 @@ futures.workspace = true
 async-trait.workspace = true
 hex.workspace = true
 rand.workspace = true
+# Exclusive, uniquely-named staging files for FileSequenceReservations
+# (agent-mesh#101) — not optional: durable reservation is core bus
+# behavior, not a PyO3-only path.
+tempfile.workspace = true
 
 # Optional PyO3 bindings.
 pyo3 = { workspace = true, optional = true }
 pyo3-async-runtimes = { workspace = true, optional = true }
-tempfile = { workspace = true, optional = true }
 
 [features]
 default = []
 pyo3 = [
     "dep:pyo3",
     "dep:pyo3-async-runtimes",
-    "dep:tempfile",
     "agent-mesh-protocol/pyo3",
     "agent-mesh-discovery/pyo3",
     "agent-mesh-transport/pyo3",
@@ -43,7 +45,6 @@ pyo3 = [
 
 [dev-dependencies]
 tests-common.workspace = true
-tempfile.workspace = true
 tracing-subscriber.workspace = true
 # Comparison-only dep (Phase 3 gate-1 doc — example does not run in CI).
 # The bus itself is broker-free; this dep exists solely so the example
