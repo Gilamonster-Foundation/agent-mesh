@@ -41,18 +41,70 @@ pub trait SequenceReservations: Send + Sync {
     fn reserve(&self, through: u64) -> Result<()>;
 }
 
+/// The directory-sync step of [`FileSequenceReservations::reserve`],
+/// factored out so tests can inject ordering checks and failures without
+/// a heavier fault-injection framework. Production code always installs
+/// [`sync_parent_dir`].
+type DirSync = Arc<dyn Fn(&std::path::Path) -> std::io::Result<()> + Send + Sync>;
+
+/// Durably syncs the directory entry a rename into `path` just created, so
+/// the rename itself — not just the file's data — survives a crash.
+///
+/// Unix only. Opening a directory and `fsync`-ing it is how POSIX commits a
+/// rename's directory-entry update; Windows has no equivalent open-a-
+/// directory-as-a-file primitive. There, a completed `MoveFileEx` is
+/// committed to NTFS's own metadata journal as part of the rename call
+/// itself, so no separate directory sync is issued or needed — this
+/// function is a no-op off Unix.
+#[cfg(unix)]
+fn sync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// [`SequenceReservations`] in a file holding one decimal number, replaced
-/// atomically (write, sync, rename) on every reservation.
-#[derive(Debug, Clone)]
+/// atomically: written to a uniquely-named, exclusively-created staging
+/// file in the same directory (so it can never alias the destination or
+/// another store's staging file), synced, renamed over the destination,
+/// then the destination's directory is synced so the rename itself is
+/// durable before [`reserve`](SequenceReservations::reserve) returns.
+#[derive(Clone)]
 pub struct FileSequenceReservations {
     path: PathBuf,
+    dir_sync: DirSync,
+}
+
+impl std::fmt::Debug for FileSequenceReservations {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileSequenceReservations")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FileSequenceReservations {
     /// Reservations kept at `path`. Its directory must exist.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            dir_sync: Arc::new(sync_parent_dir),
+        }
+    }
+
+    /// Like [`new`](Self::new), but with the directory-sync step replaced —
+    /// tests only, to inject ordering checks and failures.
+    #[cfg(test)]
+    fn with_dir_sync(path: impl Into<PathBuf>, dir_sync: DirSync) -> Self {
+        Self {
+            path: path.into(),
+            dir_sync,
+        }
     }
 }
 
@@ -75,12 +127,18 @@ impl SequenceReservations for FileSequenceReservations {
         let failed = |e: std::io::Error| {
             BusError::SequenceReservation(format!("{}: {e}", self.path.display()))
         };
-        let staged = self.path.with_extension("reserving");
-        let mut file = std::fs::File::create(&staged).map_err(failed)?;
-        file.write_all(through.to_string().as_bytes())
+        let dir = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let mut staged = tempfile::NamedTempFile::new_in(dir).map_err(failed)?;
+        staged
+            .write_all(through.to_string().as_bytes())
             .map_err(failed)?;
-        file.sync_all().map_err(failed)?;
-        std::fs::rename(&staged, &self.path).map_err(failed)
+        staged.as_file().sync_all().map_err(failed)?;
+        staged.persist(&self.path).map_err(|e| failed(e.error))?;
+        (self.dir_sync)(&self.path).map_err(failed)
     }
 }
 
@@ -232,5 +290,105 @@ pub(crate) mod tests {
             file.reserved().is_err(),
             "an unreadable reservation fails closed"
         );
+    }
+
+    /// Regression for agent-mesh PR #101 review finding P2: the old staging
+    /// path was `path.with_extension("reserving")`, so `agent.a` and
+    /// `agent.b` both staged through the same `agent.reserving` file. This
+    /// fails on that code (both end up reading the same final value) and
+    /// passes now that staging uses a unique, exclusively-created file.
+    #[test]
+    fn distinct_destinations_sharing_a_stem_never_share_a_staging_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = FileSequenceReservations::new(dir.path().join("agent.a"));
+        let b = FileSequenceReservations::new(dir.path().join("agent.b"));
+        a.reserve(2048).unwrap();
+        b.reserve(1024).unwrap();
+        assert_eq!(a.reserved().unwrap(), 2048, "a's own value survives b");
+        assert_eq!(b.reserved().unwrap(), 1024);
+        assert!(
+            !dir.path().join("agent.reserving").exists(),
+            "no fixed-suffix staging file is left behind"
+        );
+    }
+
+    /// Regression for P2's second case: a destination that is itself already
+    /// named `*.reserving` used to compute a staging path equal to its own
+    /// destination (`with_extension` on a `.reserving` file is a no-op), so
+    /// `reserve` opened-and-truncated the live destination in place before
+    /// the new value was ready. Fails on that code (readers can observe a
+    /// truncated file mid-write); passes now that staging is a distinct file.
+    #[test]
+    fn a_destination_already_named_reserving_is_not_truncated_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.reserving");
+        let file = FileSequenceReservations::new(path.clone());
+        file.reserve(2048).unwrap();
+        assert_eq!(file.reserved().unwrap(), 2048);
+        // The destination is untouched except by the final atomic rename —
+        // no window where it reads empty or partial.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "2048");
+    }
+
+    /// Regression for the interleaving P2 describes: two distinct stores
+    /// concurrently reserving through the same directory must never let one
+    /// store's staging write clobber the other's — each store's final value
+    /// is exactly what it last reserved, never the other's or a partial one.
+    #[test]
+    fn concurrent_reservations_on_distinct_destinations_never_cross_contaminate() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = Arc::new(FileSequenceReservations::new(dir.path().join("agent.a")));
+        let b = Arc::new(FileSequenceReservations::new(dir.path().join("agent.b")));
+        for round in 0..200u64 {
+            let (av, bv) = (2000 + round, 1000 + round);
+            let (ac, bc) = (a.clone(), b.clone());
+            let ta = std::thread::spawn(move || ac.reserve(av).unwrap());
+            let tb = std::thread::spawn(move || bc.reserve(bv).unwrap());
+            ta.join().unwrap();
+            tb.join().unwrap();
+            assert_eq!(a.reserved().unwrap(), av);
+            assert_eq!(b.reserved().unwrap(), bv);
+        }
+    }
+
+    /// P1: a directory-sync failure after a successful rename must fail
+    /// `reserve` — and therefore `Sequencer::next`, which issues nothing
+    /// from an unconfirmed-durable block.
+    #[test]
+    fn a_directory_sync_failure_fails_reserve_and_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(FileSequenceReservations::with_dir_sync(
+            dir.path().join("agent.seq"),
+            Arc::new(|_path| Err(std::io::Error::other("dir sync failed"))),
+        ));
+        assert!(store.reserve(1024).is_err());
+
+        let sequencer = Sequencer::reserving(store).unwrap();
+        assert!(
+            sequencer.next().is_err(),
+            "next must not issue from a block reserve() couldn't durably confirm"
+        );
+    }
+
+    /// P1 ordering: the directory must be synced only after the rename is
+    /// already visible under the destination path — never before, and never
+    /// skipped when the rename itself succeeded.
+    #[test]
+    fn directory_sync_observes_the_rename_already_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.seq");
+        let observed = Arc::new(Mutex::new(None));
+        let observed_in_hook = observed.clone();
+        let hook_path = path.clone();
+        let store = FileSequenceReservations::with_dir_sync(
+            path,
+            Arc::new(move |_dir_target| {
+                *observed_in_hook.lock().unwrap() =
+                    Some(std::fs::read_to_string(&hook_path).unwrap());
+                Ok(())
+            }),
+        );
+        store.reserve(4096).unwrap();
+        assert_eq!(observed.lock().unwrap().as_deref(), Some("4096"));
     }
 }
