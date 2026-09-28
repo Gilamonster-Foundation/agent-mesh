@@ -273,7 +273,7 @@ impl Bus {
     ) -> Result<Self> {
         let user_fp = verified_local_user(&agent)?;
         let inbox = Arc::new(Inbox::new());
-        let sequence = Arc::new(AtomicU64::new(1));
+        let sequence = Arc::new(AtomicU64::new(0));
         let accept_task = spawn_accept_loop(
             transport.clone(),
             agent.clone(),
@@ -498,7 +498,7 @@ fn make_envelope(
     peer_fp: Fingerprint,
     msg: BusMessage,
 ) -> Result<SignedEnvelope> {
-    let seq = sequence.fetch_add(1, Ordering::SeqCst);
+    let seq = next_sequence(sequence, unix_micros());
     let payload = serde_json::to_vec(&msg)?;
     Ok(SignedEnvelope::new(
         agent,
@@ -506,6 +506,31 @@ fn make_envelope(
         seq,
         payload,
     ))
+}
+
+/// The next envelope sequence after the last one `sequence` issued: one past
+/// it, and never below `now_micros`, the wall clock in microseconds since the
+/// Unix epoch.
+///
+/// A receiver keeps each sender's highest sequence for as long as it runs, and
+/// admits only a higher one. The clock floor keeps that true across a sender's
+/// restart: a bus re-bound under the same agent key starts at the current
+/// time, above everything its predecessor sent — unless that one sustained
+/// more than one envelope per microsecond, or the clock was stepped back since
+/// (agent-mesh#100). Replay defense is unchanged: a captured envelope still
+/// carries a sequence at or below the receiver's high-water mark.
+fn next_sequence(sequence: &AtomicU64, now_micros: u64) -> u64 {
+    let next = |last: u64| last.saturating_add(1).max(now_micros);
+    let last = sequence
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |last| Some(next(last)))
+        .unwrap_or_else(|last| last);
+    next(last)
+}
+
+fn unix_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
 }
 
 /// How an outbound message names its destination: resolve a
@@ -1570,6 +1595,72 @@ mod tests {
         assert_eq!(reply, b"echo: hi");
 
         alice_bus.close().await.unwrap();
+        bob_bus.close().await.unwrap();
+    }
+
+    /// A sender's sequences rise by one per envelope, and never fall below the
+    /// clock: the floor is what carries them past a restart.
+    #[test]
+    fn next_sequence_rises_by_one_from_the_clock_floor() {
+        let sequence = AtomicU64::new(0);
+        assert_eq!(
+            next_sequence(&sequence, 1_000),
+            1_000,
+            "starts at the clock"
+        );
+        assert_eq!(
+            next_sequence(&sequence, 1_000),
+            1_001,
+            "then one past the last"
+        );
+        assert_eq!(
+            next_sequence(&sequence, 900),
+            1_002,
+            "a stepped-back clock never rewinds it"
+        );
+        assert_eq!(
+            next_sequence(&sequence, 5_000),
+            5_000,
+            "the clock floor lifts it"
+        );
+    }
+
+    /// agent-mesh#100: a bus re-bound under the same agent key — the sender's
+    /// process restarted — is admitted by a receiver that is still running
+    /// and still holds its predecessor's sequence high-water mark.
+    #[tokio::test]
+    async fn a_rebound_sender_is_admitted_by_a_receiver_that_kept_running() {
+        let user = UserKey::generate();
+        let alice = Arc::new(agent(&user, "alice"));
+        let bob = Arc::new(agent(&user, "bob"));
+        let bob_fp = bob.fingerprint();
+        let net = MeshNet::new();
+        let bob_bus = Bus::bind_with_transport(bob.clone(), Arc::new(net.transport_for(&bob)))
+            .expect("bind Bob to in-memory transport");
+        let topic = Topic::new(user.fingerprint(), "echo");
+        bob_bus.handle_requests(topic.clone(), |body| async move { Ok(body) });
+
+        let bind_alice = || {
+            Bus::bind_with_transport(alice.clone(), Arc::new(net.transport_for(&alice)))
+                .expect("bind Alice to in-memory transport")
+        };
+        let first = bind_alice();
+        for _ in 0..3 {
+            first
+                .request(bob_fp, &topic, b"hi".to_vec(), Duration::from_secs(5))
+                .await
+                .expect("the first incarnation is admitted");
+        }
+        first.close().await.unwrap();
+
+        let second = bind_alice();
+        let reply = second
+            .request(bob_fp, &topic, b"again".to_vec(), Duration::from_secs(2))
+            .await
+            .expect("the re-bound sender is admitted");
+        assert_eq!(reply, b"again");
+
+        second.close().await.unwrap();
         bob_bus.close().await.unwrap();
     }
 
