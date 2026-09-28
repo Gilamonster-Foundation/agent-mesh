@@ -126,6 +126,11 @@ pub enum BusError {
     #[error("core: {0}")]
     Core(#[from] agent_mesh_protocol::MeshError),
 
+    /// A bus could not read or durably reserve its envelope sequences
+    /// ([`crate::sequence::SequenceReservations`]).
+    #[error("sequence reservation: {0}")]
+    SequenceReservation(String),
+
     /// JSON encode/decode failure on the bus's `BusMessage` framing.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),

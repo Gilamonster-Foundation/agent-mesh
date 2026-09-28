@@ -20,6 +20,7 @@ pub mod error;
 pub mod inbox;
 pub mod replay;
 pub mod reply;
+pub mod sequence;
 pub mod topic;
 pub mod transport;
 
@@ -30,6 +31,7 @@ pub use bus::{Bus, BusOptions, IrohTransport, PeerEndpoint};
 pub use error::{BusError, Result};
 pub use inbox::{BusMessage, Inbox, OutgoingReply, RequestContext};
 pub use reply::CorrelationId;
+pub use sequence::{FileSequenceReservations, SequenceReservations};
 pub use topic::Topic;
 pub use transport::{
     AuthenticatedPeer, DeliveryProvenance, InMemoryTransport, Inbound, MeshNet, ReplyRoute,
