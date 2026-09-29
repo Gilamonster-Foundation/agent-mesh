@@ -59,10 +59,10 @@ The library crates are on crates.io:
 ```toml
 # Cargo.toml
 [dependencies]
-agent-mesh-protocol = "0.6"   # ed25519 identity, signed envelopes
-agent-mesh-discovery = "0.6"  # mDNS LAN discovery
-agent-mesh-transport = "0.6"  # authenticated QUIC via iroh
-agent-mesh-bus = "0.6"        # high-level pub/sub + request/reply
+agent-mesh-protocol = "0.7"   # ed25519 identity, signed envelopes
+agent-mesh-discovery = "0.7"  # mDNS LAN discovery
+agent-mesh-transport = "0.7"  # authenticated QUIC via iroh
+agent-mesh-bus = "0.7"        # high-level pub/sub + request/reply
 ```
 
 The `amesh` CLI:

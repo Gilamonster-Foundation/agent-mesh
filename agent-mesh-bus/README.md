@@ -20,6 +20,12 @@ Key types:
 - `AuthenticatedPeer` / `DeliveryProvenance` — typed carrier evidence required
   for inbound admission
 - `replay::NonceCache` / `replay::SequenceTracker` — replay defense
+- `Bus::bind_outbound_only` — a bus that refuses every connection it did not
+  dial; a reply returns on the connection its request went out on
+- `sequence::SequenceReservations` / `FileSequenceReservations` — durable
+  per-key sequence reservations (the `bind_*_reserving` binds), so a peer that
+  outlives a bus still admits its successor under the same agent key. The file
+  store is Unix-only and fails closed elsewhere
 
 Part of [agent-mesh](https://github.com/Gilamonster-Foundation/agent-mesh), cryptographic peer-to-peer agent coordination — no broker, no centralized configuration.
 
