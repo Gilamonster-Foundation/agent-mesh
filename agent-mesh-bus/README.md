@@ -15,6 +15,9 @@ authenticated agent cannot win a reply race or consume the honest waiter.
 Key types:
 
 - `Bus` — the high-level pub/sub + request/reply surface
+- `Bus::open_session` / `Bus::handle_sessions` / `Session` — long-lived,
+  full-duplex conversations over one QUIC stream, authorized at open from the
+  opener's certificate (`docs/decisions/session_streams.md`)
 - `Topic` — pub/sub names scoped to the issuing user's fingerprint
 - `Inbox` / `BusMessage` — application-level message dispatch
 - `AuthenticatedPeer` / `DeliveryProvenance` — typed carrier evidence required
