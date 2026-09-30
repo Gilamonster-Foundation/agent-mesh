@@ -21,6 +21,7 @@ pub mod inbox;
 pub mod replay;
 pub mod reply;
 pub mod sequence;
+pub mod session;
 pub mod topic;
 pub mod transport;
 
@@ -32,8 +33,9 @@ pub use error::{BusError, Result};
 pub use inbox::{BusMessage, Inbox, OutgoingReply, RequestContext};
 pub use reply::CorrelationId;
 pub use sequence::{FileSequenceReservations, SequenceReservations};
+pub use session::{IncomingSession, Session, SessionPeer, SessionReceiver, SessionSender};
 pub use topic::Topic;
 pub use transport::{
     AuthenticatedPeer, DeliveryProvenance, InMemoryTransport, Inbound, MeshNet, ReplyRoute,
-    Transport,
+    SessionStream, Transport,
 };

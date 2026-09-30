@@ -783,6 +783,7 @@ async fn run_session_reader(
             envelope,
             provenance: DeliveryProvenance::Direct { carrier: peer },
             reply_route: route.clone(),
+            stream: None,
         };
         tokio::select! {
             result = inbound_tx.send(inbound) => {

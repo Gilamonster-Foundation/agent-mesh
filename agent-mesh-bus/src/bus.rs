@@ -33,14 +33,17 @@
 use crate::inbox::{BusMessage, Inbox, RequestContext};
 use crate::reply::CorrelationId;
 use crate::sequence::{SequenceReservations, Sequencer};
-use crate::transport::{AuthenticatedPeer, DeliveryProvenance, Inbound, ReplyRoute, Transport};
+use crate::session::{self, IncomingSession, Session, SessionHandlers, Timing};
+use crate::transport::{
+    AuthenticatedPeer, DeliveryProvenance, Inbound, ReplyRoute, SessionStream, Transport,
+};
 use crate::{BusError, Result, Topic};
 use agent_mesh_discovery::{AnnounceConfig, Announcer, AnnouncerHandle};
 use agent_mesh_protocol::{AgentKey, CertChain, Fingerprint, Recipient, SignedEnvelope, UserKey};
 use agent_mesh_transport::{
     do_handshake,
     identity::agent_pubkey_to_iroh,
-    iroh_reexports::{Connection, Incoming, IncomingAddr, PublicKey},
+    iroh_reexports::{Connection, Incoming, IncomingAddr, PublicKey, RecvStream, SendStream},
     recv_envelope, send_envelope, Endpoint, PeerResolver, ResolverHandle, TransportError,
 };
 use async_trait::async_trait;
@@ -48,7 +51,7 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, Mutex as AsyncMutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 
 /// The dial-back route observed on an inbound iroh connection — the peer's
@@ -169,6 +172,10 @@ pub struct Bus {
     transport: Arc<dyn Transport>,
     inbox: Arc<Inbox>,
     sequence: Arc<Sequencer>,
+    /// Session handlers by topic, shared with the receive loop.
+    sessions: Arc<SessionHandlers>,
+    /// Dropped with the bus, which ends every session it opened or accepted.
+    shutdown: watch::Sender<()>,
     /// The bus-level receive loop: pulls each inbound envelope off the
     /// transport, runs it through the inbox, and ships any reply back.
     accept_task: JoinHandle<()>,
@@ -344,11 +351,14 @@ impl Bus {
         let user_fp = verified_local_user(&agent)?;
         let inbox = Arc::new(Inbox::new());
         let sequence = Arc::new(sequence);
+        let sessions = Arc::new(SessionHandlers::default());
+        let (shutdown, _) = watch::channel(());
         let accept_task = spawn_accept_loop(
             transport.clone(),
             agent.clone(),
             inbox.clone(),
             sequence.clone(),
+            (sessions.clone(), shutdown.subscribe()),
         );
         Ok(Self {
             agent,
@@ -356,6 +366,8 @@ impl Bus {
             transport,
             inbox,
             sequence,
+            sessions,
+            shutdown,
             accept_task,
         })
     }
@@ -527,6 +539,52 @@ impl Bus {
     /// on this bus.
     pub async fn subscribe(&self, topic: &Topic) -> broadcast::Receiver<Vec<u8>> {
         self.inbox.subscribe(topic).await
+    }
+
+    /// Open a long-lived, full-duplex [`Session`] with `peer_fp` on `topic`
+    /// (resolved over mDNS), once the peer's [`Self::handle_sessions`]
+    /// handler accepts it.
+    ///
+    /// # Errors
+    /// [`BusError::SessionRefused`] when the peer refuses, or its dial,
+    /// handshake or open-frame error. A transport that carries no streams
+    /// (the in-memory one) cannot open sessions.
+    pub async fn open_session(&self, peer_fp: Fingerprint, topic: &Topic) -> Result<Session> {
+        let (peer, stream) = self.transport.open_stream_to(peer_fp).await?;
+        self.initiate(peer, stream, topic).await
+    }
+
+    /// [`Self::open_session`] to a known [`PeerEndpoint`], without mDNS.
+    ///
+    /// # Errors
+    /// As [`Self::open_session`].
+    pub async fn open_session_direct(&self, peer: PeerEndpoint, topic: &Topic) -> Result<Session> {
+        let (peer, stream) = self.transport.open_stream_to_endpoint(&peer).await?;
+        self.initiate(peer, stream, topic).await
+    }
+
+    async fn initiate(
+        &self,
+        peer: AuthenticatedPeer,
+        stream: SessionStream,
+        topic: &Topic,
+    ) -> Result<Session> {
+        let (agent, shutdown) = (self.agent.clone(), self.shutdown.subscribe());
+        Session::initiate(agent, peer, stream, topic, Timing::default(), shutdown).await
+    }
+
+    /// Serve sessions opened on `topic`. Each open reaches `handler` as an
+    /// [`IncomingSession`] carrying the opener's verified identity and
+    /// certificate, before any data flows; the handler authorizes it (e.g.
+    /// against the certificate's caveats) and accepts or refuses. An open on
+    /// a topic with no handler is refused. Registration is synchronous, as
+    /// for [`Self::handle_requests`].
+    pub fn handle_sessions<F, Fut>(&self, topic: Topic, handler: F)
+    where
+        F: Fn(IncomingSession) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.sessions.register(&topic, handler);
     }
 
     /// Graceful shutdown. Stops the bus receive loop and releases the
@@ -772,16 +830,13 @@ fn ensure_intended_iroh_peer(peer: AuthenticatedPeer, expected_peer_fp: Fingerpr
     Ok(())
 }
 
-/// Open a fresh bidi stream on `conn`, do the cert handshake, bind its verified
-/// peer to both the QUIC session and `expected_peer_fp`, then ship one
-/// already-signed envelope. (The bus signs + sequences the envelope; the
-/// transport only carries it — see [`make_envelope`].)
-async fn send_env_on_conn(
+/// Open a fresh bidi stream on `conn`, do the cert handshake, and bind its
+/// verified peer to both the QUIC session and `expected_peer_fp`.
+async fn open_bound_stream(
     conn: &Connection,
     our_cert: &CertChain,
     expected_peer_fp: Fingerprint,
-    env: &SignedEnvelope,
-) -> Result<()> {
+) -> Result<(AuthenticatedPeer, SendStream, RecvStream)> {
     let (mut send, mut recv) = conn
         .open_bi()
         .await
@@ -797,6 +852,19 @@ async fn send_env_on_conn(
     // receive traffic intended for A.
     let peer = authenticated_iroh_peer(&conn.remote_id(), &peer_cert)?;
     ensure_intended_iroh_peer(peer, expected_peer_fp)?;
+    Ok((peer, send, recv))
+}
+
+/// Ship one already-signed envelope on a fresh bound stream (see
+/// [`open_bound_stream`]). The bus signs + sequences the envelope; the
+/// transport only carries it — see [`make_envelope`].
+async fn send_env_on_conn(
+    conn: &Connection,
+    our_cert: &CertChain,
+    expected_peer_fp: Fingerprint,
+    env: &SignedEnvelope,
+) -> Result<()> {
+    let (_, mut send, _recv) = open_bound_stream(conn, our_cert, expected_peer_fp).await?;
     send_envelope(&mut send, env).await?;
     send.finish()
         .map_err(|e| BusError::Transport(TransportError::Iroh(format!("finish: {e}"))))?;
@@ -804,6 +872,23 @@ async fn send_env_on_conn(
     // bytes before the stream tears down.
     let _ = send.stopped().await;
     Ok(())
+}
+
+/// A bound stream on `conn`, kept open for a session.
+async fn open_session_stream(
+    conn: &Connection,
+    our_cert: &CertChain,
+    expected_peer_fp: Fingerprint,
+) -> Result<(AuthenticatedPeer, SessionStream)> {
+    let (peer, send, recv) = open_bound_stream(conn, our_cert, expected_peer_fp).await?;
+    Ok((peer, session_stream(send, recv)))
+}
+
+fn session_stream(send: SendStream, recv: RecvStream) -> SessionStream {
+    SessionStream {
+        send: Box::new(send),
+        recv: Box::new(recv),
+    }
 }
 
 /// The bus-level receive loop, transport-agnostic: pull each inbound envelope
@@ -816,6 +901,7 @@ fn spawn_accept_loop(
     agent: Arc<AgentKey>,
     inbox: Arc<Inbox>,
     sequence: Arc<Sequencer>,
+    (sessions, shutdown): (Arc<SessionHandlers>, watch::Receiver<()>),
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(inbound) = transport.recv().await {
@@ -823,13 +909,29 @@ fn spawn_accept_loop(
             let agent = agent.clone();
             let inbox = inbox.clone();
             let sequence = sequence.clone();
+            let (sessions, shutdown) = (sessions.clone(), shutdown.clone());
             // One task per inbound so a slow handler/reply can't stall the loop.
             tokio::spawn(async move {
                 let Inbound {
                     envelope,
                     provenance,
                     reply_route,
+                    stream,
                 } = inbound;
+                // A stream opening a session stays with it; any other is
+                // dropped here, before a handler runs, so its sender is not
+                // held waiting for the stream to close.
+                if let Some(stream) = stream.filter(|_| session::open_request(&envelope).is_some())
+                {
+                    let timing = Timing::default();
+                    match IncomingSession::admit(
+                        agent, &envelope, provenance, stream, timing, shutdown,
+                    ) {
+                        Ok(incoming) => sessions.dispatch(incoming).await,
+                        Err(e) => tracing::warn!(error = %e, "bus: session open rejected"),
+                    }
+                    return;
+                }
                 let local_user_fp = agent.cert().user_fingerprint();
                 let local_agent_fp = agent.fingerprint();
                 match inbox
@@ -1025,6 +1127,19 @@ impl Transport for IrohTransport {
         Ok(())
     }
 
+    async fn open_stream_to(&self, fp: Fingerprint) -> Result<(AuthenticatedPeer, SessionStream)> {
+        let conn = dial_peer(&self.endpoint, &self.resolver, fp).await?;
+        open_session_stream(&conn, self.agent.cert(), fp).await
+    }
+
+    async fn open_stream_to_endpoint(
+        &self,
+        peer: &PeerEndpoint,
+    ) -> Result<(AuthenticatedPeer, SessionStream)> {
+        let conn = dial_endpoint(&self.endpoint, *peer).await?;
+        open_session_stream(&conn, self.agent.cert(), peer.fingerprint()).await
+    }
+
     async fn reply(&self, fp: Fingerprint, route: &ReplyRoute, env: SignedEnvelope) -> Result<()> {
         // Reply on the connection the request arrived on, if its authenticated
         // key is the reply's addressee; `send_env_on_conn` re-binds the Hello
@@ -1088,11 +1203,12 @@ impl IrohTransport {
                 reverse: None,
             });
             let first = tokio::time::timeout(window, next_envelope(&conn, &agent)).await;
-            if let Ok(Some((provenance, envelope))) = first {
+            if let Ok(Some((provenance, envelope, _stream))) = first {
                 let _ = inbound_tx.send(Inbound {
                     envelope,
                     provenance,
                     reply_route: route,
+                    stream: None,
                 });
             }
         });
@@ -1158,11 +1274,12 @@ async fn accept_conn(
         conn: conn.clone(),
         reverse: reverse_addr.map(|addr| (conn.remote_id(), addr)),
     });
-    while let Some((provenance, envelope)) = next_envelope(&conn, &agent).await {
+    while let Some((provenance, envelope, stream)) = next_envelope(&conn, &agent).await {
         let inbound = Inbound {
             envelope,
             provenance,
             reply_route: reply_route.clone(),
+            stream: Some(stream),
         };
         if inbound_tx.send(inbound).is_err() {
             tracing::debug!("iroh transport: bus receiver dropped; stopping");
@@ -1174,12 +1291,12 @@ async fn accept_conn(
 
 /// The next envelope the peer sends on `conn`: accept a bidi stream, do the
 /// handshake, bind the Hello cert to the connection's TLS identity, and read
-/// the envelope. A stream that fails any step is logged and skipped; `None`
-/// once the peer closes the connection.
+/// the envelope, leaving the stream open behind it. A stream that fails any
+/// step is logged and skipped; `None` once the peer closes the connection.
 async fn next_envelope(
     conn: &Connection,
     agent: &AgentKey,
-) -> Option<(DeliveryProvenance, SignedEnvelope)> {
+) -> Option<(DeliveryProvenance, SignedEnvelope, SessionStream)> {
     loop {
         let (mut send, mut recv) = match conn.accept_bi().await {
             Ok(streams) => streams,
@@ -1216,7 +1333,10 @@ async fn next_envelope(
             }
         };
         match recv_envelope(&mut recv).await {
-            Ok(env) => return Some((DeliveryProvenance::Direct { carrier }, env)),
+            Ok(env) => {
+                let stream = session_stream(send, recv);
+                return Some((DeliveryProvenance::Direct { carrier }, env, stream));
+            }
             Err(e) => tracing::warn!(error = %e, "iroh transport: envelope read failed"),
         }
     }

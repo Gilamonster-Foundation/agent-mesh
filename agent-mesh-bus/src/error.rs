@@ -126,6 +126,19 @@ pub enum BusError {
     #[error("core: {0}")]
     Core(#[from] agent_mesh_protocol::MeshError),
 
+    /// The responder refused to open a session, for the reason it gave.
+    #[error("session refused: {0}")]
+    SessionRefused(String),
+
+    /// A session stream carried a frame that breaks the session protocol,
+    /// or was used after it ended. The session is over.
+    #[error("session protocol: {0}")]
+    SessionProtocol(String),
+
+    /// A session's peer went away without closing it.
+    #[error("session peer disconnected")]
+    PeerDisconnected,
+
     /// A bus could not read or durably reserve its envelope sequences
     /// ([`crate::sequence::SequenceReservations`]).
     #[error("sequence reservation: {0}")]
