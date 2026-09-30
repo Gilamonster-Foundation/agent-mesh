@@ -7,7 +7,7 @@ and **wyvern-agent** into it — as built on `main 5ff8f3f`, 2026-08-13.
 |---|---|
 | **Repo** | Gilamonster-Foundation/agent-mesh |
 | **CLI** | `amesh` (`cargo install agent-mesh-cli`) |
-| **Crates.io** | `agent-mesh-protocol 0.6.4` + discovery / transport / bus |
+| **Crates.io** | `agent-mesh-protocol 0.7.0` + discovery / transport / bus |
 | **Python** | `pip install newt-agent-mesh` → `import agent_mesh` |
 
 Status markers used throughout: **TODAY** = shipped and working on `main`;

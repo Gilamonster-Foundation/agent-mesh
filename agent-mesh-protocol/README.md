@@ -9,7 +9,9 @@ time is treated as a claim, never as a coordination primitive.
 Key types:
 
 - `UserKey` — root of trust, one ed25519 keypair per user
-- `AgentKey` / `CertChain` — short-lived per-process sub-key, certified by a `UserKey`
+- `AgentKey` / `CertChain` — short-lived per-process sub-key, certified by a `UserKey`;
+  `AgentKey::issue_derived` derives a stable agent identity from the root and a
+  name, without persisting the agent key
 - `GitHubBinding` — cross-signature linking a `UserKey` to the ed25519 SSH key GitHub already knows
 - `SignedEnvelope` — the wire format for every mesh message
 - `Fingerprint` — short BLAKE3 identifier for keys and content
