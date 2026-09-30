@@ -270,50 +270,10 @@ impl Inbox {
         local_user_fp: Fingerprint,
         local_agent_fp: Fingerprint,
     ) -> Result<Option<OutgoingReply>> {
-        // Verification belongs here even when a framing implementation already
-        // did it. A Transport implementation must never be able to bypass the
-        // cert-chain, CID, and signature checks before replay state changes.
-        env.verify()?;
-
-        // Keep these names distinct: `carrier` is authenticated by the
-        // transport session; `signer_*` comes from the verified envelope. They
-        // are equal only because today's sole delivery mode is direct. A future
-        // authorized relay must get a separate provenance variant + policy.
-        let carrier = match provenance {
-            DeliveryProvenance::Direct { carrier } => carrier,
-            DeliveryProvenance::Unbound => return Err(BusError::UnboundDelivery),
-        };
-        let signer_agent_fp = env.sender_agent_fp();
-        let signer_user_fp = env.sender_user_fp();
-
-        if carrier.agent_fp != signer_agent_fp {
-            return Err(BusError::CarrierAgentMismatch {
-                carrier_agent_fp: carrier.agent_fp.hex(),
-                signer_agent_fp: signer_agent_fp.hex(),
-            });
-        }
-        if carrier.user_fp != signer_user_fp {
-            return Err(BusError::CarrierUserMismatch {
-                carrier_user_fp: carrier.user_fp.hex(),
-                signer_user_fp: signer_user_fp.hex(),
-            });
-        }
-        if signer_user_fp != local_user_fp {
-            return Err(BusError::ForeignPeer {
-                peer_user_fp: signer_user_fp.hex(),
-                local_user_fp: local_user_fp.hex(),
-            });
-        }
-        if let Recipient::Direct { agent_fp } = &env.recipient {
-            if *agent_fp != local_agent_fp {
-                return Err(BusError::WrongRecipient {
-                    recipient_agent_fp: agent_fp.hex(),
-                    local_agent_fp: local_agent_fp.hex(),
-                });
-            }
-        }
-
-        let peer_fp = signer_agent_fp;
+        // `ctx` is the verified original signer; the carrier was checked
+        // against it and is not silently substituted for this identity.
+        let ctx = admit(&env, provenance, local_user_fp, local_agent_fp)?;
+        let peer_fp = ctx.caller_agent_fp;
         let parsed_msg = serde_json::from_slice::<BusMessage>(env.payload.as_ref());
 
         // Correlations are bound to the request target, not merely unguessable.
@@ -363,13 +323,6 @@ impl Inbox {
         }
 
         let msg = parsed_msg?;
-
-        // Build the verified original-signer principal. The carrier was checked
-        // separately above and is not silently substituted for this identity.
-        let ctx = RequestContext {
-            caller_user_fp: signer_user_fp,
-            caller_agent_fp: peer_fp,
-        };
 
         match msg {
             BusMessage::Request {
@@ -452,6 +405,65 @@ impl Default for Inbox {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The immutable half of admission, shared by every envelope that reaches
+/// this bus (the [`Inbox`] and session streams alike): verify `env`, bind its
+/// signer to the transport-authenticated carrier, hold the same-user policy,
+/// and check a direct recipient. Nothing here touches replay state, so a
+/// caller may run it before deciding which replay defense applies.
+pub(crate) fn admit(
+    env: &SignedEnvelope,
+    provenance: DeliveryProvenance,
+    local_user_fp: Fingerprint,
+    local_agent_fp: Fingerprint,
+) -> Result<RequestContext> {
+    // Verification belongs here even when a framing implementation already
+    // did it. A Transport implementation must never be able to bypass the
+    // cert-chain, CID, and signature checks before replay state changes.
+    env.verify()?;
+
+    // Keep these names distinct: `carrier` is authenticated by the
+    // transport session; `signer_*` comes from the verified envelope. They
+    // are equal only because today's sole delivery mode is direct. A future
+    // authorized relay must get a separate provenance variant + policy.
+    let carrier = match provenance {
+        DeliveryProvenance::Direct { carrier } => carrier,
+        DeliveryProvenance::Unbound => return Err(BusError::UnboundDelivery),
+    };
+    let signer_agent_fp = env.sender_agent_fp();
+    let signer_user_fp = env.sender_user_fp();
+
+    if carrier.agent_fp != signer_agent_fp {
+        return Err(BusError::CarrierAgentMismatch {
+            carrier_agent_fp: carrier.agent_fp.hex(),
+            signer_agent_fp: signer_agent_fp.hex(),
+        });
+    }
+    if carrier.user_fp != signer_user_fp {
+        return Err(BusError::CarrierUserMismatch {
+            carrier_user_fp: carrier.user_fp.hex(),
+            signer_user_fp: signer_user_fp.hex(),
+        });
+    }
+    if signer_user_fp != local_user_fp {
+        return Err(BusError::ForeignPeer {
+            peer_user_fp: signer_user_fp.hex(),
+            local_user_fp: local_user_fp.hex(),
+        });
+    }
+    if let Recipient::Direct { agent_fp } = &env.recipient {
+        if *agent_fp != local_agent_fp {
+            return Err(BusError::WrongRecipient {
+                recipient_agent_fp: agent_fp.hex(),
+                local_agent_fp: local_agent_fp.hex(),
+            });
+        }
+    }
+    Ok(RequestContext {
+        caller_user_fp: signer_user_fp,
+        caller_agent_fp: signer_agent_fp,
+    })
 }
 
 #[cfg(test)]

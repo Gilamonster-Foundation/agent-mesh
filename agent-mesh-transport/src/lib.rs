@@ -37,7 +37,7 @@ pub use endpoint::Endpoint;
 pub use error::{Result, TransportError};
 pub use handshake::{do_handshake, HelloMsg, RejectMsg};
 pub use resolver::{PeerResolver, ResolverHandle};
-pub use stream::{recv_envelope, send_envelope, MAX_ENVELOPE_BYTES};
+pub use stream::{recv_envelope, send_envelope, EnvelopeReader, MAX_ENVELOPE_BYTES};
 
 /// Re-exports from `iroh` that callers regularly need but shouldn't
 /// have to add iroh as a direct dep for. Keep this list minimal — if

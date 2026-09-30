@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use agent_mesh_protocol::{AgentKey, Fingerprint, SignedEnvelope};
 use async_trait::async_trait;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -81,6 +82,15 @@ pub enum DeliveryProvenance {
     Unbound,
 }
 
+/// Both directions of one authenticated byte stream a session runs over (an
+/// iroh bidi stream in production). Shutting `send` down finishes it cleanly.
+pub struct SessionStream {
+    /// Bytes to the peer.
+    pub send: Box<dyn AsyncWrite + Send + Sync + Unpin>,
+    /// Bytes from the peer.
+    pub recv: Box<dyn AsyncRead + Send + Sync + Unpin>,
+}
+
 /// One inbound envelope, its authenticated delivery provenance, and the route
 /// to reply to its sender.
 pub struct Inbound {
@@ -91,6 +101,10 @@ pub struct Inbound {
     pub provenance: DeliveryProvenance,
     /// Opaque route to reply back to the sender (see [`ReplyRoute`]).
     pub reply_route: ReplyRoute,
+    /// The stream the envelope arrived on, still open, when the transport can
+    /// hand it over. The bus keeps it only when the envelope opens a session
+    /// ([`crate::Bus::handle_sessions`]); otherwise it is dropped unread.
+    pub stream: Option<SessionStream>,
 }
 
 /// The wire a [`Bus`](crate::Bus) sends and receives signed envelopes over.
@@ -132,6 +146,23 @@ pub trait Transport: Send + Sync {
     /// (dial-back) and falling back to resolving `fp`.
     async fn reply(&self, fp: Fingerprint, route: &ReplyRoute, env: SignedEnvelope) -> Result<()>;
 
+    /// Open an authenticated stream to the peer named by `fp` for a session,
+    /// returning the peer the stream authenticated, which must be `fp`. The
+    /// default carries no sessions.
+    async fn open_stream_to(&self, fp: Fingerprint) -> Result<(AuthenticatedPeer, SessionStream)> {
+        let _ = fp;
+        Err(no_sessions())
+    }
+
+    /// [`Self::open_stream_to`] for a known endpoint (no resolution).
+    async fn open_stream_to_endpoint(
+        &self,
+        peer: &PeerEndpoint,
+    ) -> Result<(AuthenticatedPeer, SessionStream)> {
+        let _ = peer;
+        Err(no_sessions())
+    }
+
     /// The next inbound envelope with typed carrier provenance, or `None` when
     /// the transport is closed. A transport without a peer binding must report
     /// [`DeliveryProvenance::Unbound`], which the bus rejects by default.
@@ -142,6 +173,10 @@ pub trait Transport: Send + Sync {
 
     /// Release resources (endpoint, discovery, switchboard registration).
     async fn close(&self);
+}
+
+fn no_sessions() -> BusError {
+    BusError::TransportBackend("this transport carries no session streams".into())
 }
 
 // ── In-memory transport (test double) ───────────────────────────────────────
@@ -210,6 +245,7 @@ impl InMemoryTransport {
                 envelope: env,
                 provenance: DeliveryProvenance::Direct { carrier: self.me },
                 reply_route: Arc::new(self.me.agent_fp),
+                stream: None,
             },
         )
     }
