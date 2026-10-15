@@ -187,6 +187,7 @@ version = "0.7.0"
 dependencies = [
  "agent-mesh-bus",
  "agent-mesh-protocol",
+ "agent-mesh-transport",
  "async-trait",
  "blake3",
  "ed25519-dalek 2.2.0",

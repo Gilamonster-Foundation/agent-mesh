@@ -7,20 +7,22 @@
 use crate::error::{Result, SshTransportError};
 use crate::process::{OpenSshClient, SshTarget, UnauthenticatedSshCarrier};
 use crate::session::{
-    AuthenticatedSessionReader, AuthenticatedSessionWriter, SessionParameters, SessionTimeouts,
-    UnauthenticatedMeshSession,
+    AuthenticatedMeshSession, AuthenticatedSessionReader, AuthenticatedSessionWriter,
+    SessionParameters, SessionPurpose, SessionTimeouts, UnauthenticatedMeshSession,
 };
 use agent_mesh_bus::{
-    AuthenticatedPeer, BusError, DeliveryProvenance, Inbound, PeerEndpoint, ReplyRoute, Transport,
+    AuthenticatedPeer, BusError, DeliveryProvenance, Inbound, PeerEndpoint, ReplyRoute,
+    SessionStream, Transport,
 };
 use agent_mesh_protocol::{AgentKey, Fingerprint, SignedEnvelope};
+use agent_mesh_transport::{send_envelope as write_frame, EnvelopeReader};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 #[cfg(test)]
 use tokio::net::TcpStream;
@@ -36,6 +38,8 @@ const DEFAULT_MAX_SESSIONS: usize = 64;
 const DEFAULT_INBOUND_CAPACITY: usize = 256;
 const PROCESS_EXIT_GRACE: Duration = Duration::from_secs(1);
 const SESSION_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+/// Bytes buffered between the bus and a stream's record bridge, each way.
+const STREAM_PIPE_BYTES: usize = 64 * 1024;
 
 /// Resource, trust-context, and deadline policy for [`SshTransport`].
 #[derive(Debug, Clone)]
@@ -335,60 +339,9 @@ impl SshTransport {
             return result;
         }
 
-        let permit = tokio::time::timeout(
-            self.options.session_timeouts.authentication,
-            self.session_slots.clone().acquire_owned(),
-        )
-        .await
-        .map_err(|_| SshTransportError::Timeout {
-            stage: "waiting for an SSH session slot".into(),
-        })?
-        .map_err(|_| SshTransportError::Closed)?;
-        if *self.shutdown_tx.borrow() {
-            return Err(SshTransportError::Closed);
-        }
-
-        let (reader, writer, mut process) = self.open_carrier(&target).await?;
-        if *self.shutdown_tx.borrow() {
-            return Err(SshTransportError::Closed);
-        }
-        let pending = UnauthenticatedMeshSession::initiator(
-            reader,
-            writer,
-            self.agent.clone(),
-            peer_fp,
-            self.options.session_parameters.clone(),
-            self.options.session_timeouts,
-        );
-        let authenticated = tokio::select! {
-            _ = shutdown.changed() => return Err(SshTransportError::Closed),
-            result = pending.authenticate() => result,
-        };
-        let mut session = match authenticated {
-            Ok(session) => session,
-            Err(error) => {
-                return Err(match process.take() {
-                    Some(carrier) => {
-                        carrier
-                            .fail_inner_auth(error.to_string(), PROCESS_EXIT_GRACE)
-                            .await
-                    }
-                    None => SshTransportError::InnerAuth {
-                        message: error.to_string(),
-                        stderr: String::new(),
-                    },
-                });
-            }
-        };
-        if session.peer().agent_fp != peer_fp {
-            return Err(SshTransportError::PeerMismatch {
-                expected: peer_fp.hex(),
-                actual: session.peer().agent_fp.hex(),
-            });
-        }
-        if *self.shutdown_tx.borrow() {
-            return Err(SshTransportError::Closed);
-        }
+        let (mut session, mut process, permit) = self
+            .connect_authenticated(peer_fp, &target, SessionPurpose::Messages, &mut shutdown)
+            .await?;
         let sent = tokio::select! {
             _ = shutdown.changed() => return Err(SshTransportError::Closed),
             result = session.send_envelope(&env) => result,
@@ -419,6 +372,116 @@ impl SshTransport {
             return Err(SshTransportError::Closed);
         }
         Ok(())
+    }
+
+    /// Take a session slot, dial `target`, and mutually authenticate it as
+    /// `peer_fp` for `purpose`.
+    async fn connect_authenticated(
+        &self,
+        peer_fp: Fingerprint,
+        target: &SshTarget,
+        purpose: SessionPurpose,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> Result<(
+        AuthenticatedMeshSession<BoxReader, BoxWriter>,
+        Option<UnauthenticatedSshCarrier>,
+        OwnedSemaphorePermit,
+    )> {
+        let permit = tokio::time::timeout(
+            self.options.session_timeouts.authentication,
+            self.session_slots.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| SshTransportError::Timeout {
+            stage: "waiting for an SSH session slot".into(),
+        })?
+        .map_err(|_| SshTransportError::Closed)?;
+        if *self.shutdown_tx.borrow() {
+            return Err(SshTransportError::Closed);
+        }
+
+        let (reader, writer, mut process) = self.open_carrier(target).await?;
+        if *self.shutdown_tx.borrow() {
+            return Err(SshTransportError::Closed);
+        }
+        let pending = UnauthenticatedMeshSession::initiator(
+            reader,
+            writer,
+            self.agent.clone(),
+            peer_fp,
+            self.options.session_parameters.clone(),
+            self.options.session_timeouts,
+        )
+        .with_purpose(purpose);
+        let authenticated = tokio::select! {
+            _ = shutdown.changed() => return Err(SshTransportError::Closed),
+            result = pending.authenticate() => result,
+        };
+        let session = match authenticated {
+            Ok(session) => session,
+            Err(error) => {
+                return Err(match process.take() {
+                    Some(carrier) => {
+                        carrier
+                            .fail_inner_auth(error.to_string(), PROCESS_EXIT_GRACE)
+                            .await
+                    }
+                    None => SshTransportError::InnerAuth {
+                        message: error.to_string(),
+                        stderr: String::new(),
+                    },
+                });
+            }
+        };
+        if session.peer().agent_fp != peer_fp {
+            return Err(SshTransportError::PeerMismatch {
+                expected: peer_fp.hex(),
+                actual: session.peer().agent_fp.hex(),
+            });
+        }
+        if *self.shutdown_tx.borrow() {
+            return Err(SshTransportError::Closed);
+        }
+        Ok((session, process, permit))
+    }
+
+    /// Dial a dedicated connection to `peer_fp` and bridge it to a byte
+    /// stream for a bus session. The connection never joins the message
+    /// cache: its records belong to the stream until either end closes.
+    async fn open_stream(
+        &self,
+        peer_fp: Fingerprint,
+    ) -> Result<(AuthenticatedPeer, SessionStream)> {
+        let mut shutdown = self.shutdown_tx.subscribe();
+        if *shutdown.borrow_and_update() {
+            return Err(SshTransportError::Closed);
+        }
+        let target = self
+            .targets
+            .read()
+            .expect("SSH target map poisoned")
+            .get(&peer_fp)
+            .cloned()
+            .ok_or_else(|| SshTransportError::PeerMismatch {
+                expected: peer_fp.hex(),
+                actual: "no configured SSH target".into(),
+            })?;
+        let (session, process, permit) = self
+            .connect_authenticated(peer_fp, &target, SessionPurpose::Stream, &mut shutdown)
+            .await?;
+        let (reader, writer) = session.into_split();
+        let peer = reader.peer();
+        let route = new_route(peer, writer);
+        let stream = bridge_stream(
+            reader,
+            route,
+            process,
+            permit,
+            self.shutdown_tx.subscribe(),
+            &self.session_tasks,
+        )
+        .ok_or(SshTransportError::Closed)?;
+        Ok((peer, stream))
     }
 
     async fn cached_outbound(&self, peer_fp: Fingerprint) -> Option<Arc<SshReplyRoute>> {
@@ -512,12 +575,7 @@ impl SshTransport {
     ) -> bool {
         let (reader, writer) = session.into_split();
         let peer = reader.peer();
-        let route = Arc::new(SshReplyRoute {
-            peer,
-            writer: Arc::new(AsyncMutex::new(writer)),
-            alive: AtomicBool::new(true),
-            closed: Notify::new(),
-        });
+        let route = new_route(peer, writer);
         let outbound_sessions = cache_outbound.then(|| self.outbound_sessions.clone());
         if let Some(sessions) = &outbound_sessions {
             sessions.lock().await.insert(peer.agent_fp, route.clone());
@@ -592,6 +650,23 @@ impl Transport for SshTransport {
 
         tracing::debug!(peer = %fp.short(), "SSH reply route unavailable; opening configured target");
         self.send_over_session(fp, env).await.map_err(backend_error)
+    }
+
+    async fn open_stream_to(
+        &self,
+        fp: Fingerprint,
+    ) -> agent_mesh_bus::Result<(AuthenticatedPeer, SessionStream)> {
+        self.open_stream(fp).await.map_err(backend_error)
+    }
+
+    async fn open_stream_to_endpoint(
+        &self,
+        peer: &PeerEndpoint,
+    ) -> agent_mesh_bus::Result<(AuthenticatedPeer, SessionStream)> {
+        // As `send_to_endpoint`: only the fingerprint selects the SSH target.
+        self.open_stream(peer.fingerprint())
+            .await
+            .map_err(backend_error)
     }
 
     async fn recv(&self) -> Option<Inbound> {
@@ -707,6 +782,7 @@ async fn run_accept_loop(
         let options = options.clone();
         let inbound_tx = inbound_tx.clone();
         let mut task_shutdown = shutdown.clone();
+        let session_tasks_for_stream = session_tasks.clone();
         let task = tokio::spawn(async move {
             if *task_shutdown.borrow() {
                 return;
@@ -725,14 +801,21 @@ async fn run_accept_loop(
             };
             match authenticated {
                 Ok(session) => {
+                    let stream_mode = session.peer_purpose() == SessionPurpose::Stream;
                     let (reader, writer) = session.into_split();
-                    let peer = reader.peer();
-                    let route = Arc::new(SshReplyRoute {
-                        peer,
-                        writer: Arc::new(AsyncMutex::new(writer)),
-                        alive: AtomicBool::new(true),
-                        closed: Notify::new(),
-                    });
+                    let route = new_route(reader.peer(), writer);
+                    if stream_mode {
+                        serve_stream(
+                            reader,
+                            route,
+                            permit,
+                            inbound_tx,
+                            task_shutdown,
+                            &session_tasks_for_stream,
+                        )
+                        .await;
+                        return;
+                    }
                     run_session_reader(
                         reader,
                         route,
@@ -818,6 +901,134 @@ async fn run_session_reader(
     }
 }
 
+fn new_route(peer: AuthenticatedPeer, writer: SessionWriter) -> Arc<SshReplyRoute> {
+    Arc::new(SshReplyRoute {
+        peer,
+        writer: Arc::new(AsyncMutex::new(writer)),
+        alive: AtomicBool::new(true),
+        closed: Notify::new(),
+    })
+}
+
+/// Responder side of a stream-mode connection: read the session-open
+/// envelope, then hand the bus the rest of the connection as a byte stream.
+async fn serve_stream(
+    mut reader: SessionReader,
+    route: Arc<SshReplyRoute>,
+    permit: OwnedSemaphorePermit,
+    inbound_tx: mpsc::Sender<Inbound>,
+    mut shutdown: watch::Receiver<bool>,
+    tasks: &Arc<Mutex<Vec<JoinHandle<()>>>>,
+) {
+    let peer = reader.peer();
+    let envelope = tokio::select! {
+        _ = shutdown.changed() => return,
+        result = reader.recv_envelope() => match result {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                tracing::warn!(peer = %peer.agent_fp.short(), %error, "SSH stream open failed");
+                return;
+            }
+        },
+    };
+    let Some(stream) = bridge_stream(reader, route.clone(), None, permit, shutdown, tasks) else {
+        return;
+    };
+    let inbound = Inbound {
+        envelope,
+        provenance: DeliveryProvenance::Direct { carrier: peer },
+        reply_route: route,
+        stream: Some(stream),
+    };
+    // Dropping a refused inbound drops the stream, which ends the bridge.
+    let _ = inbound_tx.send(inbound).await;
+}
+
+/// Carry a bus session's byte stream over authenticated records.
+///
+/// The bus writes length-prefixed signed envelopes to one end of an in-memory
+/// pipe; each is re-sent as a session record, and each record received is
+/// written back out as the same framing for the bus to read. The record layer
+/// still owns the wire, so no raw bytes cross the authenticated boundary.
+/// Returns `None` if the transport is already closed.
+fn bridge_stream(
+    mut reader: SessionReader,
+    route: Arc<SshReplyRoute>,
+    process: Option<UnauthenticatedSshCarrier>,
+    permit: OwnedSemaphorePermit,
+    shutdown: watch::Receiver<bool>,
+    tasks: &Arc<Mutex<Vec<JoinHandle<()>>>>,
+) -> Option<SessionStream> {
+    let (bus_send, mut to_peer) = tokio::io::duplex(STREAM_PIPE_BYTES);
+    let (mut from_peer, bus_recv) = tokio::io::duplex(STREAM_PIPE_BYTES);
+    let peer = reader.peer();
+    let task = tokio::spawn({
+        let route = route.clone();
+        let mut shutdown = shutdown.clone();
+        async move {
+            let _permit = permit;
+            let outbound = async {
+                let mut frames = EnvelopeReader::new(&mut to_peer);
+                loop {
+                    let env = tokio::select! {
+                        _ = route.dead() => break,
+                        next = frames.next() => match next {
+                            Ok(Some(env)) => env,
+                            _ => break,
+                        },
+                    };
+                    let mut attempt = RouteWriteAttempt::new(&route);
+                    let mut writer = route.writer.lock().await;
+                    if writer.send_envelope(&env).await.is_err() {
+                        break;
+                    }
+                    attempt.complete();
+                }
+            };
+            let inbound = async {
+                loop {
+                    let env = tokio::select! {
+                        _ = route.dead() => break,
+                        result = reader.recv_envelope() => match result {
+                            Ok(env) => env,
+                            Err(_) => break,
+                        },
+                    };
+                    if write_frame(&mut from_peer, &env).await.is_err()
+                        || from_peer.flush().await.is_err()
+                    {
+                        break;
+                    }
+                }
+            };
+            // Either direction ending ends the stream: a bus that finished
+            // sending has sent its last frame, and a peer that went away
+            // leaves nothing to receive.
+            tokio::select! {
+                _ = shutdown.changed() => {}
+                _ = outbound => {}
+                _ = inbound => {}
+            }
+            route.mark_dead();
+            drop(route);
+            if let Some(carrier) = process {
+                let error = carrier
+                    .finish("session stream ended", PROCESS_EXIT_GRACE)
+                    .await;
+                tracing::debug!(peer = %peer.agent_fp.short(), %error, "SSH stream child ended");
+            }
+        }
+    });
+    if let Err(task) = track_task(tasks, task, &shutdown) {
+        task.abort();
+        return None;
+    }
+    Some(SessionStream {
+        send: Box::new(bus_send),
+        recv: Box::new(bus_recv),
+    })
+}
+
 fn track_task(
     tasks: &Arc<Mutex<Vec<JoinHandle<()>>>>,
     task: JoinHandle<()>,
@@ -842,6 +1053,95 @@ fn verify_cert(cert: &agent_mesh_protocol::CertChain, generation: Option<u64>) -
 
 fn backend_error(error: SshTransportError) -> BusError {
     BusError::TransportBackend(error.to_string())
+}
+
+// The same session-stream scenarios the iroh transport runs (#84).
+#[cfg(test)]
+#[path = "../../agent-mesh-bus/tests/session_scenarios/mod.rs"]
+mod session_scenarios;
+
+#[cfg(test)]
+mod stream_tests {
+    use super::session_scenarios::{self as scenarios, Boxed, Fabric, Node};
+    use super::*;
+    use crate::process::HostKeyPolicy;
+    use agent_mesh_bus::Bus;
+    use agent_mesh_protocol::UserKey;
+
+    #[derive(Default)]
+    struct Ssh {
+        // Keeps each target's temp files alive for the fabric's lifetime.
+        files: Mutex<Vec<tempfile::TempDir>>,
+    }
+
+    impl Fabric for Ssh {
+        fn node<'a>(&'a self, user: &'a UserKey, agent: AgentKey) -> Boxed<'a, Node> {
+            let _ = user;
+            Box::pin(async move {
+                let pubkey = agent.public_bytes();
+                let agent = Arc::new(agent);
+                let transport = Arc::new(
+                    SshTransport::bind_loopback_for_test(
+                        agent.clone(),
+                        SshTransportOptions::default(),
+                    )
+                    .await
+                    .unwrap(),
+                );
+                let at = PeerEndpoint::new(pubkey, transport.local_addr());
+                let bus = Bus::bind_with_transport(agent, transport.clone() as Arc<dyn Transport>)
+                    .unwrap();
+                Node {
+                    bus,
+                    at,
+                    handle: Some(transport),
+                }
+            })
+        }
+
+        fn link(&self, from: &Node, to: &Node) {
+            let dir = tempfile::tempdir().unwrap();
+            let identity = dir.path().join("id");
+            let known_hosts = dir.path().join("known_hosts");
+            std::fs::write(&identity, b"test-only placeholder").unwrap();
+            std::fs::write(&known_hosts, b"test-only placeholder").unwrap();
+            let target = SshTarget::new(
+                "newtmesh",
+                "127.0.0.1",
+                22,
+                "127.0.0.1",
+                to.at.addr.port(),
+                identity,
+                HostKeyPolicy::Pinned {
+                    known_hosts_file: known_hosts,
+                },
+            )
+            .unwrap();
+            let transport = from
+                .handle
+                .clone()
+                .unwrap()
+                .downcast::<SshTransport>()
+                .unwrap();
+            transport.add_target(to.at.fingerprint(), target);
+            self.files.lock().unwrap().push(dir);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_session_over_ssh_is_full_duplex_and_authorized_at_open() {
+        scenarios::full_duplex_and_authorized_at_open(&Ssh::default()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn closing_a_bus_ends_the_ssh_sessions_it_serves() {
+        scenarios::closing_a_bus_ends_the_sessions_it_serves(&Ssh::default()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stalled_ssh_session_consumer_holds_its_pushing_peer_back() {
+        scenarios::a_stalled_consumer_holds_its_pushing_peer_back(&Ssh::default()).await;
+    }
 }
 
 #[cfg(test)]
