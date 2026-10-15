@@ -10,7 +10,7 @@
 //! | Proof | Mechanism | Answers |
 //! |-------|-----------|---------|
 //! | Identity | [`AuthorityId`]/[`GrantId`] (CID) | *is this the exact object?* |
-//! | Assertion | signature (deferred) | *who vouched for it?* |
+//! | Assertion | detached signature ([`crate::assertion::Assertion`]) | *who vouched for it?* |
 //! | Authorization | attenuation algebra ([`check_derivation`]) | *is this legal?* |
 //! | Enforcement | platform witness (agent-bridle) | *what did the OS enforce?* |
 //!
