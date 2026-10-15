@@ -1010,8 +1010,13 @@ fn bridge_stream(
                 }
                 route.mark_dead();
             };
+            // Route death cancels the whole bridge, including a pump blocked
+            // on the local pipe or the record writer, so a fatal error cannot
+            // be held open by a stalled consumer. A clean outbound EOF does
+            // not mark the route dead; both pumps then run to completion.
             tokio::select! {
                 _ = shutdown.changed() => {}
+                _ = route.dead() => {}
                 _ = async { tokio::join!(outbound, inbound) } => {}
             }
             route.mark_dead();
@@ -1131,6 +1136,115 @@ mod stream_tests {
             transport.add_target(to.at.fingerprint(), target);
             self.files.lock().unwrap().push(dir);
         }
+    }
+
+    /// Fatal outbound failure while the receive pipe is backpressured must
+    /// release the session slot without the consumer dropping its receive
+    /// half: a pump blocked on the local pipe may not outlive route death.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fatal_send_error_reclaims_the_slot_despite_a_stalled_receiver() {
+        use agent_mesh_protocol::{AgentMetadata, Caveats, Recipient};
+        use tokio::io::AsyncWriteExt as _;
+
+        let user = UserKey::generate();
+        let issue = |role: &str| {
+            Arc::new(AgentKey::issue(
+                &user,
+                AgentMetadata {
+                    role: role.into(),
+                    host: "ssh-test".into(),
+                    capabilities: vec!["test".into()],
+                    issued_at: "2026-08-14T00:00:00Z".into(),
+                    expires_at: None,
+                    caveats: Caveats::top(),
+                },
+            ))
+        };
+        let (alice, bob) = (issue("alice"), issue("bob"));
+        let bob_transport = SshTransport::bind_loopback_for_test(
+            bob.clone(),
+            SshTransportOptions {
+                max_sessions: 1,
+                ..SshTransportOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        let connect = |purpose| {
+            let (alice, bob_fp, addr) =
+                (alice.clone(), bob.fingerprint(), bob_transport.local_addr());
+            async move {
+                let (r, w) = TcpStream::connect(addr).await.unwrap().into_split();
+                UnauthenticatedMeshSession::initiator(
+                    r,
+                    w,
+                    alice,
+                    bob_fp,
+                    SessionParameters::new(None),
+                    SessionTimeouts::default(),
+                )
+                .with_purpose(purpose)
+                .authenticate()
+                .await
+            }
+        };
+        let envelope = |seq, len| {
+            SignedEnvelope::new(
+                &alice,
+                Recipient::Direct {
+                    agent_fp: bob.fingerprint(),
+                },
+                seq,
+                vec![7; len],
+            )
+        };
+
+        let mut first = connect(SessionPurpose::Stream).await.unwrap();
+        first.send_envelope(&envelope(0, 1)).await.unwrap();
+        let inbound = tokio::time::timeout(Duration::from_secs(10), bob_transport.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        // The bus keeps only the stream past the open; the reply route (a
+        // second owner of the connection's writer) is dropped with the rest.
+        let mut stream = {
+            let inbound = inbound;
+            inbound.stream.unwrap()
+        };
+        // Frame (~132 KB) exceeds the 64 KiB pipe; nothing reads it.
+        first.send_envelope(&envelope(1, 64 * 1024)).await.unwrap();
+        // Read only the length prefix: the receive pump is now provably
+        // mid-frame, blocked writing the body into the full pipe.
+        let mut prefix = [0u8; 4];
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::io::AsyncReadExt::read_exact(&mut stream.recv, &mut prefix),
+        )
+        .await
+        .expect("frame prefix arrives")
+        .unwrap();
+        // An oversized length prefix is a fatal outbound frame error.
+        stream
+            .send
+            .write_all(&(agent_mesh_transport::MAX_ENVELOPE_BYTES + 1).to_be_bytes())
+            .await
+            .unwrap();
+        stream.send.flush().await.unwrap();
+
+        // Causal signal: the bridge dropped its end of the connection.
+        let closed = tokio::time::timeout(Duration::from_secs(10), first.recv_envelope()).await;
+        assert!(
+            matches!(closed, Ok(Err(_))),
+            "route death must end the bridge while its receiver is stalled"
+        );
+        // The slot is free again, with the receive half still held.
+        let second =
+            tokio::time::timeout(Duration::from_secs(10), connect(SessionPurpose::Messages))
+                .await
+                .expect("second authentication finishes");
+        assert!(second.is_ok(), "slot reclaimed: {:?}", second.err());
+        drop(stream);
+        bob_transport.close().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
