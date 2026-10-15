@@ -197,6 +197,16 @@ fn genesis_id_binds_every_payload_field() {
     let mut renamed = fx.genesis.clone();
     renamed.payload.name = "other".into();
     assert_ne!(renamed.content_id().unwrap(), id);
+    let mut rekinded = fx.genesis.clone();
+    rekinded.payload.kind = "not-genesis".into();
+    assert_ne!(rekinded.content_id().unwrap(), id);
+    let mut reroster = fx.genesis.clone();
+    reroster.payload.roster.pop();
+    assert_ne!(reroster.content_id().unwrap(), id);
+    // another server certificate (generated key), same everything else
+    let mut reserved = fx.genesis.clone();
+    reserved.payload.server_cert = fx.key("other-server").cert().clone();
+    assert_ne!(reserved.content_id().unwrap(), id);
 }
 
 /// A writer fork is refused: it takes no index, moves no head, and changes
