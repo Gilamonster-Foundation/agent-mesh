@@ -5,6 +5,7 @@ members = [
     "agent-mesh-bus",
     "agent-mesh-cli",
     "agent-mesh-discovery",
+    "agent-mesh-flock",
     "agent-mesh-py",
     "agent-mesh-ratchet",
     "agent-mesh-transport",
@@ -30,7 +31,7 @@ serde_json = "1.0"
 serde_bytes = "0.11"
 # Content-addressed identity (CIDv1 / dag-cbor / BLAKE3). The provenance
 # authority IDs are typed newtypes over its `ContentId`; do NOT fork it.
-content-addressable = "0.1.0"
+content-addressable = "0.1.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -88,6 +89,7 @@ agent-mesh-discovery = { path = "agent-mesh-discovery", version = "=0.7.0" }
 agent-mesh-ratchet = { path = "agent-mesh-ratchet", version = "=0.7.0" }
 agent-mesh-transport = { path = "agent-mesh-transport", version = "=0.7.0" }
 agent-mesh-transport-ssh = { path = "agent-mesh-transport-ssh", version = "=0.7.0" }
+agent-mesh-flock = { path = "agent-mesh-flock", version = "=0.7.0" }
 tests-common = { path = "tests/common" }
 
 # Test deps
