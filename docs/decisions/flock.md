@@ -202,6 +202,7 @@ root is bound to genesis, and that every epoch step has its matching `epoch`
 event.
 
 Checks, in order:
+
 0. **Duplicate first.** An already-admitted CID returns its index, so retries
    are safe.
 1. **Signer class:**
