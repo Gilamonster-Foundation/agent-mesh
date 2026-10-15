@@ -57,6 +57,26 @@ pub enum SessionRole {
     Responder,
 }
 
+/// What the initiator wants the authenticated connection for.
+///
+/// Carried in the initiator's signed Hello, so it is bound into the transcript
+/// both peers prove. The responder learns it only after authentication.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionPurpose {
+    /// Independent envelopes, delivered to the bus one by one.
+    #[default]
+    Messages,
+    /// One long-lived byte stream for a bus session, bridged over records.
+    Stream,
+}
+
+impl SessionPurpose {
+    fn is_messages(&self) -> bool {
+        *self == Self::Messages
+    }
+}
+
 impl SessionRole {
     fn opposite(self) -> Self {
         match self {
@@ -283,9 +303,17 @@ pub struct UnauthenticatedMeshSession<R, W> {
     expected_responder: Option<Fingerprint>,
     parameters: SessionParameters,
     timeouts: SessionTimeouts,
+    purpose: SessionPurpose,
 }
 
 impl<R, W> UnauthenticatedMeshSession<R, W> {
+    /// Declare what this (initiator) connection is for; default `Messages`.
+    #[must_use]
+    pub fn with_purpose(mut self, purpose: SessionPurpose) -> Self {
+        self.purpose = purpose;
+        self
+    }
+
     /// Create the spoke/initiator side.  The responder AgentKey fingerprint is
     /// mandatory and is carried inside the signed transcript.
     #[must_use]
@@ -305,6 +333,7 @@ impl<R, W> UnauthenticatedMeshSession<R, W> {
             expected_responder: Some(expected_responder),
             parameters,
             timeouts,
+            purpose: SessionPurpose::Messages,
         }
     }
 
@@ -326,6 +355,7 @@ impl<R, W> UnauthenticatedMeshSession<R, W> {
             expected_responder: None,
             parameters,
             timeouts,
+            purpose: SessionPurpose::Messages,
         }
     }
 }
@@ -357,6 +387,7 @@ where
             peer_cert: outcome.peer_cert,
             peer_verifying_key: outcome.peer_verifying_key,
             transcript_id: outcome.transcript_id,
+            peer_purpose: outcome.peer_purpose,
             send_counter: 0,
             receive_counter: 0,
             record_timeout: self.timeouts.record,
@@ -375,7 +406,8 @@ where
             self.local_agent.cert().clone(),
             self.parameters.clone(),
             self.expected_responder,
-        );
+        )
+        .with_purpose(self.purpose);
         let local_hello_raw = encode_auth_frame(&AuthFrame::Hello(Box::new(local_hello.clone())))?;
 
         // Both endpoints write and read each flight concurrently.  Sequential
@@ -424,11 +456,13 @@ where
             peer_cert: peer_hello.cert,
             peer_verifying_key,
             transcript_id,
+            peer_purpose: peer_hello.purpose,
         })
     }
 }
 
 struct HandshakeOutcome {
+    peer_purpose: SessionPurpose,
     peer: AuthenticatedPeer,
     peer_cert: CertChain,
     peer_verifying_key: VerifyingKey,
@@ -446,6 +480,7 @@ pub struct AuthenticatedMeshSession<R, W> {
     peer_cert: CertChain,
     peer_verifying_key: VerifyingKey,
     transcript_id: [u8; 32],
+    peer_purpose: SessionPurpose,
     send_counter: u64,
     receive_counter: u64,
     record_timeout: Duration,
@@ -454,6 +489,12 @@ pub struct AuthenticatedMeshSession<R, W> {
 }
 
 impl<R, W> AuthenticatedMeshSession<R, W> {
+    /// What the peer's signed Hello said this connection is for.
+    #[must_use]
+    pub fn peer_purpose(&self) -> SessionPurpose {
+        self.peer_purpose
+    }
+
     /// Transport-authenticated carrier identity.
     #[must_use]
     pub fn peer(&self) -> AuthenticatedPeer {
@@ -798,6 +839,10 @@ struct HelloFrame {
     cert: CertChain,
     parameters: SessionParameters,
     expected_responder: Option<Fingerprint>,
+    // Omitted when `Messages`, so a message-mode Hello is byte-identical to
+    // one from before streams existed.
+    #[serde(default, skip_serializing_if = "SessionPurpose::is_messages")]
+    purpose: SessionPurpose,
 }
 
 impl HelloFrame {
@@ -817,7 +862,13 @@ impl HelloFrame {
             cert,
             parameters,
             expected_responder,
+            purpose: SessionPurpose::Messages,
         }
+    }
+
+    fn with_purpose(mut self, purpose: SessionPurpose) -> Self {
+        self.purpose = purpose;
+        self
     }
 }
 
@@ -1491,6 +1542,32 @@ mod tests {
             serde_json::to_value(alice.cert()).expect("cert JSON")
         );
         assert_no_secret_field(&value);
+    }
+
+    /// Stream mode is declared in the signed Hello (so it is in the transcript
+    /// both peers prove); a message-mode Hello is unchanged on the wire.
+    #[test]
+    fn stream_purpose_is_in_the_hello_and_message_hello_is_unchanged() {
+        let user = UserKey::generate();
+        let alice = agent(&user, "alice");
+        let hello = || {
+            HelloFrame::new(
+                SessionRole::Initiator,
+                [7; 32],
+                alice.cert().clone(),
+                SessionParameters::default(),
+                Some(alice.fingerprint()),
+            )
+        };
+        let messages: Value = serde_json::from_slice(&hello_raw(hello())).unwrap();
+        assert!(messages["hello"].get("purpose").is_none());
+        let stream_raw = hello_raw(hello().with_purpose(SessionPurpose::Stream));
+        let stream: Value = serde_json::from_slice(&stream_raw).unwrap();
+        assert_eq!(stream["hello"]["purpose"], "stream");
+        assert_ne!(
+            make_transcript_id(&hello_raw(hello()), &stream_raw),
+            make_transcript_id(&stream_raw, &stream_raw)
+        );
     }
 
     #[test]

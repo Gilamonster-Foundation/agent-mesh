@@ -13,6 +13,7 @@ readme = "README.md"
 [dependencies]
 agent-mesh-bus.workspace = true
 agent-mesh-protocol.workspace = true
+agent-mesh-transport.workspace = true
 
 tokio = { workspace = true }
 async-trait.workspace = true
