@@ -387,7 +387,7 @@ fn identity_and_structure_checks() {
 }
 
 #[test]
-fn duplicates_return_their_index_and_forks_are_conflicts() {
+fn duplicates_return_their_index_and_forks_are_refused() {
     let mut fx = Fx::new();
     let first = fx.brief("h1", "a");
     let second = fx.brief("h2", "b");
@@ -409,7 +409,7 @@ fn duplicates_return_their_index_and_forks_are_conflicts() {
     ev.prev = Some(first);
     assert_eq!(
         agent_mesh_flock::admit(&fx.board, &ev.node(), &fx.signer("shep", false)),
-        Verdict::Conflict(ConflictKind::ForkAttempt)
+        Verdict::Refuse(Refusal::WriterFork)
     );
     // a prev nobody admitted is not a chain at all
     let mut ev = fx.event(

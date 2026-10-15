@@ -164,9 +164,7 @@ impl Board {
             _ => None,
         };
         let index = self.order.len() as u64 + 1;
-        if conflict != Some(ConflictKind::ForkAttempt) {
-            self.heads.insert(event.author.clone(), id);
-        }
+        self.heads.insert(event.author.clone(), id);
         if conflict.is_none() {
             if let Some(target) = closed_by(&event) {
                 self.closers.insert(target, id);

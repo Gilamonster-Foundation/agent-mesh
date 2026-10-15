@@ -1,5 +1,5 @@
-//! A deterministic flock for the table tests: fixed user key, derived agent
-//! keys, a roster of one member per role.
+//! A flock for the table tests: a generated user key, derived agent keys, a
+//! roster of one member per role. Nothing here is key-independent-pinned.
 #![allow(dead_code)]
 
 use agent_mesh_flock::{
@@ -8,10 +8,6 @@ use agent_mesh_flock::{
 use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, UserKey};
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
 use std::collections::BTreeMap;
-
-const USER_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-MC4CAQAwBQYDK2VwBCIEIKuXx9uQTwJnGeLeHlzwjrRWW67gN2achpIsqDi8Bjo2\n\
------END PRIVATE KEY-----\n";
 
 pub const ROSTER: &[(&str, Role)] = &[
     ("shep", Role::Shepherd),
@@ -31,11 +27,9 @@ pub struct Fx {
     pub at: u64,
 }
 
+/// A fresh user key per fixture: test keys are generated in memory.
 pub fn user() -> UserKey {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("user.pem");
-    std::fs::write(&path, USER_PEM).unwrap();
-    UserKey::load(&path).unwrap()
+    UserKey::generate()
 }
 
 fn issue(user: &UserKey, label: &str) -> AgentKey {

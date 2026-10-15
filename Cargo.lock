@@ -118,7 +118,6 @@ dependencies = [
  "agent-mesh-protocol",
  "content-addressable",
  "serde",
- "tempfile",
 ]
 
 [[package]]

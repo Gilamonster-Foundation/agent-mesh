@@ -30,6 +30,9 @@ pub enum Refusal {
     NotAllowed,
     /// `prev` is neither the author's head nor a legal first link.
     BadPrev,
+    /// A second child of the author's head: a writer fork. Refused; the
+    /// server records the attempt, this crate admits nothing.
+    WriterFork,
     /// A required reference is absent.
     MissingRef(&'static str),
     /// A reference role this kind does not take.
@@ -53,8 +56,6 @@ pub enum Refusal {
 /// An event admitted but flagged: it never replaces the first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConflictKind {
-    /// A second child of an author's head.
-    ForkAttempt,
     /// A second closer of the same target.
     SecondCloser {
         /// The closer already admitted.
@@ -103,12 +104,9 @@ fn decide(board: &Board, node: &MerkleNode<Event>, signer: &Signer) -> Result<Ve
         return Err(Refusal::BodyKindMismatch);
     }
     let member = signer_member(board, ev.kind, signer)?;
-    let fork = writer_chain(board, ev, signer)?;
+    writer_chain(board, ev, signer)?;
     let target = check_refs(board, ev)?;
     let closes = apply_table(board, ev, member, target)?;
-    if let Some(kind) = fork {
-        return Ok(Verdict::Conflict(kind));
-    }
     Ok(match closes.and_then(|t| board.closer_of(&t)) {
         Some(first) => Verdict::Conflict(ConflictKind::SecondCloser { first }),
         None => Verdict::Admit,
@@ -177,18 +175,15 @@ fn signer_member<'a>(
     }
 }
 
-/// `prev` must be the session author's head; a second child is a fork
-/// attempt. A session's first event may chain from a server `handoff`.
-fn writer_chain(
-    board: &Board,
-    ev: &Event,
-    signer: &Signer,
-) -> Result<Option<ConflictKind>, Refusal> {
+/// `prev` must be the session author's head; a second child is a writer
+/// fork and is refused before any reference or table check. A session's
+/// first event may chain from a server `handoff`.
+fn writer_chain(board: &Board, ev: &Event, signer: &Signer) -> Result<(), Refusal> {
     match signer.class {
-        SignerClass::Server => return Ok(None),
+        SignerClass::Server => return Ok(()),
         SignerClass::Operator => {
             return if ev.prev.is_none() {
-                Ok(None)
+                Ok(())
             } else {
                 Err(Refusal::BadPrev)
             }
@@ -197,19 +192,19 @@ fn writer_chain(
     }
     let head = board.head_of(&ev.author);
     if ev.prev == head {
-        return Ok(None);
+        return Ok(());
     }
     match (head, ev.prev) {
         (None, Some(p)) => match board.get(&p) {
-            Some(e) if e.event.kind == Kind::Handoff => Ok(None),
+            Some(e) if e.event.kind == Kind::Handoff => Ok(()),
             _ => Err(Refusal::BadPrev),
         },
-        (Some(_), None) => Ok(Some(ConflictKind::ForkAttempt)),
+        (Some(_), None) => Err(Refusal::WriterFork),
         (Some(_), Some(p)) => match board.get(&p) {
-            Some(e) if e.event.author == ev.author => Ok(Some(ConflictKind::ForkAttempt)),
+            Some(e) if e.event.author == ev.author => Err(Refusal::WriterFork),
             _ => Err(Refusal::BadPrev),
         },
-        (None, None) => Ok(None),
+        (None, None) => Ok(()),
     }
 }
 

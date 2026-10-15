@@ -182,13 +182,112 @@ fn a_log_with_a_refused_event_does_not_fold() {
     assert_eq!(err.position, 0);
 }
 
+/// The genesis id depends on the server certificate, whose key is generated
+/// per run, so it cannot be pinned; its derivation can be checked.
 #[test]
-fn genesis_id_is_pinned() {
+fn genesis_id_binds_every_payload_field() {
     use content_addressable::ContentAddressable;
     let fx = Fx::new();
-    let id = fx.genesis.content_id().unwrap().to_string();
-    assert_eq!(
-        id, "bafyr4ifcrlakazmfoct46dap2t3uqba4jsiuttm7rdg3gmnnigga3pk464",
-        "flock_id: {id}"
+    let id = fx.genesis.content_id().unwrap();
+    assert_eq!(id, fx.flock, "flock_id = CID(genesis)");
+    assert!(fx.genesis.parents.is_empty(), "genesis has no parents");
+    let mut salted = fx.genesis.clone();
+    salted.payload.salt = "t".into();
+    assert_ne!(salted.content_id().unwrap(), id);
+    let mut renamed = fx.genesis.clone();
+    renamed.payload.name = "other".into();
+    assert_ne!(renamed.content_id().unwrap(), id);
+}
+
+/// A writer fork is refused: it takes no index, moves no head, and changes
+/// no attempt. (A forked brief must not become the lane's latest attempt, a
+/// forked ack must not make an untouched attempt `working`.)
+#[test]
+fn a_refused_fork_changes_nothing_and_does_not_fold() {
+    use agent_mesh_flock::{LogEntry, Refusal, Verdict};
+
+    let mut fx = Fx::new();
+    let a = fx.brief("h1", "a");
+    let first_head = fx.board.head_of(&fx.fp("shep")).unwrap();
+    fx.brief("h2", "b");
+    let untouched = fx.board.attempt(&a).unwrap();
+    let before = (
+        fx.board.entries().count(),
+        fx.board.head_of(&fx.fp("shep")),
+        fx.board.lanes(),
     );
+
+    // Forks of the shepherd's chain: a brief and (from h1) an ack.
+    let mut forked_brief = fx.event(
+        "shep",
+        Kind::Brief,
+        Body::Brief {
+            to: "h2".into(),
+            lane: "b".into(),
+        },
+        &[],
+    );
+    forked_brief.prev = Some(first_head);
+    let forked_brief = LogEntry {
+        node: forked_brief.node(),
+        signer: fx.signer("shep", false),
+    };
+    assert_eq!(
+        fx.board.apply(&forked_brief),
+        Verdict::Refuse(Refusal::WriterFork)
+    );
+
+    fx.emit(
+        "h1",
+        Kind::Job,
+        Body::Job {
+            lane: "z".into(),
+            label: "x".into(),
+        },
+        &[],
+    );
+    let h1_first = fx.board.head_of(&fx.fp("h1")).unwrap();
+    fx.emit(
+        "h1",
+        Kind::Job,
+        Body::Job {
+            lane: "y".into(),
+            label: "x".into(),
+        },
+        &[],
+    );
+    let mut forked_ack = fx.event("h1", Kind::Ack, Body::Ack, &[("of", a)]);
+    forked_ack.prev = Some(h1_first);
+    let forked_ack = LogEntry {
+        node: forked_ack.node(),
+        signer: fx.signer("h1", false),
+    };
+    let heads = fx.board.head_of(&fx.fp("h1"));
+    let entries = fx.board.entries().count();
+    assert_eq!(
+        fx.board.apply(&forked_ack),
+        Verdict::Refuse(Refusal::WriterFork)
+    );
+
+    assert_eq!(fx.board.entries().count(), entries, "no index consumed");
+    assert_eq!(fx.board.head_of(&fx.fp("h1")), heads, "head unmoved");
+    assert_eq!(
+        fx.board.attempt(&a).unwrap(),
+        untouched,
+        "attempt unchanged"
+    );
+    assert_eq!(before.1, fx.board.head_of(&fx.fp("shep")));
+    assert_eq!(before.2, fx.board.lanes(), "lanes unchanged by either fork");
+    assert_eq!(
+        before.0 + 2,
+        fx.board.entries().count(),
+        "only the two real jobs"
+    );
+
+    // A log containing the fork is not an admitted log.
+    let mut log = fx.log.clone();
+    log.push(forked_brief);
+    let err = Board::fold(&fx.genesis, &log).unwrap_err();
+    assert_eq!(err.position, log.len() - 1);
+    assert_eq!(err.refusal, Refusal::WriterFork);
 }
