@@ -51,6 +51,11 @@ async fn a_stalled_session_consumer_holds_its_pushing_peer_back() {
     session_scenarios::a_stalled_consumer_holds_its_pushing_peer_back(&Iroh).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_closed_send_half_still_receives_the_final_response_over_quic() {
+    session_scenarios::a_closed_send_half_still_receives_the_final_response(&Iroh).await;
+}
+
 #[tokio::test]
 async fn a_transport_without_streams_cannot_open_a_session() {
     let user = UserKey::generate();

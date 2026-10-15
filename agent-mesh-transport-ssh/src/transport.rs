@@ -967,14 +967,17 @@ fn bridge_stream(
         let mut shutdown = shutdown.clone();
         async move {
             let _permit = permit;
+            // A clean EOF from the bus ends only this pump: a split session
+            // may close its sender and still await the peer's final reply.
             let outbound = async {
                 let mut frames = EnvelopeReader::new(&mut to_peer);
                 loop {
                     let env = tokio::select! {
-                        _ = route.dead() => break,
+                        _ = route.dead() => return,
                         next = frames.next() => match next {
                             Ok(Some(env)) => env,
-                            _ => break,
+                            Ok(None) => return,
+                            Err(_) => break,
                         },
                     };
                     let mut attempt = RouteWriteAttempt::new(&route);
@@ -984,7 +987,12 @@ fn bridge_stream(
                     }
                     attempt.complete();
                 }
+                // Fatal: a torn frame or failed write ends the whole stream.
+                route.mark_dead();
             };
+            // The receive pump ending (peer gone, fatal record error, or the
+            // bus dropped its receiver) ends the stream: nothing is left to
+            // deliver, and the outbound pump sees the route die.
             let inbound = async {
                 loop {
                     let env = tokio::select! {
@@ -1000,14 +1008,11 @@ fn bridge_stream(
                         break;
                     }
                 }
+                route.mark_dead();
             };
-            // Either direction ending ends the stream: a bus that finished
-            // sending has sent its last frame, and a peer that went away
-            // leaves nothing to receive.
             tokio::select! {
                 _ = shutdown.changed() => {}
-                _ = outbound => {}
-                _ = inbound => {}
+                _ = async { tokio::join!(outbound, inbound) } => {}
             }
             route.mark_dead();
             drop(route);
@@ -1136,6 +1141,11 @@ mod stream_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn closing_a_bus_ends_the_ssh_sessions_it_serves() {
         scenarios::closing_a_bus_ends_the_sessions_it_serves(&Ssh::default()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_closed_send_half_still_receives_the_final_response_over_ssh() {
+        scenarios::a_closed_send_half_still_receives_the_final_response(&Ssh::default()).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

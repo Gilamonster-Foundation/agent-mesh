@@ -179,3 +179,37 @@ pub async fn a_stalled_consumer_holds_its_pushing_peer_back(fab: &dyn Fabric) {
     alice.bus.close().await.unwrap();
     bob.bus.close().await.unwrap();
 }
+
+/// The opener finishes sending (`SessionSender::close`, a send-half shutdown)
+/// and must still receive the peer's later, final envelope.
+pub async fn a_closed_send_half_still_receives_the_final_response(fab: &dyn Fabric) {
+    let user = UserKey::generate();
+    let bob = fab.node(&user, agent(&user, "bob", "serve")).await;
+    let topic = Topic::new(user.fingerprint(), "batch");
+    bob.bus
+        .handle_sessions(topic.clone(), |incoming: IncomingSession| async move {
+            let mut session = incoming.accept().await?;
+            let mut seen = 0usize;
+            while session.recv().await?.is_some() {
+                seen += 1;
+            }
+            session
+                .send(format!("final after {seen}").into_bytes())
+                .await?;
+            session.close().await
+        });
+
+    let alice = fab.node(&user, agent(&user, "alice", "batch")).await;
+    fab.link(&alice, &bob);
+    let session = alice.bus.open_session_direct(bob.at, &topic).await.unwrap();
+    let (tx, mut rx) = session.split();
+    tx.send(b"a".to_vec()).await.unwrap();
+    tx.send(b"b".to_vec()).await.unwrap();
+    tx.close().await.unwrap();
+
+    let last = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await;
+    assert_eq!(last.unwrap().unwrap().unwrap(), b"final after 2");
+    assert_eq!(rx.recv().await.unwrap(), None);
+    alice.bus.close().await.unwrap();
+    bob.bus.close().await.unwrap();
+}
