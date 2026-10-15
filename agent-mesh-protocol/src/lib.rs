@@ -19,6 +19,7 @@
 #![doc(html_root_url = "https://docs.rs/agent-mesh-protocol")]
 
 pub mod agent_key;
+pub mod assertion;
 pub mod authority;
 pub mod caveats;
 pub mod envelope;
@@ -32,6 +33,7 @@ pub mod user_key;
 pub mod pyo3_module;
 
 pub use agent_key::{AgentKey, AgentMetadata, CertChain, Issuer, SerdeSig};
+pub use assertion::Assertion;
 pub use authority::{
     admit, check_derivation, empty_closure, relate, verify_chain, AdmissionDecision,
     AdmissionReject, AttestationId, AttestationVerifier, Authority, AuthorityId, AuthorityMismatch,
