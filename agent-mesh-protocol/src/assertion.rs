@@ -48,19 +48,20 @@ impl Assertion {
     }
 
     /// Check that the author signed `cid` and that the author's chain passes
-    /// through `trust_root` (the flock server's agent public key) at epoch
-    /// `generation`. Two servers of one user share a user key but not an agent
-    /// key, so the chain must name *this* server, not merely the same user.
+    /// is **rooted** at `trust_root` (the flock server's agent public key) at epoch
+    /// `generation`: the trust root must be the root agent, the certificate
+    /// issued by the user. An intermediate or leaf key matching is refused.
+    /// Two servers of one user share a user key but not an agent key.
     ///
     /// # Errors
     /// [`MeshError::BadSignature`] if the signature does not match `cid`;
     /// [`MeshError::InvalidCertChain`] / generation / amplification errors if
-    /// the chain is bad or does not pass through `trust_root`.
+    /// the chain is bad or its root agent is not `trust_root`.
     pub fn verify(&self, cid: &ContentId, trust_root: &[u8; 32], generation: u64) -> Result<()> {
         self.author.verify_at(generation)?;
-        if !chain_names(&self.author, trust_root) {
+        if root_agent(&self.author) != trust_root {
             return Err(MeshError::InvalidCertChain(
-                "author chain does not pass through the trust root".into(),
+                "author chain is not rooted at the trust root".into(),
             ));
         }
         VerifyingKey::from_bytes(&self.author.agent_pubkey)
@@ -69,13 +70,12 @@ impl Assertion {
     }
 }
 
-/// Does `cert` or any ancestor issuer hold `pubkey`?
-fn chain_names(cert: &CertChain, pubkey: &[u8; 32]) -> bool {
-    cert.agent_pubkey == *pubkey
-        || match &cert.issuer {
-            Issuer::User(_) => false,
-            Issuer::Agent { parent, .. } => chain_names(parent, pubkey),
-        }
+/// The key of the chain's root agent: the certificate issued by a user.
+fn root_agent(cert: &CertChain) -> &[u8; 32] {
+    match &cert.issuer {
+        Issuer::User(_) => &cert.agent_pubkey,
+        Issuer::Agent { parent, .. } => root_agent(parent),
+    }
 }
 
 #[cfg(test)]
@@ -147,5 +147,47 @@ mod tests {
             sig: SerdeSig(author.sign(&c.to_bytes())),
         };
         assert!(a.verify(&c, &server.public_bytes(), 0).is_err());
+    }
+
+    fn seed_of(k: &AgentKey) -> [u8; 32] {
+        k.signing_key_bytes()
+    }
+
+    #[test]
+    fn intermediate_match_with_other_root_agent_is_refused() {
+        // user -> other -> pinned -> author: root agent is `other`.
+        let user = UserKey::generate();
+        let other = AgentKey::issue(&user, meta("other"));
+        let pinned = AgentKey::issue(&user, meta("pinned"));
+        let ch = other.possession_challenge(pinned.public_bytes());
+        let proof = pinned.sign(&ch.signing_bytes());
+        let cert = other
+            .delegate_external(&ch, &proof, meta("pinned"))
+            .unwrap();
+        let pinned_via_other = AgentKey::from_seed_and_cert(&seed_of(&pinned), cert).unwrap();
+        let author = pinned_via_other.delegate(meta("author")).unwrap();
+        let a = Assertion::sign(&author, &cid(1));
+        assert!(a.verify(&cid(1), &pinned.public_bytes(), 0).is_err());
+        a.verify(&cid(1), &other.public_bytes(), 0).unwrap();
+    }
+
+    #[test]
+    fn author_leaf_as_trust_root_is_refused() {
+        let (_server, author) = flock(&UserKey::generate());
+        let a = Assertion::sign(&author, &cid(1));
+        assert!(a.verify(&cid(1), &author.public_bytes(), 0).is_err());
+    }
+
+    #[test]
+    fn bounded_generation_valid_at_n_refused_at_n_plus_1() {
+        let user = UserKey::generate();
+        let mut m = meta("server");
+        m.caveats.valid_for_generation = crate::Scope::only([5u64]);
+        let server = AgentKey::issue(&user, m.clone());
+        let author = server.delegate(m).unwrap();
+        let a = Assertion::sign(&author, &cid(1));
+        a.verify(&cid(1), &server.public_bytes(), 5).unwrap();
+        assert!(a.verify(&cid(1), &server.public_bytes(), 6).is_err());
+        assert!(a.verify(&cid(1), &server.public_bytes(), 4).is_err());
     }
 }
