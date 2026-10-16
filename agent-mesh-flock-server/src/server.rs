@@ -4,12 +4,12 @@ use crate::chain::{verify_entry, Chain};
 use crate::frame::{seal, Frame};
 use crate::init::{load_genesis, KEY_FILE, LOG_FILE, REFUSALS_FILE};
 use crate::log::Log;
+use crate::refusal::{Reason, RefusalEntry, RefusalRecord};
 use crate::{load_server_key, CrashPlan, ServerError, SignerResolver};
 use agent_mesh_flock::{admit, Board, ConflictKind, Event, LogEntry, Refusal, Signer, Verdict};
 use agent_mesh_protocol::{AgentKey, Assertion};
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// What an admission returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,11 +24,13 @@ pub struct Receipt {
 
 /// An open flock server.
 pub struct Server {
-    dir: PathBuf,
     key: AgentKey,
     board: Board,
     chain: Chain,
     log: Log,
+    refusal_log: Log,
+    refusals: Vec<RefusalEntry>,
+    refusal_prev: ContentId,
     resolver: Box<dyn SignerResolver>,
     poisoned: bool,
 }
@@ -53,7 +55,10 @@ impl Server {
                 "the key file is not the genesis server key".into(),
             ));
         }
-        let (log, frames) = Log::open(&dir.join(LOG_FILE))?;
+        // Parse both files without touching them; verify everything retained;
+        // only then cut a torn tail.
+        let (mut log, frames) = Log::open::<Frame>(&dir.join(LOG_FILE))?;
+        let (mut refusal_log, entries) = Log::open::<RefusalEntry>(&dir.join(REFUSALS_FILE))?;
         let mut board = Board::new(&genesis.node).map_err(enc)?;
         let mut chain = Chain::new(board.flock(), server_pub);
         for (offset, frame) in frames {
@@ -78,12 +83,33 @@ impl Server {
                 );
             }
         }
+        let mut refusal_prev = chain_root(&board);
+        let mut last = 0;
+        for (offset, entry) in &entries {
+            refusal_prev = entry
+                .verify(
+                    &refusal_prev,
+                    &server_pub,
+                    chain.epoch,
+                    last,
+                    chain.next_index - 1,
+                )
+                .map_err(|e| ServerError::Corrupt {
+                    offset: *offset,
+                    why: e.to_string(),
+                })?;
+            last = entry.record.payload.admitted;
+        }
+        log.commit_recovery()?;
+        refusal_log.commit_recovery()?;
         Ok(Self {
-            dir: dir.to_path_buf(),
             key,
             board,
             chain,
             log,
+            refusal_log,
+            refusals: entries.into_iter().map(|(_, e)| e).collect(),
+            refusal_prev,
             resolver,
             poisoned: false,
         })
@@ -109,8 +135,8 @@ impl Server {
 
     /// The refusal audit chain, oldest first.
     #[must_use]
-    pub fn refusals(&self) -> &[crate::RefusalEntry] {
-        &[]
+    pub fn refusals(&self) -> &[RefusalEntry] {
+        &self.refusals
     }
 
     /// The latest admission record's id (the genesis id before any): what
@@ -182,7 +208,7 @@ impl Server {
                 })
             }
             Verdict::Refuse(r) => {
-                self.journal_refusal(&cid, &node, &r)?;
+                self.record_refusal(&cid, &node, &r)?;
                 return Err(ServerError::Refused(r));
             }
         };
@@ -206,25 +232,35 @@ impl Server {
         })
     }
 
-    /// Refused events are not in the signed chain; they are kept in a
-    /// side journal so a fork attempt can be seen.
-    fn journal_refusal(
-        &self,
+    /// Refused events stay out of the board and the admission index; each is
+    /// signed into the refusal chain with one frame and one fsync.
+    fn record_refusal(
+        &mut self,
         cid: &ContentId,
         node: &MerkleNode<Event>,
         why: &Refusal,
     ) -> Result<(), ServerError> {
-        let line = serde_json::json!({
-            "event": cid.to_string(),
-            "author": node.payload.author,
-            "refusal": format!("{why:?}"),
-        });
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.dir.join(REFUSALS_FILE))?;
-        writeln!(f, "{line}")?;
-        f.sync_data()?;
+        let entry = RefusalEntry::sign(
+            &self.key,
+            self.refusal_prev,
+            RefusalRecord {
+                event: *cid,
+                author: node.payload.author.clone(),
+                reason: Reason::from(why),
+                admitted: self.admitted(),
+            },
+        )?;
+        if let Err(e) = self.refusal_log.append(&entry) {
+            self.poisoned = true;
+            return Err(e);
+        }
+        self.refusal_prev = entry.record.content_id().map_err(enc)?;
+        self.refusals.push(entry);
         Ok(())
     }
+}
+
+/// The id both chains are rooted at.
+fn chain_root(board: &Board) -> ContentId {
+    board.flock()
 }

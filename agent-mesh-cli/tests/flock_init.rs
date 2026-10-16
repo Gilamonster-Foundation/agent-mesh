@@ -1,4 +1,5 @@
 //! `amesh flock init`: mints the server key and genesis, once.
+#![cfg(unix)]
 
 use agent_mesh_flock_server::{Server, ServerOnly};
 use assert_cmd::Command;

@@ -1,4 +1,5 @@
 //! Crash at every write point, torn tails, corruption, forged chains.
+#![cfg(unix)]
 mod support;
 
 use agent_mesh_flock::Kind;

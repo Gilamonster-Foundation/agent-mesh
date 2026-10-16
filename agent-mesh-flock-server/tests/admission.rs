@@ -1,4 +1,5 @@
 //! Admission through the server: duplicates, signers, forks, races.
+#![cfg(unix)]
 mod support;
 
 use agent_mesh_flock::{Body, Kind, Member, Refusal, Role};
@@ -66,8 +67,13 @@ fn a_fork_attempt_is_refused_and_logged() {
     ));
     assert_eq!((env.log_len(), server.admitted()), (len, count));
     assert!(server.board().get(&fork_id).is_none());
-    let journal = std::fs::read_to_string(env.dir().join(REFUSALS_FILE)).unwrap();
-    assert!(journal.contains(&fork_id.to_string()) && journal.contains("WriterFork"));
+    let r = server.refusals();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].record.payload.event, fork_id);
+    assert_eq!(
+        r[0].record.payload.reason,
+        agent_mesh_flock_server::Reason::WriterFork
+    );
 }
 
 #[test]
@@ -188,8 +194,6 @@ fn a_refusal_is_a_typed_signed_record_that_consumes_no_index() {
 #[test]
 fn a_refusal_chain_continues_across_a_restart() {
     let mut env = three_refusals();
-    let shep_fp = env.sessions.clone();
-    let _ = shep_fp;
     let mut server = reopen(&env).unwrap();
     let key = env.server_key();
     // a server-class event the table refuses (a brief is not a server kind)

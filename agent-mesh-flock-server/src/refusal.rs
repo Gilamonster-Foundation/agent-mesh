@@ -5,9 +5,10 @@
 //! payload: RefusalRecord }` with the server's `Assertion` over its id, one
 //! per frame, in the file `refusals`.
 
+use crate::ServerError;
 use agent_mesh_flock::Refusal;
-use agent_mesh_protocol::Assertion;
-use content_addressable::{ContentId, MerkleNode};
+use agent_mesh_protocol::{AgentKey, Assertion};
+use content_addressable::{ContentAddressable, ContentId, MerkleNode};
 use serde::{Deserialize, Serialize};
 
 /// Why the table refused an event: [`Refusal`] as stored data, not Debug text.
@@ -100,4 +101,59 @@ pub struct RefusalEntry {
     pub record: MerkleNode<RefusalRecord>,
     /// The server's assertion over the record's id.
     pub sig: Assertion,
+}
+
+impl RefusalEntry {
+    /// Record a refusal after `prev` (the previous refusal id, or genesis).
+    ///
+    /// # Errors
+    /// Encoding failure.
+    pub fn sign(
+        server: &AgentKey,
+        prev: ContentId,
+        record: RefusalRecord,
+    ) -> Result<Self, ServerError> {
+        let record = MerkleNode::new(record, [prev]);
+        let id = record
+            .content_id()
+            .map_err(|e| ServerError::Encoding(e.to_string()))?;
+        Ok(Self {
+            sig: Assertion::sign(server, &id),
+            record,
+        })
+    }
+
+    /// Check this entry extends `prev`, is signed by the server key itself,
+    /// and does not claim more admissions than exist or fewer than the last.
+    ///
+    /// # Errors
+    /// [`ServerError::Signer`] naming what failed.
+    pub fn verify(
+        &self,
+        prev: &ContentId,
+        server_pub: &[u8; 32],
+        epoch: u64,
+        last_admitted: u64,
+        total_admitted: u64,
+    ) -> Result<ContentId, ServerError> {
+        let bad = |why: &str| ServerError::Signer(format!("refusal chain: {why}"));
+        let id = self
+            .record
+            .content_id()
+            .map_err(|e| ServerError::Encoding(e.to_string()))?;
+        if &self.sig.author().agent_pubkey != server_pub {
+            return Err(bad("not signed by the server key"));
+        }
+        self.sig
+            .verify(&id, server_pub, epoch)
+            .map_err(|e| bad(&e.to_string()))?;
+        if self.record.parents != std::iter::once(*prev).collect() {
+            return Err(bad("does not extend the previous refusal"));
+        }
+        let at = self.record.payload.admitted;
+        if at < last_admitted || at > total_admitted {
+            return Err(bad("admission count out of order"));
+        }
+        Ok(id)
+    }
 }

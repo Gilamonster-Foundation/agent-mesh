@@ -6,11 +6,16 @@
 //! the certificate.
 
 use crate::ServerError;
-use agent_mesh_protocol::{AgentKey, CertChain};
+use agent_mesh_protocol::AgentKey;
+#[cfg(unix)]
+use agent_mesh_protocol::CertChain;
+#[cfg(unix)]
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use std::io::Write;
 use std::path::Path;
 
+#[cfg(unix)]
 #[derive(Serialize, Deserialize)]
 struct KeyFile {
     seed: String,

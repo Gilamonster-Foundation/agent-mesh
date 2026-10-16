@@ -84,11 +84,13 @@ pub fn init(dir: &Path, user: &UserKey, spec: InitSpec) -> Result<ContentId, Ser
     f.write_all(&bytes)?;
     f.sync_all()?;
     std::fs::rename(&tmp, dir.join(GENESIS_FILE))?;
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(dir.join(LOG_FILE))?
-        .sync_all()?;
+    for name in [LOG_FILE, REFUSALS_FILE] {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(name))?
+            .sync_all()?;
+    }
     File::open(dir)?.sync_all()?;
     Ok(flock)
 }

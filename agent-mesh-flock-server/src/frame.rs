@@ -17,6 +17,7 @@ use agent_mesh_flock::Event;
 use agent_mesh_protocol::{AgentKey, Assertion, CertChain};
 use content_addressable::canonical::{from_canonical_dagcbor_checked, to_canonical_dagcbor};
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// Bytes before the payload.
@@ -106,12 +107,13 @@ fn check(len: [u8; 4]) -> [u8; 4] {
     out
 }
 
-/// Header plus payload for `frame`.
+/// Header plus payload for one frame holding `value` (a [`Frame`] in the
+/// admission log, a refusal entry in the refusal chain).
 ///
 /// # Errors
 /// Encoding failure, or a payload over 4 GiB.
-pub fn encode(frame: &Frame) -> Result<Vec<u8>, ServerError> {
-    let payload = to_canonical_dagcbor(frame).map_err(|e| ServerError::Encoding(e.to_string()))?;
+pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, ServerError> {
+    let payload = to_canonical_dagcbor(value).map_err(|e| ServerError::Encoding(e.to_string()))?;
     let len = u32::try_from(payload.len())
         .map_err(|_| ServerError::Encoding("frame too large".into()))?
         .to_be_bytes();
@@ -124,13 +126,13 @@ pub fn encode(frame: &Frame) -> Result<Vec<u8>, ServerError> {
 
 /// What sits at an offset in the log bytes.
 #[derive(Debug)]
-pub enum Next {
+pub enum Next<T> {
     /// Nothing left.
     End,
     /// An incomplete final frame: the header or payload is cut short.
     Torn,
     /// A whole frame and the offset just after it.
-    Frame(Frame, usize),
+    Frame(T, usize),
 }
 
 /// Read the frame at `at`.
@@ -138,7 +140,7 @@ pub enum Next {
 /// # Errors
 /// A reason when a complete header fails its check or a complete payload does
 /// not decode canonically: committed history is damaged.
-pub fn next(bytes: &[u8], at: usize) -> Result<Next, String> {
+pub fn next<T: Serialize + DeserializeOwned>(bytes: &[u8], at: usize) -> Result<Next<T>, String> {
     let rest = &bytes[at..];
     if rest.is_empty() {
         return Ok(Next::End);
@@ -154,7 +156,7 @@ pub fn next(bytes: &[u8], at: usize) -> Result<Next, String> {
     if rest.len() < end {
         return Ok(Next::Torn);
     }
-    let frame = from_canonical_dagcbor_checked::<Frame>(&rest[HEADER_LEN..end])
+    let frame = from_canonical_dagcbor_checked::<T>(&rest[HEADER_LEN..end])
         .map_err(|e| format!("frame payload: {e}"))?;
     Ok(Next::Frame(frame, at + end))
 }
