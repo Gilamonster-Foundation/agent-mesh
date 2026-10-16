@@ -1,9 +1,15 @@
 //! Verifying the signed admission chain, entry by entry.
+//!
+//! A reader, or the server recovering, checks for each entry: the record is
+//! signed by the server key itself (a member's delegated key is not enough),
+//! extends the previous record (the first extends genesis), carries the next
+//! index, names this event and the certificate its signature chains through,
+//! and moves the epoch only as an `epoch` event does.
 
-use crate::frame::Sealed;
+use crate::frame::{cert_cid, AdmissionRecord, Sealed};
 use crate::{ServerError, SignerResolver};
-use agent_mesh_flock::{Board, Signer};
-use content_addressable::ContentId;
+use agent_mesh_flock::{Board, Kind, Signer};
+use content_addressable::{ContentAddressable, ContentError, ContentId};
 
 /// Running state of a chain: what the next record must extend.
 #[derive(Debug, Clone)]
@@ -18,15 +24,82 @@ pub struct Chain {
     pub server_pub: [u8; 32],
 }
 
+impl Chain {
+    /// Start after genesis.
+    #[must_use]
+    pub fn new(genesis: ContentId, server_pub: [u8; 32]) -> Self {
+        Self {
+            prev: genesis,
+            next_index: 1,
+            epoch: 0,
+            server_pub,
+        }
+    }
+
+    /// The epoch a record for an event of `kind` must carry.
+    #[must_use]
+    pub fn epoch_for(&self, kind: Kind) -> u64 {
+        self.epoch + u64::from(kind == Kind::Epoch)
+    }
+
+    /// Step past a verified or just-written record.
+    pub fn advance(&mut self, record: ContentId, rec: &AdmissionRecord) {
+        self.prev = record;
+        self.next_index += 1;
+        self.epoch = rec.epoch;
+    }
+}
+
+fn enc(e: ContentError) -> ServerError {
+    ServerError::Encoding(e.to_string())
+}
+
+fn bad(why: &str) -> ServerError {
+    ServerError::Signer(why.into())
+}
+
 /// Verify `sealed` extends `chain` and resolve its event's signer.
 ///
 /// # Errors
-/// [`ServerError::Signer`] when the chain or signatures do not verify.
+/// [`ServerError::Signer`] when the chain or a signature does not verify.
 pub fn verify_entry(
-    _chain: &Chain,
-    _board: &Board,
-    _sealed: &Sealed,
-    _resolver: &dyn SignerResolver,
+    chain: &Chain,
+    board: &Board,
+    sealed: &Sealed,
+    resolver: &dyn SignerResolver,
 ) -> Result<Signer, ServerError> {
-    todo!()
+    let rec = &sealed.record.payload;
+    let record_id = sealed.record.content_id().map_err(enc)?;
+    if sealed.record_sig.author().agent_pubkey != chain.server_pub {
+        return Err(bad("record is not signed by the server key"));
+    }
+    sealed
+        .record_sig
+        .verify(&record_id, &chain.server_pub, rec.epoch)
+        .map_err(|e| bad(&format!("record signature: {e}")))?;
+    if sealed.record.parents != std::iter::once(chain.prev).collect() {
+        return Err(bad("record does not extend the previous record"));
+    }
+    if rec.index != chain.next_index {
+        return Err(bad("index is not the next one"));
+    }
+    let event_id = sealed.event.content_id().map_err(enc)?;
+    if rec.event != event_id {
+        return Err(bad("record names another event"));
+    }
+    if rec.cert != cert_cid(sealed.event_sig.author())? {
+        return Err(bad("record names another certificate"));
+    }
+    if rec.epoch != chain.epoch_for(sealed.event.payload.kind) {
+        return Err(bad("epoch does not follow the logged transitions"));
+    }
+    resolver
+        .resolve(
+            board,
+            &chain.server_pub,
+            &sealed.event_sig,
+            &event_id,
+            rec.epoch,
+        )
+        .map_err(|e| bad(&e))
 }

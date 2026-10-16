@@ -5,7 +5,7 @@ use agent_mesh_flock::Kind;
 use agent_mesh_flock_server::{
     cert_cid, encode, seal, CrashPlan, Frame, Sealed, Server, ServerError, ServerOnly,
 };
-use content_addressable::ContentId;
+use content_addressable::{ContentAddressable, ContentId};
 use std::io::Write;
 use support::{id, Env};
 
@@ -33,19 +33,8 @@ fn reopen(env: &Env) -> Result<Server, ServerError> {
 
 #[test]
 fn a_crash_at_every_write_point_leaves_the_frame_whole_or_gone() {
-    let frame_len = {
-        let mut env = Env::new();
-        let mut s = env.open();
-        let (n, sig) = env.server_event("probe");
-        s.admit(n, sig).unwrap();
-        env.log_len() as usize
-    };
-    let mut plans: Vec<CrashPlan> = [0, 1, 4, 7, 8, 9, frame_len / 2, frame_len - 1]
-        .into_iter()
-        .map(CrashPlan::AfterBytes)
-        .collect();
-    plans.extend([CrashPlan::BeforeSync, CrashPlan::AfterSync]);
-    for plan in plans {
+    // header, mid-payload, last byte, whole-but-unsynced, synced-but-unreplied
+    for plan in 0..10 {
         let mut env = Env::new();
         let mut s = env.open();
         let (n0, s0) = env.server_event("first");
@@ -53,6 +42,27 @@ fn a_crash_at_every_write_point_leaves_the_frame_whole_or_gone() {
         let good = env.log_len();
         let (n1, s1) = env.server_event("second");
         let cid = id(&n1);
+        // the exact bytes the server will write: signing is deterministic
+        let full = encode(&Frame {
+            sealed: vec![seal(
+                &env.server_key(),
+                s.head_record(),
+                2,
+                0,
+                n1.clone(),
+                s1.clone(),
+            )
+            .unwrap()],
+        })
+        .unwrap()
+        .len();
+        let plan = match plan {
+            0..=5 => CrashPlan::AfterBytes([0, 1, 4, 7, 8, 9][plan]),
+            6 => CrashPlan::AfterBytes(full / 2),
+            7 => CrashPlan::AfterBytes(full - 1),
+            8 => CrashPlan::BeforeSync,
+            _ => CrashPlan::AfterSync,
+        };
         s.plan_crash(Some(plan));
         assert!(s.admit(n1.clone(), s1.clone()).is_err(), "{plan:?}");
         assert!(
@@ -203,7 +213,7 @@ fn server_signed_fixtures_with_a_broken_chain_are_refused() {
             ),
             _ => forged(&mut env, root, 1, 0, Kind::Invite),
         };
-        append_raw(&env, &[first.clone()]);
+        append_raw(&env, std::slice::from_ref(&first));
         if case == "repeated" {
             let prev = {
                 use content_addressable::ContentAddressable;
@@ -249,4 +259,27 @@ fn epoch_must_follow_the_logged_transitions() {
     append_raw(&env, &[s1]);
     assert_eq!(reopen(&env).unwrap().epoch(), 1);
     let _ = cert_cid; // exported for step 4 verifiers
+}
+
+#[test]
+fn a_record_must_name_the_event_and_certificate_it_carries() {
+    // event swapped under an intact record
+    let mut env = Env::new();
+    let root = env.flock;
+    let mut s1 = forged(&mut env, root, 1, 0, Kind::Invite);
+    let other = forged(&mut env, root, 1, 0, Kind::Invite);
+    s1.event = other.event;
+    s1.event_sig = other.event_sig;
+    append_raw(&env, &[s1]);
+    assert!(corrupt_at(reopen(&env)), "event swapped");
+
+    // a record that names another certificate than the one that signed
+    let mut env = Env::new();
+    let root = env.flock;
+    let mut s1 = forged(&mut env, root, 1, 0, Kind::Invite);
+    s1.record.payload.cert = ContentId::from_canonical_bytes(b"another cert");
+    s1.record_sig =
+        agent_mesh_protocol::Assertion::sign(&env.server_key(), &s1.record.content_id().unwrap());
+    append_raw(&env, &[s1]);
+    assert!(corrupt_at(reopen(&env)), "certificate swapped");
 }

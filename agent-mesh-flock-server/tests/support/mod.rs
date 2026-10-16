@@ -53,8 +53,11 @@ pub fn spec() -> InitSpec {
 }
 
 /// Test session table: member sessions certified by the server, plus flags.
+/// fingerprint hex -> (member, pending, ended)
+type Table = HashMap<String, (String, bool, bool)>;
+
 #[derive(Clone, Default)]
-pub struct Sessions(Arc<Mutex<HashMap<String, (String, bool, bool)>>>);
+pub struct Sessions(Arc<Mutex<Table>>);
 
 impl Sessions {
     pub fn add(&self, key: &AgentKey, member: &str, pending: bool) {
