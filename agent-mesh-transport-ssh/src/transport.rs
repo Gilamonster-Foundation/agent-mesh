@@ -37,6 +37,25 @@ type SessionWriter = AuthenticatedSessionWriter<BoxWriter>;
 const DEFAULT_MAX_SESSIONS: usize = 64;
 const DEFAULT_INBOUND_CAPACITY: usize = 256;
 const PROCESS_EXIT_GRACE: Duration = Duration::from_secs(1);
+
+/// Test-only pause points keyed by peer: a bridge parks here right after its
+/// connection is released, so a test can inspect the slot at exactly the
+/// moment the peer can first observe the close.
+#[cfg(test)]
+static TEARDOWN_GATES: Mutex<Vec<(Fingerprint, Arc<Notify>)>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+async fn teardown_gate(peer: &Fingerprint) {
+    let gate = TEARDOWN_GATES
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(fp, _)| fp == peer)
+        .map(|(_, gate)| gate.clone());
+    if let Some(gate) = gate {
+        gate.notified().await;
+    }
+}
 const SESSION_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 /// Bytes buffered between the bus and a stream's record bridge, each way.
 const STREAM_PIPE_BYTES: usize = 64 * 1024;
@@ -844,7 +863,7 @@ async fn run_session_reader(
     mut reader: SessionReader,
     route: Arc<SshReplyRoute>,
     process: Option<UnauthenticatedSshCarrier>,
-    _permit: OwnedSemaphorePermit,
+    permit: OwnedSemaphorePermit,
     inbound_tx: mpsc::Sender<Inbound>,
     mut shutdown: watch::Receiver<bool>,
     outbound_sessions: Option<OutboundSessions>,
@@ -889,6 +908,8 @@ async fn run_session_reader(
             sessions.remove(&peer.agent_fp);
         }
     }
+    // Free the slot before the connection closes (#116).
+    drop(permit);
     drop(route);
     if let Some(carrier) = process {
         let error = carrier.finish(ending, PROCESS_EXIT_GRACE).await;
@@ -966,7 +987,7 @@ fn bridge_stream(
         let route = route.clone();
         let mut shutdown = shutdown.clone();
         async move {
-            let _permit = permit;
+            let permit = permit;
             // A clean EOF from the bus ends only this pump: a split session
             // may close its sender and still await the peer's final reply.
             let outbound = async {
@@ -1020,7 +1041,12 @@ fn bridge_stream(
                 _ = async { tokio::join!(outbound, inbound) } => {}
             }
             route.mark_dead();
+            // Free the slot before the connection closes: the peer seeing
+            // the close may reconnect at once (#116).
+            drop(permit);
             drop(route);
+            #[cfg(test)]
+            teardown_gate(&peer.agent_fp).await;
             if let Some(carrier) = process {
                 let error = carrier
                     .finish("session stream ended", PROCESS_EXIT_GRACE)
@@ -1161,6 +1187,14 @@ mod stream_tests {
             ))
         };
         let (alice, bob) = (issue("alice"), issue("bob"));
+        // Park bob's bridge right after it drops the connection, so the
+        // second authentication below arrives at the moment the peer first
+        // sees the close: the slot must already be free (#116).
+        let gate = Arc::new(Notify::new());
+        TEARDOWN_GATES
+            .lock()
+            .unwrap()
+            .push((alice.fingerprint(), gate.clone()));
         let bob_transport = SshTransport::bind_loopback_for_test(
             bob.clone(),
             SshTransportOptions {
@@ -1242,6 +1276,7 @@ mod stream_tests {
             tokio::time::timeout(Duration::from_secs(10), connect(SessionPurpose::Messages))
                 .await
                 .expect("second authentication finishes");
+        gate.notify_one();
         assert!(second.is_ok(), "slot reclaimed: {:?}", second.err());
         drop(stream);
         bob_transport.close().await;
