@@ -17,7 +17,7 @@ pub const GENESIS_FILE: &str = "genesis";
 /// The log file name.
 pub const LOG_FILE: &str = "log";
 /// Refused-event journal file name.
-pub const REFUSALS_FILE: &str = "refusals.log";
+pub const REFUSALS_FILE: &str = "refusals";
 
 /// What the caller chooses for a new flock.
 #[derive(Debug, Clone)]

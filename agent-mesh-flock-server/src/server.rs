@@ -107,6 +107,12 @@ impl Server {
         self.chain.server_pub
     }
 
+    /// The refusal audit chain, oldest first.
+    #[must_use]
+    pub fn refusals(&self) -> &[crate::RefusalEntry] {
+        &[]
+    }
+
     /// The latest admission record's id (the genesis id before any): what
     /// the next record must extend.
     #[must_use]

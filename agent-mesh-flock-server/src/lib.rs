@@ -17,6 +17,7 @@ mod init;
 mod keyfile;
 mod lock;
 mod log;
+mod refusal;
 mod resolve;
 mod server;
 
@@ -28,5 +29,6 @@ pub use init::{
 };
 pub use keyfile::{load_server_key, store_server_key};
 pub use log::CrashPlan;
+pub use refusal::{Reason, RefusalEntry, RefusalRecord};
 pub use resolve::{ServerOnly, SignerResolver};
 pub use server::{Receipt, Server};

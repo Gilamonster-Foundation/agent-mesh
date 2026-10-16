@@ -283,3 +283,61 @@ fn a_record_must_name_the_event_and_certificate_it_carries() {
     append_raw(&env, &[s1]);
     assert!(corrupt_at(reopen(&env)), "certificate swapped");
 }
+
+#[test]
+fn a_corrupt_prefix_plus_a_torn_tail_is_refused_and_left_untouched() {
+    let mut env = Env::new();
+    let mut s = env.open();
+    for note in ["victim-text", "other"] {
+        let (n, sig) = env.server_event(note);
+        s.admit(n, sig).unwrap();
+    }
+    drop(s);
+    let mut bytes = std::fs::read(env.log_path()).unwrap();
+    // flip one bit inside the first event's text: still canonical, but the
+    // event no longer matches its record
+    let from = b"victim-text";
+    let at = bytes.windows(from.len()).position(|w| w == from).unwrap();
+    bytes[at] ^= 1;
+    bytes.extend_from_slice(&[0, 0, 1]); // a torn append
+    std::fs::write(env.log_path(), &bytes).unwrap();
+    assert!(corrupt_at(reopen(&env)));
+    assert_eq!(
+        std::fs::read(env.log_path()).unwrap(),
+        bytes,
+        "nothing repaired before the prefix verifies"
+    );
+}
+
+#[test]
+fn a_torn_refusal_tail_is_cut_only_after_verification() {
+    let mut env = Env::new();
+    let shep = env.session("shep", false);
+    let mut s = env.open();
+    let (a, sa) = env.brief(&shep, None, "l");
+    let a_id = id(&a);
+    s.admit(a, sa).unwrap();
+    let (b, sb) = env.brief(&shep, Some(a_id), "m");
+    s.admit(b, sb).unwrap();
+    let (f, sf) = env.brief(&shep, Some(a_id), "n");
+    assert!(s.admit(f, sf).is_err());
+    drop(s);
+    let path = env.dir().join(agent_mesh_flock_server::REFUSALS_FILE);
+    let good = std::fs::read(&path).unwrap();
+    // torn tail on the refusals: cut after verification
+    let mut torn = good.clone();
+    torn.extend_from_slice(&[0, 0, 1]);
+    std::fs::write(&path, &torn).unwrap();
+    let s = Server::open(&env.dir(), Box::new(env.sessions.clone())).unwrap();
+    assert_eq!(s.refusals().len(), 1);
+    drop(s);
+    assert_eq!(std::fs::read(&path).unwrap(), good);
+    // a corrupt main log leaves a torn refusals tail alone too
+    std::fs::write(&path, &torn).unwrap();
+    let mut log = std::fs::read(env.log_path()).unwrap();
+    let n = log.len();
+    log[n - 20] ^= 1;
+    std::fs::write(env.log_path(), &log).unwrap();
+    assert!(Server::open(&env.dir(), Box::new(env.sessions.clone())).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), torn);
+}

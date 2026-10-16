@@ -135,3 +135,99 @@ fn a_second_server_on_the_same_log_refuses_to_start() {
     );
     assert!(matches!(second, Err(ServerError::Locked)));
 }
+
+/// A server with an admitted `a`, `b` (child of `a`) and three forks of `a`
+/// refused. Returns the env (log paths) and the dropped server's refusal count.
+fn three_refusals() -> Env {
+    let mut env = Env::new();
+    let shep = env.session("shep", false);
+    let mut server = env.open();
+    let (a, sa) = env.brief(&shep, None, "lane-a");
+    let a_id = id(&a);
+    server.admit(a, sa).unwrap();
+    let (b, sb) = env.brief(&shep, Some(a_id), "lane-b");
+    server.admit(b, sb).unwrap();
+    for lane in ["c1", "c2", "c3"] {
+        let (f, sf) = env.brief(&shep, Some(a_id), lane);
+        assert!(server.admit(f, sf).is_err());
+    }
+    assert_eq!(server.refusals().len(), 3);
+    drop(server);
+    env
+}
+
+fn reopen(env: &Env) -> Result<agent_mesh_flock_server::Server, ServerError> {
+    agent_mesh_flock_server::Server::open(&env.dir(), Box::new(env.sessions.clone()))
+}
+
+/// Split a log file into its whole frames.
+fn frames(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let len = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        out.push(bytes[at..at + 8 + len].to_vec());
+        at += 8 + len;
+    }
+    out
+}
+
+#[test]
+fn a_refusal_is_a_typed_signed_record_that_consumes_no_index() {
+    let env = three_refusals();
+    let server = reopen(&env).unwrap();
+    let r = server.refusals();
+    assert_eq!(r.len(), 3);
+    assert!(r
+        .iter()
+        .all(|e| e.record.payload.reason == agent_mesh_flock_server::Reason::WriterFork));
+    assert!(r.iter().all(|e| e.record.payload.admitted == 2));
+    assert_eq!(server.admitted(), 2, "refusals take no admission index");
+}
+
+#[test]
+fn a_refusal_chain_continues_across_a_restart() {
+    let mut env = three_refusals();
+    let shep_fp = env.sessions.clone();
+    let _ = shep_fp;
+    let mut server = reopen(&env).unwrap();
+    let key = env.server_key();
+    // a server-class event the table refuses (a brief is not a server kind)
+    let (n, s) = env.brief(&key, None, "x");
+    assert!(server.admit(n, s).is_err());
+    assert_eq!(server.refusals().len(), 4);
+    drop(server);
+    assert_eq!(reopen(&env).unwrap().refusals().len(), 4);
+}
+
+#[test]
+fn editing_a_refusal_reason_fails_open() {
+    let env = three_refusals();
+    let path = env.dir().join(REFUSALS_FILE);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let from = b"writer-fork";
+    let at = bytes
+        .windows(from.len())
+        .position(|w| w == from)
+        .expect("typed reason");
+    bytes[at..at + from.len()].copy_from_slice(b"bad-parents");
+    std::fs::write(&path, bytes).unwrap();
+    assert!(reopen(&env).is_err());
+}
+
+#[test]
+fn removing_or_reordering_an_interior_refusal_fails_open() {
+    let env = three_refusals();
+    let path = env.dir().join(REFUSALS_FILE);
+    let f = frames(&std::fs::read(&path).unwrap());
+    assert_eq!(f.len(), 3);
+    for (name, order) in [("removed", vec![0, 2]), ("reordered", vec![1, 0, 2])] {
+        let bytes: Vec<u8> = order.iter().flat_map(|&i| f[i].clone()).collect();
+        std::fs::write(&path, bytes).unwrap();
+        assert!(reopen(&env).is_err(), "{name}");
+    }
+    // a first refusal that is not rooted at genesis
+    let bytes: Vec<u8> = f[1].clone();
+    std::fs::write(&path, bytes).unwrap();
+    assert!(reopen(&env).is_err(), "unrooted");
+}
