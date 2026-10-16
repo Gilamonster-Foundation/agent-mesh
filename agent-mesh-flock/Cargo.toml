@@ -1,0 +1,19 @@
+[package]
+name = "agent-mesh-flock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Pure model of an agent-mesh flock: event schema, admission table and board fold. No I/O."
+readme = "README.md"
+
+[dependencies]
+agent-mesh-protocol.workspace = true
+content-addressable.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

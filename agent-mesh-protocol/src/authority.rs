@@ -1133,7 +1133,9 @@ mod tests {
 
     #[test]
     fn canonical_form_is_a_hash_preimage_not_a_value_codec() {
-        use content_addressable::canonical::{from_canonical_dagcbor, to_canonical_dagcbor};
+        use content_addressable::canonical::{
+            from_canonical_dagcbor_checked, to_canonical_dagcbor,
+        };
 
         let auth = golden_authority();
 
@@ -1141,7 +1143,7 @@ mod tests {
         //    `{kind, body}` shape — decoding them AS an Authority does not
         //    reproduce the value: the hash preimage is not a value codec.
         let hash_preimage = auth.canonical_form().unwrap();
-        let decoded_as_value: Result<Authority, _> = from_canonical_dagcbor(&hash_preimage);
+        let decoded_as_value: Result<Authority, _> = from_canonical_dagcbor_checked(&hash_preimage);
         assert!(
             decoded_as_value.is_err(),
             "the tagged hash preimage must not decode as the bare value type"
@@ -1151,18 +1153,18 @@ mod tests {
         //    cleanly, and identity is re-established by recomputing the CID from
         //    the decoded value — never read from the wire.
         let wire = to_canonical_dagcbor(&auth).unwrap();
-        let back: Authority = from_canonical_dagcbor(&wire).unwrap();
+        let back: Authority = from_canonical_dagcbor_checked(&wire).unwrap();
         assert_eq!(auth, back);
         assert_eq!(auth.id().unwrap(), back.id().unwrap());
 
         // 3. The same boundary holds for Grant.
         let grant = Grant::new(auth.id().unwrap(), Derivation::Root);
         let grant_wire = to_canonical_dagcbor(&grant).unwrap();
-        let grant_back: Grant = from_canonical_dagcbor(&grant_wire).unwrap();
+        let grant_back: Grant = from_canonical_dagcbor_checked(&grant_wire).unwrap();
         assert_eq!(grant, grant_back);
         assert_eq!(grant.id().unwrap(), grant_back.id().unwrap());
         // Grant's hash preimage is likewise not its value codec.
-        assert!(from_canonical_dagcbor::<Grant>(&grant.canonical_form().unwrap()).is_err());
+        assert!(from_canonical_dagcbor_checked::<Grant>(&grant.canonical_form().unwrap()).is_err());
     }
 
     // ── v1 CID golden corpus: drift detection ────────────────────────────────
