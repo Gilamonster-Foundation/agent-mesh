@@ -137,6 +137,17 @@ fn vectors() -> Vec<(&'static str, MerkleNode<Event>)> {
             "nudged",
             event(Kind::Nudged, Body::Nudged { target: s("h1") }, &[]),
         ),
+        (
+            "pane",
+            event(
+                Kind::Pane,
+                Body::Pane {
+                    pane: s("w1:p2"),
+                    tab: s("w1:t1"),
+                },
+                &[],
+            ),
+        ),
         ("epoch", event(Kind::Epoch, Body::Epoch { epoch: 1 }, &[])),
         (
             "session-end",
@@ -215,6 +226,10 @@ const GOLDEN: &[(&str, &str)] = &[
     (
         "nudged",
         "bafyr4idxdvmjklou4mzm2k2chzp3mjogqhklk6xibru7kzhphk2hcpuv3q",
+    ),
+    (
+        "pane",
+        "bafyr4igmazngln4psjhurlt62av6biwgn6notplsvacwt4viwjwafcep5q",
     ),
     (
         "epoch",

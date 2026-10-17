@@ -96,12 +96,23 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   read-only. Joins the roster to `herdr pane list` (a member is the pane whose
   label is its name, within `--tab`; `--map` overrides) and prints herdr's
   claims next to the verified flock state. It only ever lists; it never
-  prompts, sends keys or renames. Off-roster panes are never shown.
+  prompts, sends keys or renames. Off-roster panes are never shown. A VIA
+  column says how a pane was linked: `map`, `session` or `label`;
+- **the pane claim** (`Kind::Pane`): a session started inside a herdr pane
+  (`HERDR_PANE_ID` and `HERDR_TAB_ID` both set) signs a `pane` event naming it;
+  `CtlReq::Announce` repeats it. It is a *claim*: the signature proves the
+  session said it, nothing proves the pane is real or still that pane. `panes`
+  trusts only the active session's latest claim, only if herdr still lists
+  that pane (in `--tab`, if given), ranks it below `--map` and above a label,
+  and a pane two members claim is `ambiguous`. A replacement session is
+  pending; announcing after a hand-off is **deferred** (its first event must
+  have `prev = handoff`, which the session cannot yet supply: step 7). The
+  server's first-link check is unchanged.
 
 **Planned, not built:** the epoch bump when a member is removed from the
 roster; operator approval of a **delegate** hand-off (#127's other half; waits on the
 delegate designation, step 13); device changes signed by a listed device
-(server-signed only today); operator-signed events (`answer`); the pane announcement (a session telling the log which herdr pane it is in); `watch`; the rest of
+(server-signed only today); operator-signed events (`answer`); `watch`; the rest of
 the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; only `init`,
 `serve`, `invite`, `session` and `panes` exist); `amesh-tui`; attaching from another host; the
 `amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native

@@ -25,6 +25,9 @@ pub enum CtlReq {
         /// The body.
         body: Body,
     },
+    /// Tell the log which herdr pane this session was started in. The claim
+    /// comes from the session's own environment, never from the caller.
+    Announce,
     /// Say goodbye and exit.
     End,
 }

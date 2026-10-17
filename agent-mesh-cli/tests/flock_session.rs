@@ -255,3 +255,69 @@ fn without_lockable_memory_the_session_refuses_unless_told_otherwise() {
     let (_ok, id, _) = f.session("h1", &["--allow-unlocked"], "ulimit -l 0;");
     assert!(!id.is_empty());
 }
+
+/// A `herdr` that lists one unlabelled pane, `w1:p9`.
+fn fake_herdr_with_one_pane(bin: &Path) {
+    let script = "#!/bin/sh\ncat <<'EOF'\n{\"id\":\"x\",\"result\":{\"panes\":[{\"pane_id\":\"w1:p9\",\"tab_id\":\"w1:t1\",\"agent\":\"newt\",\"agent_status\":\"idle\"}]}}\nEOF\n";
+    let path = bin.join("herdr");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn panes_output(f: &Flock, bin: &Path) -> String {
+    let out = amesh(f.home.path())
+        .args(["flock", "panes", "--name", "f", "--dir"])
+        .arg(&f.dir)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn a_session_started_in_a_herdr_pane_announces_it_and_panes_links_it_as_a_claim() {
+    let f = flock();
+    let bin = TempDir::new().unwrap();
+    fake_herdr_with_one_pane(bin.path());
+    // no label anywhere: the only link is the session's own signed claim
+    let (_s, id, sock) = f.session(
+        "shep",
+        &[],
+        "export HERDR_PANE_ID=w1:p9 HERDR_TAB_ID=w1:t1;",
+    );
+    assert!(!id.is_empty());
+    let out = panes_output(&f, bin.path());
+    let row = out.lines().find(|l| l.starts_with("shep")).unwrap();
+    assert!(row.contains("w1:p9") && row.contains("session"), "{row}");
+    // announcing again chains onto the first claim and is admitted
+    let CtlResp::Admitted { index, .. } = call(&sock, &CtlReq::Announce).unwrap() else {
+        panic!("not Admitted")
+    };
+    assert!(index > 2);
+    let h1 = out.lines().find(|l| l.starts_with("h1")).unwrap();
+    assert!(h1.contains("no pane"), "{h1}");
+}
+
+#[test]
+fn outside_herdr_nothing_is_announced_and_a_bad_claim_does_not_stop_the_session() {
+    let f = flock();
+    let (_s, id, sock) = f.session("shep", &[], "unset HERDR_PANE_ID HERDR_TAB_ID;");
+    assert!(!id.is_empty());
+    assert!(call(&sock, &CtlReq::Announce).is_err());
+    assert!(!f
+        .log_bodies()
+        .iter()
+        .any(|b| matches!(b, Body::Pane { .. })));
+    // an unprintable claim is refused by admission; the session carries on
+    let (_t, id2, _) = f.session(
+        "h1",
+        &[],
+        "export HERDR_PANE_ID=\"$(printf 'a\\033b')\" HERDR_TAB_ID=t;",
+    );
+    assert!(!id2.is_empty(), "a refused claim must not stop the session");
+    assert!(!f
+        .log_bodies()
+        .iter()
+        .any(|b| matches!(b, Body::Pane { .. })));
+}

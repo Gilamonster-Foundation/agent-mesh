@@ -4,7 +4,7 @@
 use agent_mesh_flock::{Body, EndReason, Kind, Member, Role};
 use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp};
 use agent_mesh_flock_server::{
-    bind_private, init, serve, CrashPlan, InitSpec, Server, ServerError, Serving, Snapshot, Status,
+    bind_private, init, serve, CrashPlan, InitSpec, Server, Serving, Snapshot, Status,
 };
 use agent_mesh_flock_session::{Locked, Policy, Session};
 use agent_mesh_protocol::{AgentKey, Assertion, UserKey};
@@ -53,29 +53,26 @@ fn rig() -> Rig {
 }
 
 impl Rig {
-    /// Stop serving and reopen the log: what a restart would see.
+    /// Stop serving (which ends and joins every connection, so the log's
+    /// lock is free on return) and reopen the log: what a restart would see.
     fn restart(&mut self) -> Server {
-        self.serving.take().unwrap().stop();
-        for _ in 0..100_000 {
-            match Server::open(self.tmp.path()) {
-                Err(ServerError::Locked) => std::thread::yield_now(),
-                other => return other.unwrap(),
-            }
+        if let Some(s) = self.serving.take() {
+            s.stop();
         }
-        panic!("the log stayed locked");
+        Server::open(self.tmp.path()).unwrap()
     }
     fn status(&self, session: &str) -> Status {
         let snap = Snapshot::read(self.tmp.path()).unwrap();
         snap.sessions().get(session).unwrap().status
     }
-    fn wait_failure(&self) -> String {
-        for _ in 0..100_000 {
-            if let Some(f) = self.serving.as_ref().unwrap().failure() {
-                return f;
-            }
-            std::thread::yield_now();
-        }
-        panic!("the server never reported the failure");
+    /// Block until the server stops itself on a failure to persist; the
+    /// failure stops its accept loop, so joining that is the wait.
+    fn wait_failure(&mut self) -> String {
+        self.serving
+            .take()
+            .unwrap()
+            .wait()
+            .expect("the server stopped without reporting a failure")
     }
     fn rpc(&self, c: &mut UnixStream, req: &Req) -> Resp {
         write_msg(c, req).unwrap();
@@ -112,13 +109,7 @@ impl Rig {
         }
     }
     fn wait_epoch(&self, n: u64) {
-        for _ in 0..50_000 {
-            if self.epoch() >= n {
-                return;
-            }
-            std::thread::yield_now();
-        }
-        panic!("epoch never reached {n}");
+        assert!(self.serving.as_ref().unwrap().wait_epoch(n));
     }
 }
 
@@ -292,4 +283,17 @@ fn a_lost_session_that_cannot_be_recorded_stops_the_server() {
     let server = r.restart();
     assert_eq!(server.sessions().get(&id).unwrap().status, Status::Active);
     assert_eq!(server.epoch(), 0);
+}
+
+#[test]
+fn serving_a_log_already_at_a_later_epoch_waits_for_nothing() {
+    let mut r = rig();
+    r.session("shep").end().unwrap(); // a goodbye bumps the epoch: now 1
+    assert!(r.serving.as_ref().unwrap().wait_epoch(1));
+    let server = r.restart();
+    assert_eq!(server.epoch(), 1);
+    let serving = serve(server, bind_private(&r.sock).unwrap()).unwrap();
+    // no request has been served yet: the predicate must start from the log
+    assert!(serving.wait_epoch(1));
+    r.serving = Some(serving);
 }

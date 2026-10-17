@@ -59,6 +59,8 @@ pub enum Reason {
     DevicesOnNonOperator,
     /// Two roster members share a name.
     DuplicateMember,
+    /// A pane or tab claim that is empty, too long or not printable.
+    BadClaim,
 }
 
 impl From<&Refusal> for Reason {
@@ -86,6 +88,7 @@ impl From<&Refusal> for Reason {
             Refusal::DevicesLocked => Self::DevicesLocked,
             Refusal::DevicesOnNonOperator => Self::DevicesOnNonOperator,
             Refusal::DuplicateMember => Self::DuplicateMember,
+            Refusal::BadClaim => Self::BadClaim,
         }
     }
 }

@@ -58,6 +58,8 @@ pub enum Refusal {
     DevicesOnNonOperator,
     /// Two roster members share a name.
     DuplicateMember,
+    /// A claim (pane, tab) that is empty, too long or not printable.
+    BadClaim,
 }
 
 /// An event admitted but flagged: it never replaces the first.
@@ -204,6 +206,7 @@ fn signer_member<'a>(
                 | K::Job
                 | K::JobEnd
                 | K::Ask
+                | K::Pane
                 | K::RelayedAnswer => true,
                 K::Answer
                 | K::Epoch
@@ -393,7 +396,19 @@ fn apply_table(
             }
             Ok(target)
         }
+        (Body::Pane { pane, tab }, Kind::Pane) => {
+            if [pane, tab].iter().all(|v| claim_ok(v)) {
+                Ok(None)
+            } else {
+                Err(Refusal::BadClaim)
+            }
+        }
         (_, Kind::Answer) => Ok(target),
         _ => Ok(None),
     }
+}
+
+/// A claimed id is short and printable: it ends up on an operator's screen.
+fn claim_ok(v: &str) -> bool {
+    !v.is_empty() && v.len() <= 128 && !v.chars().any(char::is_control)
 }
