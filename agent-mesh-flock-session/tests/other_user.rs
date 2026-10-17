@@ -35,8 +35,18 @@ fn child_connects() {
     println!("RESULT {out}");
 }
 
-fn other_user(sock: &std::path::Path) -> String {
-    let out = Command::new(std::env::current_exe().unwrap())
+/// The test binary, staged where the other user can execute it: the
+/// checkout and its `target/` may sit under a home only the owner can enter.
+fn stage_binary(into: &std::path::Path) -> std::path::PathBuf {
+    std::fs::set_permissions(into, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let staged = into.join("other_user_test");
+    std::fs::copy(std::env::current_exe().unwrap(), &staged).unwrap();
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).unwrap();
+    staged
+}
+
+fn other_user(exe: &std::path::Path, sock: &std::path::Path) -> String {
+    let out = Command::new(exe)
         .args(["--ignored", "--exact", "child_connects", "--nocapture"])
         .env(SOCK, sock)
         .uid(NOBODY)
@@ -56,6 +66,8 @@ fn other_user_cannot_use_the_socket() {
     assert_eq!(unsafe { libc::geteuid() }, 0, "run as root");
     let tmp = TempDir::new().unwrap();
     std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let bin = TempDir::new().unwrap();
+    let exe = stage_binary(bin.path());
     let spec = InitSpec {
         name: "f".into(),
         roster: vec![Member {
@@ -75,7 +87,7 @@ fn other_user_cannot_use_the_socket() {
     .unwrap();
 
     // the directory keeps the other user out
-    assert_eq!(other_user(&sock), "DENIED PermissionDenied");
+    assert_eq!(other_user(&exe, &sock), "DENIED PermissionDenied");
 
     // even with the directory and the socket opened up, the server drops
     // the connection after reading the peer's uid
@@ -85,7 +97,7 @@ fn other_user_cannot_use_the_socket() {
     )
     .unwrap();
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666)).unwrap();
-    assert_eq!(other_user(&sock), "DROPPED");
+    assert_eq!(other_user(&exe, &sock), "DROPPED");
 
     serving.stop();
 }

@@ -9,16 +9,24 @@ use agent_mesh_protocol::{AgentKey, Assertion};
 use content_addressable::{ContentAddressable, ContentId};
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
+use rand::RngCore;
 use std::collections::BTreeMap;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+/// The session key's seed. It lives only in a [`Locked`] allocation and is
+/// written there directly from the OS generator.
+#[derive(Default, Zeroize, ZeroizeOnDrop)]
+struct Seed([u8; 32]);
 
 /// An enrolled session. Its connection to the server is its life: dropping
 /// it without [`Session::end`] looks to the server like a crash.
 pub struct Session {
+    seed: Locked<Seed>,
     key: Locked<AgentKey>,
+    policy: Policy,
     conn: UnixStream,
     flock: ContentId,
     member: String,
@@ -38,21 +46,26 @@ impl Session {
         member: &str,
         policy: Policy,
     ) -> Result<Self, SessionError> {
+        // Lock first, then generate into the lock, then talk: no secret ever
+        // waits on the network in swappable memory.
+        let mut seed = Locked::<Seed>::empty(policy)?;
+        OsRng.fill_bytes(&mut seed.get_mut().0);
+        let pubkey = SigningKey::from_bytes(&seed.get().0)
+            .verifying_key()
+            .to_bytes();
         let mut conn = UnixStream::connect(serve)?;
         let Resp::Hello { flock, .. } = rpc(&mut conn, &Req::Hello)? else {
             return Err(SessionError::Unexpected);
         };
-        let sk = SigningKey::generate(&mut OsRng);
-        let seed = Zeroizing::new(sk.to_bytes());
         let begin = Req::EnrollBegin {
             token: token.to_owned(),
             member: member.to_owned(),
-            pubkey: sk.verifying_key().to_bytes(),
+            pubkey,
         };
         let Resp::Challenge(challenge) = rpc(&mut conn, &begin)? else {
             return Err(SessionError::Unexpected);
         };
-        let proof = sk.sign(&challenge.signing_bytes());
+        let proof = SigningKey::from_bytes(&seed.get().0).sign(&challenge.signing_bytes());
         let Resp::Enrolled {
             session,
             cert,
@@ -61,10 +74,12 @@ impl Session {
         else {
             return Err(SessionError::Unexpected);
         };
-        let key = AgentKey::from_seed_and_cert(&seed, cert)
+        let key = AgentKey::from_seed_and_cert(&seed.get().0, cert)
             .map_err(|e| SessionError::Refused(e.to_string()))?;
         Ok(Self {
+            seed,
             key: Locked::new(key, policy)?,
+            policy,
             conn,
             flock,
             member: member.to_owned(),
@@ -96,21 +111,12 @@ impl Session {
                 else {
                     return Err(SessionError::Unexpected);
                 };
-                let seed = Zeroizing::new(self.key.get().signing_key_bytes());
-                let key = AgentKey::from_seed_and_cert(&seed, cert)
+                let key = AgentKey::from_seed_and_cert(&self.seed.get().0, cert)
                     .map_err(|e| SessionError::Refused(e.to_string()))?;
-                self.key = Locked::new(key, self.policy())?;
+                self.key = Locked::new(key, self.policy)?;
                 Ok(())
             }
             _ => Err(SessionError::Unexpected),
-        }
-    }
-
-    fn policy(&self) -> Policy {
-        if self.key.is_locked() {
-            Policy::Locked
-        } else {
-            Policy::AllowUnlocked
         }
     }
 

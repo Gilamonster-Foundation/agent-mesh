@@ -15,6 +15,10 @@ The process behind `amesh flock session`, in the manner of `ssh-agent`.
   dag-cbor of the protocol's own types. Nothing here has an identity of its own.
 
 The socket keeps out other Unix users. It does not keep out other processes of
-the same user; that boundary is agent-bridle's. Between enrollment and the
-first lock the fresh seed is on the stack for a few calls; after a renewal the
-new key is locked as well. Unix only: elsewhere the crate is empty.
+the same user; that boundary is agent-bridle's.
+
+Enrollment locks memory first (it refuses to go on if it cannot), generates the
+seed straight into the locked allocation, and only then talks to the server;
+renewal rebuilds the key from that locked seed. What is not locked: the key
+struct is briefly rebuilt on the stack to sign a challenge or to be boxed, with
+no blocking call in between. Unix only: elsewhere the crate is empty.
