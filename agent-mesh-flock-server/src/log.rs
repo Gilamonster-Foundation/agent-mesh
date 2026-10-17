@@ -46,32 +46,11 @@ impl Log {
         lock::lock_exclusive(&file)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
-        let mut frames = Vec::new();
-        let mut at = 0usize;
-        let mut cut = None;
-        loop {
-            match frame::next(&bytes, at) {
-                Ok(Next::End) => break,
-                Ok(Next::Torn) => {
-                    cut = Some(at as u64);
-                    break;
-                }
-                Ok(Next::Frame(f, end)) => {
-                    frames.push((at as u64, f));
-                    at = end;
-                }
-                Err(why) => {
-                    return Err(ServerError::Corrupt {
-                        offset: at as u64,
-                        why,
-                    })
-                }
-            }
-        }
+        let (frames, at, cut) = parse(&bytes)?;
         // Appends go to the end whatever the read left behind.
         let log = Self {
             file,
-            end: at as u64,
+            end: at,
             cut,
             plan: None,
         };
@@ -126,4 +105,50 @@ impl Log {
         self.end += bytes.len() as u64;
         Ok(())
     }
+}
+
+/// The whole frames with their offsets, where they end, and where an
+/// incomplete final frame begins.
+type Parsed<T> = (Vec<(u64, T)>, u64, Option<u64>);
+
+/// Parse every whole frame in `bytes`.
+fn parse<T: Serialize + DeserializeOwned>(bytes: &[u8]) -> Result<Parsed<T>, ServerError> {
+    let mut frames = Vec::new();
+    let mut at = 0usize;
+    let mut cut = None;
+    loop {
+        match frame::next(bytes, at) {
+            Ok(Next::End) => break,
+            Ok(Next::Torn) => {
+                cut = Some(at as u64);
+                break;
+            }
+            Ok(Next::Frame(f, end)) => {
+                frames.push((at as u64, f));
+                at = end;
+            }
+            Err(why) => {
+                return Err(ServerError::Corrupt {
+                    offset: at as u64,
+                    why,
+                })
+            }
+        }
+    }
+    Ok((frames, at as u64, cut))
+}
+
+/// Read the whole frames of `path` without the lock and without writing:
+/// whatever a concurrent append has half written is simply not there yet.
+/// Returns the frames and whether an incomplete final frame was left unread.
+///
+/// # Errors
+/// I/O, or [`ServerError::Corrupt`] for damage in committed history.
+pub fn read_frames<T: Serialize + DeserializeOwned>(
+    path: &Path,
+) -> Result<(Vec<(u64, T)>, bool), ServerError> {
+    let mut bytes = Vec::new();
+    File::open(path)?.read_to_end(&mut bytes)?;
+    let (frames, _, cut) = parse(&bytes)?;
+    Ok((frames, cut.is_some()))
 }

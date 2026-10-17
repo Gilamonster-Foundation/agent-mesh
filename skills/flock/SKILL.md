@@ -44,7 +44,7 @@ session starts pending and can sign nothing until a hand-off activates it.
 
 ## Built vs planned
 
-Built (plan steps 1–3 and 4a):
+Built (plan steps 1–3, 4a and the read-only herdr view, 4c):
 - the detached author `Assertion` (`agent-mesh-protocol`);
 - the `agent-mesh-flock` model crate: schema, admission table, board fold, and
   real `invite`, `session-start`, `session-end`, `epoch` and `renewal` bodies;
@@ -61,14 +61,22 @@ Built (plan steps 1–3 and 4a):
   as one frame, enforced at admission and on replay;
 - **renewal**: the renewal exchange after a bump and the `renew` entry for a
   session that missed bumps, each logged with its certificate. A member's
-  later sessions start pending.
+  later sessions start pending;
+- **`Snapshot`** (`agent-mesh-flock-server`): reads and replays the log with no
+  lock and no repair, stopping at a torn tail, so it runs beside a live server;
+- **`amesh flock panes --name <flock> [--tab <id>] [--map member=pane]`**:
+  read-only. Joins the roster to `herdr pane list` (a member is the pane whose
+  label is its name, within `--tab`; `--map` overrides) and prints herdr's
+  claims next to the verified flock state. It only ever lists; it never
+  prompts, sends keys or renames. Off-roster panes are never shown.
 
 **Planned, not built:** hand-off and the activation of pending sessions;
 the epoch bump when a member is removed from the roster; operator-class signer
 resolution; `amesh flock session` (the session process); `watch`; the rest of
-the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; `init`
-is still the only subcommand); `amesh-tui`; attaching from another host; the
-`amesh-herdr` adapter; native newt receive. Until they land, lanes run on files
+the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; only `init`
+and `panes` exist); `amesh-tui`; attaching from another host; the
+`amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native
+newt receive. Until they land, lanes run on files
 as the herdr-flock skill describes. Status: epic #109.
 
 ## Keep this current

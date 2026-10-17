@@ -44,6 +44,31 @@ fn enc(e: content_addressable::ContentError) -> ServerError {
     ServerError::Encoding(e.to_string())
 }
 
+/// Replay the retained frames from genesis, verifying each admission.
+pub(crate) fn rebuild(
+    genesis: &MerkleNode<agent_mesh_flock::Genesis>,
+    server_pub: [u8; 32],
+    frames: Vec<(u64, Frame)>,
+) -> Result<State, ServerError> {
+    let board = Board::new(genesis).map_err(enc)?;
+    let mut st = State {
+        chain: Chain::new(board.flock(), server_pub),
+        board,
+        sessions: Sessions::default(),
+    };
+    for (offset, frame) in frames {
+        let corrupt = |why: String| ServerError::Corrupt { offset, why };
+        if frame.sealed.is_empty() {
+            return Err(corrupt("empty frame".into()));
+        }
+        check_frame_shape(&frame.sealed).map_err(corrupt)?;
+        for sealed in &frame.sealed {
+            st.replay(sealed).map_err(|e| corrupt(e.to_string()))?;
+        }
+    }
+    Ok(st)
+}
+
 impl Server {
     /// Open the flock in `dir`: re-verify genesis, load the key, lock the
     /// log, rebuild the board and the session table from the retained frames
@@ -65,22 +90,7 @@ impl Server {
         // only then cut a torn tail.
         let (mut log, frames) = Log::open::<Frame>(&dir.join(LOG_FILE))?;
         let (mut refusal_log, entries) = Log::open::<RefusalEntry>(&dir.join(REFUSALS_FILE))?;
-        let board = Board::new(&genesis.node).map_err(enc)?;
-        let mut st = State {
-            chain: Chain::new(board.flock(), server_pub),
-            board,
-            sessions: Sessions::default(),
-        };
-        for (offset, frame) in frames {
-            let corrupt = |why: String| ServerError::Corrupt { offset, why };
-            if frame.sealed.is_empty() {
-                return Err(corrupt("empty frame".into()));
-            }
-            check_frame_shape(&frame.sealed).map_err(corrupt)?;
-            for sealed in &frame.sealed {
-                st.replay(sealed).map_err(|e| corrupt(e.to_string()))?;
-            }
-        }
+        let st = rebuild(&genesis.node, server_pub, frames)?;
         let mut refusal_prev = st.board.flock();
         let mut last = 0;
         for (offset, entry) in &entries {

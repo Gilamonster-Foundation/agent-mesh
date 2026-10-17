@@ -18,6 +18,7 @@ mod init;
 mod keyfile;
 mod lock;
 mod log;
+mod read;
 mod refusal;
 mod server;
 mod sessions;
@@ -32,6 +33,7 @@ pub use init::{
 };
 pub use keyfile::{load_server_key, store_server_key};
 pub use log::CrashPlan;
+pub use read::Snapshot;
 pub use refusal::{Reason, RefusalEntry, RefusalRecord};
 pub use server::{Receipt, Server};
 pub use sessions::{session_caveats, token_digest, InviteInfo, SessionInfo, Sessions, Status};

@@ -15,6 +15,9 @@ Licensed under Apache-2.0.
 - `Server::open` takes an exclusive lock on the log (a second server on the
   same flock refuses to start), cuts off a torn final frame, and rebuilds the
   board from the retained frames.
+- `Snapshot::read` is the lock-free reader: it replays the log like `open`
+  (and fails closed on the same damage) but never locks or repairs; a torn
+  tail is left unread, so it is safe beside a live server.
 - `Server::admit` is one transaction: duplicate lookup, then signer, then the
   model's writer-chain, reference and table checks, then **one frame and one
   fsync**. A refused event writes nothing to `log`, joins no board and takes
