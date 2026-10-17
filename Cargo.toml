@@ -7,6 +7,7 @@ members = [
     "agent-mesh-discovery",
     "agent-mesh-flock",
     "agent-mesh-flock-server",
+    "agent-mesh-flock-session",
     "agent-mesh-py",
     "agent-mesh-ratchet",
     "agent-mesh-transport",
@@ -92,6 +93,7 @@ agent-mesh-transport = { path = "agent-mesh-transport", version = "=0.7.0" }
 agent-mesh-transport-ssh = { path = "agent-mesh-transport-ssh", version = "=0.7.0" }
 agent-mesh-flock = { path = "agent-mesh-flock", version = "=0.7.0" }
 agent-mesh-flock-server = { path = "agent-mesh-flock-server", version = "=0.7.0" }
+agent-mesh-flock-session = { path = "agent-mesh-flock-session", version = "=0.7.0" }
 tests-common = { path = "tests/common" }
 
 # Test deps

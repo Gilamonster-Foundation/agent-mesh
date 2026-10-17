@@ -71,7 +71,18 @@ Built (plan steps 1–4 and the read-only herdr view, 4c):
   frame: `handoff` ends `from`, activates the pending `to` and is followed by
   the `epoch` bump. The new session's first event must have `prev = handoff`;
   only a member's current holder can be handed off, so competing hand-offs
-  yield one winner.
+  yield one winner;
+- **`amesh flock serve`** (owns the log; socket `<flock>/run/serve.sock`, dir
+  0700, socket 0600), **`amesh flock invite`**, and **`amesh flock session`**
+  (an ssh-agent-style process: the session key lives only in its memory,
+  `mlock`ed, core dumps off, zeroized on exit; it serves the CLI over a 0600
+  socket; the token comes from `AMESH_FLOCK_TOKEN`). A session's connection is
+  its life: a drop without goodbye (`kill -9`) is recorded `lost`, and the
+  epoch bump leaves its key uncertified. `mlock` denied means the session
+  refuses to start, unless `--allow-unlocked`. The sockets keep out other Unix
+  users, not other harnesses under the same account (agent-bridle's job). The
+  CLI side so far is the library (`call`/`CtlReq`); the user-facing commands
+  that use it come in step 7. Unix only.
 - **`Snapshot`** (`agent-mesh-flock-server`): reads and replays the log with no
   lock and no repair, stopping at a torn tail, so it runs beside a live server;
 - **`amesh flock panes --name <flock> [--tab <id>] [--map member=pane]`**:
@@ -83,9 +94,9 @@ Built (plan steps 1–4 and the read-only herdr view, 4c):
 **Planned, not built:** the epoch bump when a member is removed from the
 roster; operator device keys listed per device in the roster, and with them operator
 approval of a shepherd or delegate hand-off (refused today), plus
-operator-signed events; `amesh flock session` (the session process); `watch`; the rest of
-the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; only `init`
-and `panes` exist); `amesh-tui`; attaching from another host; the
+operator-signed events; the pane announcement (a session telling the log which herdr pane it is in); `watch`; the rest of
+the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; only `init`,
+`serve`, `invite`, `session` and `panes` exist); `amesh-tui`; attaching from another host; the
 `amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native
 newt receive. Until they land, lanes run on files
 as the herdr-flock skill describes. Status: epic #109.

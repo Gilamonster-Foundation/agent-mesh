@@ -32,6 +32,9 @@
 # Install: `just install-hooks` (or `git config core.hooksPath .githooks`)
 # Do NOT skip this hook with `--no-verify`. If a check fails, fix the issue.
 #
+# CI-only as well: the "flock sockets refuse another user" step in ci.yml
+# (it needs root).
+#
 # PREPUSH_PLAN_ONLY=1 prints "PLAN ..." instead of running cargo (tests).
 
 set -euo pipefail

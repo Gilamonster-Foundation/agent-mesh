@@ -43,6 +43,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
         run: cargo test --workspace --locked
+      # CI-ONLY (no hook mirror: needs root). The flock session socket must
+      # refuse another Unix user; the test binary becomes that user, so it
+      # is built unprivileged and only run under sudo.
+      - name: flock sockets refuse another user (root)
+        run: |
+          bin=$(cargo test -p agent-mesh-flock-session --test other_user --locked \
+            --no-run --message-format=json \
+            | jq -r 'select(.executable != null) | .executable' | tail -1)
+          sudo "$bin" --ignored --test-threads=1
 
   # macOS platform coverage. The Linux jobs above cannot execute the
   # `#[cfg(target_os = "macos")]` tests (e.g. APFS filename behavior or the
