@@ -425,3 +425,61 @@ fn duplicates_return_their_index_and_forks_are_refused() {
         Verdict::Refuse(Refusal::BadPrev)
     );
 }
+
+fn pane(pane: &str, tab: &str) -> Body {
+    Body::Pane {
+        pane: pane.into(),
+        tab: tab.into(),
+    }
+}
+
+#[test]
+fn any_active_session_may_say_which_pane_it_is_in_and_nobody_else() {
+    let mut fx = Fx::new();
+    for who in ["shep", "h1", "herdr"] {
+        let id = fx.emit(who, Kind::Pane, pane("w1:p2", "w1:t1"), &[]);
+        // a second claim chains onto the first; the later one stands
+        assert_eq!(
+            fx.judge(who, Kind::Pane, pane("w1:p3", "w1:t1"), &[]),
+            Verdict::Admit
+        );
+        let _ = id;
+    }
+    // the server and the operator are not in a pane
+    for who in ["server", "op"] {
+        assert_eq!(
+            fx.judge(who, Kind::Pane, pane("w1:p2", "w1:t1"), &[]),
+            Verdict::Refuse(Refusal::NotAllowed),
+            "{who}"
+        );
+    }
+    // a pending replacement signs nothing
+    let node = fx.event("h1", Kind::Pane, pane("a", "b"), &[]).node();
+    assert_eq!(
+        agent_mesh_flock::admit(&fx.board, &node, &fx.signer("h1", true)),
+        Verdict::Refuse(Refusal::PendingSession)
+    );
+}
+
+#[test]
+fn a_pane_claim_is_a_short_printable_id_and_takes_no_references() {
+    let mut fx = Fx::new();
+    let bad = [
+        pane("", "w1:t1"),
+        pane("w1:p2", ""),
+        pane(&"x".repeat(129), "t"),
+        pane("w1:p2\n", "t"),
+        pane("w1:p2", "t\u{1b}[31m"),
+    ];
+    for b in bad {
+        assert_eq!(
+            fx.judge("h1", Kind::Pane, b, &[]),
+            Verdict::Refuse(Refusal::BadClaim)
+        );
+    }
+    let brief = fx.brief("h1", "a");
+    assert_eq!(
+        fx.judge("h1", Kind::Pane, pane("w1:p2", "t"), &[("of", brief)]),
+        Verdict::Refuse(Refusal::UnexpectedRef("of".into()))
+    );
+}

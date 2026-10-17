@@ -53,6 +53,8 @@ pub enum Reason {
     HeadMismatch,
     /// `replaces` is not the current roster.
     StaleRoster,
+    /// A pane or tab claim that is empty, too long or not printable.
+    BadClaim,
 }
 
 impl From<&Refusal> for Reason {
@@ -77,6 +79,7 @@ impl From<&Refusal> for Reason {
             Refusal::AdapterCannotAck => Self::AdapterCannotAck,
             Refusal::HeadMismatch => Self::HeadMismatch,
             Refusal::StaleRoster => Self::StaleRoster,
+            Refusal::BadClaim => Self::BadClaim,
         }
     }
 }

@@ -89,7 +89,18 @@ Built (plan steps 1–4 and the read-only herdr view, 4c):
   read-only. Joins the roster to `herdr pane list` (a member is the pane whose
   label is its name, within `--tab`; `--map` overrides) and prints herdr's
   claims next to the verified flock state. It only ever lists; it never
-  prompts, sends keys or renames. Off-roster panes are never shown.
+  prompts, sends keys or renames. Off-roster panes are never shown. A VIA
+  column says how a pane was linked: `map`, `session` or `label`;
+- **the pane claim** (`Kind::Pane`): a session started inside a herdr pane
+  (`HERDR_PANE_ID` and `HERDR_TAB_ID` both set) signs a `pane` event naming it;
+  `CtlReq::Announce` repeats it. It is a *claim*: the signature proves the
+  session said it, nothing proves the pane is real or still that pane. `panes`
+  trusts only the active session's latest claim, only if herdr still lists
+  that pane (in `--tab`, if given), ranks it below `--map` and above a label,
+  and a pane two members claim is `ambiguous`. A replacement session is
+  pending; announcing after a hand-off is **deferred** (its first event must
+  have `prev = handoff`, which the session cannot yet supply: step 7). The
+  server's first-link check is unchanged.
 
 - **`watch --from (index, signed head)`** (library and `serve`; the `amesh flock
   watch` command is step 7). One stream carries the replay, a `Caught` marker,
@@ -113,7 +124,7 @@ Built (plan steps 1–4 and the read-only herdr view, 4c):
 roster (until then a dropped member cannot open a stream, but one already
 open is not closed by the roster event; step 6b); operator device keys listed per device in the roster, and with them operator
 approval of a shepherd or delegate hand-off (refused today), plus
-operator-signed events; the pane announcement (a session telling the log which herdr pane it is in); the rest of
+operator-signed events; the rest of
 the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; only `init`,
 `serve`, `invite`, `session` and `panes` exist); `amesh-tui`; attaching from another host; the
 `amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native

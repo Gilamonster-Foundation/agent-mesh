@@ -36,6 +36,8 @@ pub enum Kind {
     Status,
     /// Adapter nudge record.
     Nudged,
+    /// A session's claim of the herdr pane it runs in.
+    Pane,
     /// Server: epoch bump.
     Epoch,
     /// Server: certificate renewal.
@@ -205,6 +207,14 @@ pub enum Body {
         /// Target the nudge went to.
         target: String,
     },
+    /// A session's claim of where it runs. The signature proves the session
+    /// said it; nothing proves the pane is real or still that pane.
+    Pane {
+        /// herdr's pane id.
+        pane: String,
+        /// herdr's tab id.
+        tab: String,
+    },
     /// Server: an invite for `member`. Carries only the token's digest, so a
     /// reader of the log cannot redeem it.
     Invite {
@@ -283,6 +293,7 @@ impl Body {
                 | (Self::RelayedAnswer { .. }, K::RelayedAnswer)
                 | (Self::Status { .. }, K::Status)
                 | (Self::Nudged { .. }, K::Nudged)
+                | (Self::Pane { .. }, K::Pane)
                 | (Self::Invite { .. }, K::Invite)
                 | (Self::SessionStart { .. }, K::SessionStart)
                 | (Self::SessionEnd { .. }, K::SessionEnd)

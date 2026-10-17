@@ -32,6 +32,7 @@ pub struct Session {
     member: String,
     session: String,
     pending: bool,
+    pane: Option<(String, String)>,
 }
 
 impl Session {
@@ -85,6 +86,7 @@ impl Session {
             member: member.to_owned(),
             session,
             pending,
+            pane: None,
         })
     }
 
@@ -160,6 +162,21 @@ impl Session {
         }
     }
 
+    /// Say which herdr pane and tab this session runs in. The server keeps
+    /// it as the session's claim: herdr cannot vouch for it.
+    ///
+    /// # Errors
+    /// No claim was set, or the server refused the event (a pending
+    /// replacement signs nothing yet).
+    pub fn announce(&mut self) -> Result<(ContentId, u64), SessionError> {
+        let Some((pane, tab)) = self.pane.clone() else {
+            return Err(SessionError::Refused(
+                "this session is not in a herdr pane".into(),
+            ));
+        };
+        self.emit(Kind::Pane, BTreeMap::new(), Body::Pane { pane, tab })
+    }
+
     /// A clean goodbye: the server records `closed`, not `lost`.
     ///
     /// # Errors
@@ -207,11 +224,19 @@ pub fn run(
     member: &str,
     policy: Policy,
     listener: &UnixListener,
+    pane: Option<(String, String)>,
     announce: impl FnOnce(&Session),
 ) -> Result<(), SessionError> {
     harden()?;
     catch_term();
     let mut s = Session::enroll(serve, token, member, policy)?;
+    s.pane = pane;
+    // A replacement is pending and cannot sign yet; it announces on request.
+    if s.pane.is_some() && !s.pending {
+        if let Err(e) = s.announce() {
+            eprintln!("warning: pane claim not recorded: {e}");
+        }
+    }
     announce(&s);
     listener.set_nonblocking(true)?;
     while !TERM.load(Ordering::SeqCst) {
@@ -256,6 +281,13 @@ fn handle(s: &mut Session, mut conn: UnixStream) -> bool {
         ),
         CtlReq::Emit { kind, refs, body } => (
             s.emit(kind, refs, body).map_or_else(
+                |e| CtlResp::Err(e.to_string()),
+                |(event, index)| CtlResp::Admitted { event, index },
+            ),
+            false,
+        ),
+        CtlReq::Announce => (
+            s.announce().map_or_else(
                 |e| CtlResp::Err(e.to_string()),
                 |(event, index)| CtlResp::Admitted { event, index },
             ),
