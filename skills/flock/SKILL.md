@@ -25,8 +25,8 @@ herdr bridge; it can nudge and report status but never `ack`).
 
 A lane goes through: `brief` (shepherd) → `ack` (addressee) → `result` (addressee)
 → `review` (shepherd) → `verdict` (reviewer). Also `ask` / `answer` (operator
-signs the answer), `job` / `job-end`, `status`, `nudged`, and server-signed
-`roster`, `epoch`, `renewal`, `session-*`, `handoff`, `invite`.
+signs the answer), `job` / `job-end`, `status`, `nudged`, `roster` (server or
+shepherd), and server-signed `epoch`, `renewal`, `session-*`, `handoff`, `invite`.
 
 The **board** is a fold over the log in admission order, so every reader gets
 the same board. A brief is `submitted`, `working` (acked), `input-required`
@@ -47,10 +47,12 @@ session starts pending and can sign nothing until a hand-off activates it.
 Built (plan steps 1–3):
 - the detached author `Assertion` (`agent-mesh-protocol`);
 - the `agent-mesh-flock` model crate: schema, admission table, board fold;
-- `agent-mesh-flock-server` (init, signed log, admission, recovery) and
+- `agent-mesh-flock-server` (init, signed log, admission, recovery; the epoch
+  counter is signed into each admission and verified on replay) and
   `amesh flock init`.
 
-**Planned, not built:** invites, sessions, epochs, renewal and hand-off;
+**Planned, not built:** invites, sessions, automatic epoch bumps, renewal and
+hand-off;
 `amesh flock session`; `watch`; the rest of the CLI (`join`, `inbox`, `take`,
 `result`, `verdict`, `run`, `answer`); `amesh-tui`; attaching from another host;
 the `amesh-herdr` adapter; native newt receive. Until they land, lanes run on
