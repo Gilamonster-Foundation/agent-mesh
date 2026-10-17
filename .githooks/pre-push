@@ -42,15 +42,20 @@ ZERO=0000000000000000000000000000000000000000
 # Anything else ignored (a stray include_str! or #[path] input, a local cargo
 # config...) would build here but not from the pushed commit, so it blocks the
 # push. Entries come from `git ls-files -oi --directory`: a wholly ignored
-# directory is one entry ending in "/".
-#   ANCHORED   whole-path globs, so a name deep in a source tree does not count
-#              (a crate's own target/ is handled in ignored_ok);
-#   ANY_DEPTH  last-component globs for names that cannot be build input.
+# directory is one entry ending in "/", and Rust can read source from ANY
+# directory, so no directory is allowed by its name alone.
+#   ANCHORED   whole-path globs (a crate's own target/ is handled in
+#              ignored_ok); the Python cache dirs only under the Python parts
+#              of agent-mesh-py;
+#   FILES      editor/OS junk files, any depth; an entry ending in "/" never
+#              matches these.
 ANCHORED_IGNORED=(
-    'target/' lcov.info .idea/ .vscode/ dist/ venv/ .venv/
+    'target/' lcov.info .idea/ .vscode/ dist/ venv/ .venv/ .pytest_cache/
+    'agent-mesh-py/python/*__pycache__/' 'agent-mesh-py/tests/*__pycache__/'
+    'agent-mesh-py/.pytest_cache/' 'agent-mesh-py/*.egg-info/'
     'agent-mesh-py/python/agent_mesh/*.so'
 )
-ANY_DEPTH_IGNORED=(.DS_Store '*.swp' '*.swo' __pycache__ .pytest_cache '*.egg-info')
+IGNORED_FILES=(.DS_Store '*.swp' '*.swo')
 
 say() { echo "[pre-push] $*" >&2; }
 refuse() {
@@ -136,10 +141,12 @@ ignored_ok() {
         # shellcheck disable=SC2053 # $pat is a glob on purpose
         if [[ $e == $pat ]]; then return 0; fi
     done
-    for pat in "${ANY_DEPTH_IGNORED[@]}"; do
-        # shellcheck disable=SC2053
-        if [[ $base == $pat ]]; then return 0; fi
-    done
+    if [[ $e != */ ]]; then
+        for pat in "${IGNORED_FILES[@]}"; do
+            # shellcheck disable=SC2053
+            if [[ $base == $pat ]]; then return 0; fi
+        done
+    fi
     # target/ directly in a workspace crate directory.
     if [[ $e == */target/ ]] && has_line "${e%target/}Cargo.toml" "$2"; then return 0; fi
     return 1

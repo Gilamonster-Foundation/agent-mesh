@@ -145,6 +145,16 @@ mkdir -p agent-mesh-transport-ssh/src/dist && echo x >agent-mesh-transport-ssh/s
 run "refs/heads/w $proto refs/heads/w $leaf"
 refused "ignored files that would build" "ignored source under a dist/ ancestor is refused"
 rm -r agent-mesh-transport-ssh/src/dist
+# ...nor does a cache-like name: Rust can #[path] into any directory.
+mkdir -p agent-mesh-transport-ssh/src/__pycache__ && echo x >agent-mesh-transport-ssh/src/__pycache__/x.rs
+run "refs/heads/w $proto refs/heads/w $leaf"
+refused "ignored files that would build" "ignored source under a __pycache__ directory in a crate is refused"
+rm -r agent-mesh-transport-ssh/src/__pycache__
+mkdir -p agent-mesh-py/python/agent_mesh/__pycache__ && echo x >agent-mesh-py/python/agent_mesh/__pycache__/a.pyc
+echo x >.DS_Store
+run "refs/heads/w $proto refs/heads/w $leaf"
+plan_has 'agent-mesh-protocol' "Python caches under agent-mesh-py/python and a .DS_Store file are fine"
+rm -r agent-mesh-py/python/agent_mesh/__pycache__ .DS_Store
 mkdir -p agent-mesh-transport-ssh/target && echo x >agent-mesh-transport-ssh/target/out
 echo 'target/' >>.git/info/exclude
 run "refs/heads/w $proto refs/heads/w $leaf"
