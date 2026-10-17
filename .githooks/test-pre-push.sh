@@ -48,6 +48,7 @@ flock=$(commit agent-mesh-flock/src/lib.rs)
 data=$(commit agent-mesh-flock/src/data.bin)
 lock=$(commit Cargo.lock)
 leaf=$(commit agent-mesh-transport-ssh/src/lib.rs)
+proto=$(commit agent-mesh-protocol/src/lib.rs)
 
 at "$leaf"
 run "refs/heads/w $docs refs/heads/w $base"
@@ -118,4 +119,45 @@ refused "one branch at a time" "two code tips are refused"
 
 run "refs/tags/v1 $leaf refs/tags/v1 $ZERO" "(delete) $ZERO refs/heads/x $docs" "refs/heads/w $leaf refs/heads/w $lock"
 plan_is 'crates: agent-mesh-transport-ssh' "tag + deletion + branch: only the branch counts"
+
+# Cleanliness: whatever the user's git config says, and ignored inputs.
+at "$proto"
+git config status.showUntrackedFiles no
+echo x >untracked.txt
+run "refs/heads/w $proto refs/heads/w $leaf"
+refused "modified or untracked" "an untracked file is refused even with showUntrackedFiles=no"
+rm untracked.txt
+git config --unset status.showUntrackedFiles
+
+echo 'agent-mesh-transport-ssh/src/hidden.rs' >>.git/info/exclude
+echo x >agent-mesh-transport-ssh/src/hidden.rs
+run "refs/heads/w $proto refs/heads/w $leaf"
+refused "ignored files inside a crate" "an ignored source file inside a crate is refused"
+rm agent-mesh-transport-ssh/src/hidden.rs
+mkdir -p agent-mesh-transport-ssh/target && echo x >agent-mesh-transport-ssh/target/out
+echo 'target/' >>.git/info/exclude
+run "refs/heads/w $proto refs/heads/w $leaf"
+plan_has 'agent-mesh-protocol' "ignored build output under a crate's target/ is fine"
+rm -r agent-mesh-transport-ssh/target
+
+# Ref order must not change the result: unknown baseline (code) + docs-only.
+unknown="refs/heads/a $proto refs/heads/a deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+docsref="refs/heads/b $docs refs/heads/b $base"
+run "$unknown" "$docsref"
+plan_is full "unknown-baseline code ref then a docs-only ref"
+run "$docsref" "$unknown"
+plan_is full "the same refs in the other order"
+
+# Execution mode with a mock cargo (metadata is real): a grep that exits 2
+# must not shrink the scope.
+mkdir "$tmp/exec"
+# shellcheck disable=SC2016 # the script body expands later
+printf '#!/bin/sh\n[ "$1" = metadata ] && exec "%s" "$@"\necho "$*" >>"%s/cargo.log"\n' "$real" "$tmp" >"$tmp/exec/cargo"
+printf '#!/bin/sh\necho "grep: simulated failure" >&2\nexit 2\n' >"$tmp/exec/grep"
+chmod +x "$tmp/exec/cargo" "$tmp/exec/grep"
+out=$(printf '%s\n' "refs/heads/w $proto refs/heads/w $leaf" | env PATH="$tmp/exec:$PATH" "$bash" "$hook" origin 2>&1)
+rc=$?
+tested=$(grep '^test ' "$tmp/cargo.log")
+[ "$rc" = 0 ] && [[ $tested == *"-p agent-mesh-protocol"* && $tested == *"-p agent-mesh-flock-server"* && $tested == *"-p agent-mesh-cli"* ]]
+check "a failing grep cannot shrink the scope (execution mode)" $?
 exit $fail

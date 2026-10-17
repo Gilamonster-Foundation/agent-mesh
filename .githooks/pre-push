@@ -58,6 +58,10 @@ is_docs() {
     return 1
 }
 
+# Exact-line membership without grep: a predicate that cannot fail in a way
+# that looks like "no match" (a grep error once shrank the scope).
+has_line() { [[ $'\n'$2$'\n' == *$'\n'$1$'\n'* ]]; }
+
 # $1 root, $2 packages, stdin: changed non-docs paths. Prints the owning
 # crate of each path (longest crate dir prefix, any extension), or WORKSPACE
 # for a path outside every crate.
@@ -87,7 +91,7 @@ with_rdeps() {
             {
                 echo "$seen"
                 while IFS=$'\t' read -r kind name dep; do
-                    if [ "$kind" = D ] && grep -qx "$dep" <<<"$seen"; then echo "$name"; fi
+                    if [ "$kind" = D ] && has_line "$dep" "$seen"; then echo "$name"; fi
                 done <<<"$pkgs"
             } | sort -u
         )
@@ -107,6 +111,38 @@ baseline() { # $1 remote name, $2 local sha, $3 remote sha
     fi
     git fetch -q "$1" main 2>/dev/null || say "could not fetch $1 main; using the local copy"
     git merge-base "refs/remotes/$1/main" "$2" 2>/dev/null
+}
+
+# The checks run on the working tree, so it must equal the pushed commit:
+# nothing modified, nothing untracked (whatever status.showUntrackedFiles
+# says), and no ignored file inside a crate other than its target/ (an
+# ignored module would build here and not in CI). A failing git command
+# refuses rather than counting as "clean".
+check_clean() {
+    local status ignored crate_dirs d e rest bad=""
+    status=$(git -c status.showUntrackedFiles=all status --porcelain --untracked-files=all) ||
+        refuse "git status failed; fix the repository (git fsck, git status) and push again"
+    [ -z "$status" ] ||
+        refuse "the working tree has modified or untracked files; commit them or move them out (the checks run on the working tree)"
+    ignored=$(git ls-files -oi --exclude-standard --directory) ||
+        refuse "git ls-files failed; fix the repository and push again"
+    crate_dirs=$(git ls-files -- '*/Cargo.toml') ||
+        refuse "git ls-files failed; fix the repository and push again"
+    while IFS= read -r e; do
+        [ -n "$e" ] || continue
+        while IFS= read -r d; do
+            [ -n "$d" ] || continue
+            d=${d%/Cargo.toml}
+            case $e in
+            "$d"/*)
+                rest=${e#"$d"/}
+                case $rest in target | target/*) ;; *) bad+=" $e" ;; esac
+                ;;
+            esac
+        done <<<"$crate_dirs"
+    done <<<"$ignored"
+    [ -z "$bad" ] ||
+        refuse "ignored files inside a crate would build here but not in CI:$bad -- move or delete them"
 }
 
 full_check() {
@@ -130,22 +166,24 @@ main() {
     root=$(git rev-parse --show-toplevel)
     cd "$root"
 
-    # Per live ref: "skip", or "full" / the changed non-docs paths.
-    local full=0 tip="" tips=0 allpaths=""
+    # Classify each ref on its own (skip / docs / code / unknown), then
+    # aggregate, so the order of refs cannot change the result.
+    local full=0 tip="" tips=0 allpaths="" unknown code f
     while read -r lref lsha rref rsha; do
         [ -n "${lsha:-}" ] || continue
         case $rref in refs/tags/*) continue ;; esac
         [ "$lsha" = "$ZERO" ] && continue # deletion: nothing is pushed
+        unknown=0 code="" paths=""
         if ! base=$(baseline "$remote" "$lsha" "$rsha") || ! paths=$(git diff --name-only "$base" "$lsha"); then
             say "cannot work out what $lref changes; the whole tree will be checked"
-            paths="" full=1
+            unknown=1 paths=""
         fi
-        local code="" f
         while IFS= read -r f; do
             [ -n "$f" ] || continue
             is_docs "$f" || code+="$f"$'\n'
         done <<<"$paths"
-        if [ "$full" = 0 ] && [ -z "$code" ]; then continue; fi # docs-only or empty
+        if [ "$unknown" = 0 ] && [ -z "$code" ]; then continue; fi # docs-only or empty
+        [ "$unknown" = 0 ] || full=1
         if [ "$tip" != "$lsha" ]; then
             tips=$((tips + 1))
             tip=$lsha
@@ -161,8 +199,7 @@ main() {
     [ "$tips" = 1 ] || refuse "several branches are being pushed; push one branch at a time"
     [ "$tip" = "$(git rev-parse HEAD)" ] ||
         refuse "$tip is not the checked-out commit; check it out first (the checks run on the working tree)"
-    [ -z "$(git status --porcelain)" ] ||
-        refuse "the working tree has modified or untracked files; commit them or move them out (the checks run on the working tree)"
+    check_clean "$root"
 
     # Scope from the pushed tree (it is the working tree now).
     local scope=crates pkgs="" crates=""
@@ -176,7 +213,7 @@ main() {
         scope=full
     else
         crates=$(printf '%s' "$allpaths" | owners "$root" "$pkgs")
-        if grep -qx WORKSPACE <<<"$crates"; then scope=full; fi
+        if has_line WORKSPACE "$crates"; then scope=full; fi
     fi
 
     if [ "$scope" = full ]; then
@@ -184,7 +221,7 @@ main() {
             echo "PLAN full"
             exit 0
         fi
-        if grep -q '^\.githooks/' <<<"$allpaths"; then .githooks/test-pre-push.sh; fi
+        if [[ $'\n'$allpaths == *$'\n.githooks/'* ]]; then .githooks/test-pre-push.sh; fi
         full_check
         exit 0
     fi
