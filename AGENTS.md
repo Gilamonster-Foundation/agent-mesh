@@ -30,9 +30,15 @@ just cov-ci          # cargo llvm-cov --fail-under-lines 75
 Coverage floor is **75% workspace-wide**, ratcheted up over time.
 Never lower it; if a PR drops coverage, add tests until it clears.
 
-`just check && just cov-ci` is what the pre-push hook runs. Do NOT
-bypass the hook with `--no-verify`. If a check fails, fix the
-underlying issue.
+`just check && just cov-ci` is the full gate (CI runs it). The pre-push
+hook is a fast pre-flight of what you push: fmt, clippy and tests for the
+crates that own the changed paths and their dependents; tags, deletions
+and docs-only pushes skip it, a change outside every crate (or a scope it
+cannot work out) checks the whole tree, and coverage is CI-only (CRAFT-14).
+A code push must be of HEAD with a clean tree (no untracked files, and no
+ignored files except known build output), one branch at a time, and the
+hook needs `jq` (without it, it checks the whole tree). Do NOT bypass the hook with `--no-verify`. If a
+check fails, fix the underlying issue.
 
 ## PR shape
 

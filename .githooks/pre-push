@@ -1,42 +1,283 @@
 #!/bin/bash
 #
-# Pre-push hook for agent-mesh
+# Pre-push hook for agent-mesh: a fast pre-flight of what is being pushed.
 #
-# Runs the same lint + test + coverage gates that CI runs, locally,
-# before any push reaches origin. If this passes, CI should pass too —
-# and if it doesn't, fix the issue here instead of burning a CI run.
+# CRAFT-14: the hook runs the pipeline's kinds of check (fmt, clippy, tests)
+# on the CHANGED SCOPE only; CI is the authoritative full gate.
+#
+#   skip         tag pushes, branch deletions, and pushes whose diff was
+#                computed and touches only docs (*.md, docs/, LICENSE*,
+#                .github/ISSUE_TEMPLATE/);
+#   crates       otherwise the workspace crates that own the changed paths
+#                (any extension) and every workspace crate that depends on
+#                them, with fmt, clippy -D warnings and tests;
+#   whole tree   a changed path outside every crate (root Cargo.toml,
+#                Cargo.lock, toolchain, CI, justfile, hooks), or ANY failure
+#                while working out the scope (unknown remote commit, no
+#                merge-base, cargo metadata or jq failing): the same checks
+#                as `just check`. An unknown scope never skips.
+#
+# The checks run on the working tree, so the pushed commit must BE the tree:
+# a code push must be of HEAD with no modified or untracked files, one branch
+# at a time; otherwise the hook refuses and says what to do.
+#
+# Whole-tree checks stay CI-only: coverage (`just cov-ci`, the 75% floor) and
+# the macOS job. `just check` is the full local gate for humans.
+#
+# PIPELINE PARITY: This hook mirrors the lint and test jobs of
+# .github/workflows/ci.yml (scoped) and the `check` recipe in justfile;
+# coverage and the macOS job are CI-only. When editing this hook, audit the
+# workflow + justfile in the same PR. Scope logic: .githooks/test-pre-push.sh.
 #
 # Install: `just install-hooks` (or `git config core.hooksPath .githooks`)
+# Do NOT skip this hook with `--no-verify`. If a check fails, fix the issue.
 #
-# PIPELINE PARITY: This hook mirrors .github/workflows/ci.yml and the
-# `check` / `cov-ci` recipes in justfile. When editing this hook, audit
-# the workflow + justfile in the same PR.
-# CI-only, deliberately not mirrored here: the "flock sockets refuse another
-# user" step in ci.yml (needs root), and the macOS job.
+# CI-only as well: the "flock sockets refuse another user" step in ci.yml
+# (it needs root).
 #
-# Do NOT skip this hook with `--no-verify`. If a check fails, fix the
-# issue — bypassing only moves the failure to the remote.
+# PREPUSH_PLAN_ONLY=1 prints "PLAN ..." instead of running cargo (tests).
 
-set -e
+set -euo pipefail
 
-cd "$(git rev-parse --show-toplevel)"
+ZERO=0000000000000000000000000000000000000000
 
-if ! command -v just >/dev/null 2>&1; then
-    echo "pre-push: 'just' not found in PATH"
-    echo "          install via: cargo install just"
+# Ignored files the checks may run beside: disposable build and tool output.
+# Anything else ignored (a stray include_str! or #[path] input, a local cargo
+# config...) would build here but not from the pushed commit, so it blocks the
+# push. Entries come from `git ls-files -oi --directory`: a wholly ignored
+# directory is one entry ending in "/", and Rust can read source from ANY
+# directory, so no directory is allowed by its name alone.
+#   ANCHORED   whole-path globs, each * one path segment (a crate's own target/ is handled in
+#              ignored_ok); the Python cache dirs only under the Python parts
+#              of agent-mesh-py;
+#   FILES      editor/OS junk files, any depth; an entry ending in "/" never
+#              matches these.
+ANCHORED_IGNORED=(
+    'target/' lcov.info .idea/ .vscode/ dist/ venv/ .venv/ .pytest_cache/
+    'agent-mesh-py/python/__pycache__/' 'agent-mesh-py/python/*/__pycache__/'
+    'agent-mesh-py/tests/__pycache__/'
+    'agent-mesh-py/.pytest_cache/' 'agent-mesh-py/*.egg-info/'
+    'agent-mesh-py/python/agent_mesh/*.so'
+)
+IGNORED_FILES=(.DS_Store '*.swp' '*.swo')
+
+say() { echo "[pre-push] $*" >&2; }
+refuse() {
+    say "refusing: $*"
     exit 1
-fi
+}
 
-if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
-    echo "pre-push: 'cargo-llvm-cov' not found in PATH"
-    echo "          install via: cargo install cargo-llvm-cov"
-    exit 1
-fi
+# Workspace crates as "P<TAB>name<TAB>dir" and "D<TAB>name<TAB>dependency".
+ws_packages() {
+    cargo metadata --format-version 1 --no-deps --offline |
+        jq -r '.packages[] | .name as $n | (.manifest_path | sub("/Cargo.toml$"; "")) as $d
+               | "P\t\($n)\t\($d)", (.dependencies[] | "D\t\($n)\t\(.name)")'
+}
 
-echo "[pre-push] running just check..."
-just check
+is_docs() {
+    case $1 in
+    *.md | docs/* | LICENSE* | .github/ISSUE_TEMPLATE/*) return 0 ;;
+    esac
+    return 1
+}
 
-echo "[pre-push] running just cov-ci..."
-just cov-ci
+# Exact-line membership without grep: a predicate that cannot fail in a way
+# that looks like "no match" (a grep error once shrank the scope).
+has_line() { [[ $'\n'$2$'\n' == *$'\n'$1$'\n'* ]]; }
 
-echo "[pre-push] OK"
+# $1 root, $2 packages, stdin: changed non-docs paths. Prints the owning
+# crate of each path (longest crate dir prefix, any extension), or WORKSPACE
+# for a path outside every crate.
+owners() {
+    local root=$1 pkgs=$2 file best bestname kind name dir
+    while IFS= read -r file; do
+        best="" bestname=""
+        while IFS=$'\t' read -r kind name dir; do
+            if [ "$kind" = P ]; then
+                dir=${dir#"$root"/}
+                case $file in
+                "$dir"/*) if [ ${#dir} -gt ${#best} ]; then best=$dir bestname=$name; fi ;;
+                esac
+            fi
+        done <<<"$pkgs"
+        if [ -n "$bestname" ]; then echo "$bestname"; else echo WORKSPACE; fi
+    done | sort -u
+}
+
+# $1 packages, stdin: crate names. Those plus every workspace crate that
+# depends on them, directly or not (dev-dependencies included).
+with_rdeps() {
+    local pkgs=$1 seen new kind name dep
+    seen=$(sort -u)
+    while :; do
+        new=$(
+            {
+                echo "$seen"
+                while IFS=$'\t' read -r kind name dep; do
+                    if [ "$kind" = D ] && has_line "$dep" "$seen"; then echo "$name"; fi
+                done <<<"$pkgs"
+            } | sort -u
+        )
+        if [ "$new" = "$seen" ]; then break; fi
+        seen=$new
+    done
+    echo "$seen"
+}
+
+# The diff baseline for one ref: the remote sha when it is a known commit; a
+# new branch is measured from its merge-base with origin/main (fetched
+# first). Fails when neither resolves.
+baseline() { # $1 remote name, $2 local sha, $3 remote sha
+    if [ "$3" != "$ZERO" ]; then
+        git cat-file -e "$3^{commit}" 2>/dev/null && echo "$3"
+        return
+    fi
+    git fetch -q "$1" main 2>/dev/null || say "could not fetch $1 main; using the local copy"
+    git merge-base "refs/remotes/$1/main" "$2" 2>/dev/null
+}
+
+# Number of "/" in $1.
+slashes() {
+    local t=${1//[^\/]/}
+    echo "${#t}"
+}
+
+# $1 ignored entry, $2 tracked crate manifests. Is it known build output?
+ignored_ok() {
+    local e=$1 base pat
+    base=${e%/}
+    base=${base##*/}
+    for pat in "${ANCHORED_IGNORED[@]}"; do
+        # shellcheck disable=SC2053 # $pat is a glob on purpose
+        # A * may not cross "/": the match must have the pattern's depth.
+        if [[ $e == $pat ]] && [ "$(slashes "$e")" = "$(slashes "$pat")" ]; then return 0; fi
+    done
+    if [[ $e != */ ]]; then
+        for pat in "${IGNORED_FILES[@]}"; do
+            # shellcheck disable=SC2053
+            if [[ $base == $pat ]]; then return 0; fi
+        done
+    fi
+    # target/ directly in a workspace crate directory.
+    if [[ $e == */target/ ]] && has_line "${e%target/}Cargo.toml" "$2"; then return 0; fi
+    return 1
+}
+
+# The checks run on the working tree, so it must equal the pushed commit:
+# nothing modified, nothing untracked (whatever status.showUntrackedFiles
+# says), and no ignored file beyond known build output. A failing git command
+# refuses rather than counting as "clean".
+check_clean() {
+    local status ignored manifests e bad=""
+    status=$(git -c status.showUntrackedFiles=all status --porcelain --untracked-files=all) ||
+        refuse "git status failed; fix the repository (git fsck, git status) and push again"
+    [ -z "$status" ] ||
+        refuse "the working tree has modified or untracked files; commit them or move them out (the checks run on the working tree)"
+    ignored=$(git ls-files -oi --exclude-standard --directory) ||
+        refuse "git ls-files failed; fix the repository and push again"
+    manifests=$(git ls-files -- '*/Cargo.toml') ||
+        refuse "git ls-files failed; fix the repository and push again"
+    while IFS= read -r e; do
+        [ -n "$e" ] || continue
+        if ! ignored_ok "$e" "$manifests"; then bad+=" $e"; fi
+    done <<<"$ignored"
+    [ -z "$bad" ] ||
+        refuse "ignored files that would build here but not in CI:$bad -- move or delete them (or add known build output to the ignored allowlists at the top of the hook)"
+}
+
+full_check() {
+    say "scope: whole tree"
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo test --workspace
+    say "OK"
+}
+
+main() {
+    local remote=${1:-origin} root lref lsha rref rsha base paths
+    command -v git >/dev/null || {
+        echo "pre-push: 'git' not found in PATH" >&2
+        exit 1
+    }
+    command -v cargo >/dev/null || {
+        echo "pre-push: 'cargo' not found in PATH (install rustup)" >&2
+        exit 1
+    }
+    root=$(git rev-parse --show-toplevel)
+    cd "$root"
+
+    # Classify each ref on its own (skip / docs / code / unknown), then
+    # aggregate, so the order of refs cannot change the result.
+    local full=0 tip="" tips=0 allpaths="" unknown code f
+    while read -r lref lsha rref rsha; do
+        [ -n "${lsha:-}" ] || continue
+        case $rref in refs/tags/*) continue ;; esac
+        [ "$lsha" = "$ZERO" ] && continue # deletion: nothing is pushed
+        unknown=0 code="" paths=""
+        if ! base=$(baseline "$remote" "$lsha" "$rsha") || ! paths=$(git diff --name-only "$base" "$lsha"); then
+            say "cannot work out what $lref changes; the whole tree will be checked"
+            unknown=1 paths=""
+        fi
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            is_docs "$f" || code+="$f"$'\n'
+        done <<<"$paths"
+        if [ "$unknown" = 0 ] && [ -z "$code" ]; then continue; fi # docs-only or empty
+        [ "$unknown" = 0 ] || full=1
+        if [ "$tip" != "$lsha" ]; then
+            tips=$((tips + 1))
+            tip=$lsha
+        fi
+        allpaths+=$code
+    done
+
+    if [ "$tips" = 0 ]; then
+        say "nothing to check (tags, deletions and docs-only pushes skip; CI is the full gate)"
+        [ -z "${PREPUSH_PLAN_ONLY:-}" ] || echo "PLAN skip"
+        exit 0
+    fi
+    [ "$tips" = 1 ] || refuse "several branches are being pushed; push one branch at a time"
+    [ "$tip" = "$(git rev-parse HEAD)" ] ||
+        refuse "$tip is not the checked-out commit; check it out first (the checks run on the working tree)"
+    check_clean "$root"
+
+    # Scope from the pushed tree (it is the working tree now).
+    local scope=crates pkgs="" crates=""
+    if [ "$full" = 1 ]; then
+        scope=full
+    elif ! command -v jq >/dev/null 2>&1; then
+        say "'jq' not found (install: apt install jq / brew install jq); the whole tree will be checked"
+        scope=full
+    elif ! pkgs=$(ws_packages); then
+        say "cargo metadata failed; the whole tree will be checked"
+        scope=full
+    else
+        crates=$(printf '%s' "$allpaths" | owners "$root" "$pkgs")
+        if has_line WORKSPACE "$crates"; then scope=full; fi
+    fi
+
+    if [ "$scope" = full ]; then
+        if [ -n "${PREPUSH_PLAN_ONLY:-}" ]; then
+            echo "PLAN full"
+            exit 0
+        fi
+        if [[ $'\n'$allpaths == *$'\n.githooks/'* ]]; then .githooks/test-pre-push.sh; fi
+        full_check
+        exit 0
+    fi
+
+    crates=$(printf '%s\n' "$crates" | with_rdeps "$pkgs")
+    if [ -n "${PREPUSH_PLAN_ONLY:-}" ]; then
+        echo "PLAN crates: ${crates//$'\n'/ }"
+        exit 0
+    fi
+    local pkgargs=() c
+    for c in $crates; do pkgargs+=(-p "$c"); done
+    say "scope: ${crates//$'\n'/ }"
+    cargo fmt "${pkgargs[@]}" -- --check
+    cargo clippy "${pkgargs[@]}" --all-targets -- -D warnings
+    cargo test "${pkgargs[@]}"
+    say "OK"
+}
+
+main "$@"
