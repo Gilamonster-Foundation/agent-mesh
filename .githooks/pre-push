@@ -3,158 +3,204 @@
 # Pre-push hook for agent-mesh: a fast pre-flight of what is being pushed.
 #
 # CRAFT-14: the hook runs the pipeline's kinds of check (fmt, clippy, tests)
-# on the CHANGED SCOPE only. CI is the authoritative full gate.
-#   - tag pushes, branch deletions and pushes with no code change: skip;
-#   - otherwise fmt, clippy -D warnings and tests for the crates that own the
-#     changed Rust files and every workspace crate that depends on them (a
-#     root Cargo.toml/Cargo.lock/toolchain change means the whole workspace);
-#   - the diff is the PUSHED commits (remote sha..local sha; a new branch is
-#     measured from its merge-base with origin/main), and the checks run on
-#     that commit, not on whatever the working tree holds.
+# on the CHANGED SCOPE only; CI is the authoritative full gate.
 #
-# Whole-tree checks are CI-only and not run here: coverage (`just cov-ci`,
-# the 75% floor), the macOS job and the MSRV/toolchain matrix.
-# `just check` stays the full local gate for humans.
+#   skip         tag pushes, branch deletions, and pushes whose diff was
+#                computed and touches only docs (*.md, docs/, LICENSE*,
+#                .github/ISSUE_TEMPLATE/);
+#   crates       otherwise the workspace crates that own the changed paths
+#                (any extension) and every workspace crate that depends on
+#                them, with fmt, clippy -D warnings and tests;
+#   whole tree   a changed path outside every crate (root Cargo.toml,
+#                Cargo.lock, toolchain, CI, justfile, hooks), or ANY failure
+#                while working out the scope (unknown remote commit, no
+#                merge-base, cargo metadata or jq failing): the same checks
+#                as `just check`. An unknown scope never skips.
 #
-# PIPELINE PARITY: This hook mirrors .github/workflows/ci.yml (lint + test
-# jobs, scoped; coverage and macOS are CI-only) and the `check` recipe in
-# justfile. When editing this hook, audit the workflow + justfile in the
-# same PR. Scope logic is tested by .githooks/test-pre-push.sh.
+# The checks run on the working tree, so the pushed commit must BE the tree:
+# a code push must be of HEAD with no modified or untracked files, one branch
+# at a time; otherwise the hook refuses and says what to do.
+#
+# Whole-tree checks stay CI-only: coverage (`just cov-ci`, the 75% floor) and
+# the macOS job. `just check` is the full local gate for humans.
+#
+# PIPELINE PARITY: This hook mirrors the lint and test jobs of
+# .github/workflows/ci.yml (scoped) and the `check` recipe in justfile;
+# coverage and the macOS job are CI-only. When editing this hook, audit the
+# workflow + justfile in the same PR. Scope logic: .githooks/test-pre-push.sh.
 #
 # Install: `just install-hooks` (or `git config core.hooksPath .githooks`)
 # Do NOT skip this hook with `--no-verify`. If a check fails, fix the issue.
 #
-# PREPUSH_PLAN_ONLY=1 prints the plan instead of running cargo (for tests).
+# PREPUSH_PLAN_ONLY=1 prints "PLAN ..." instead of running cargo (tests).
+
+set -euo pipefail
 
 ZERO=0000000000000000000000000000000000000000
 
-# Workspace crates as "name<TAB>dir" and "name<TAB>dependency" lines.
+say() { echo "[pre-push] $*" >&2; }
+refuse() {
+    say "refusing: $*"
+    exit 1
+}
+
+# Workspace crates as "P<TAB>name<TAB>dir" and "D<TAB>name<TAB>dependency".
 ws_packages() {
     cargo metadata --format-version 1 --no-deps --offline |
         jq -r '.packages[] | .name as $n | (.manifest_path | sub("/Cargo.toml$"; "")) as $d
                | "P\t\($n)\t\($d)", (.dependencies[] | "D\t\($n)\t\(.name)")'
 }
 
-# stdin: changed paths. stdout: "WORKSPACE", or the owning crate names, or
-# nothing when no Rust code changed. $1 = the repo root (absolute).
-owning_crates() {
-    local root=$1 pkgs file best bestname kind name dir
-    pkgs=$(ws_packages)
+is_docs() {
+    case $1 in
+    *.md | docs/* | LICENSE* | .github/ISSUE_TEMPLATE/*) return 0 ;;
+    esac
+    return 1
+}
+
+# $1 root, $2 packages, stdin: changed non-docs paths. Prints the owning
+# crate of each path (longest crate dir prefix, any extension), or WORKSPACE
+# for a path outside every crate.
+owners() {
+    local root=$1 pkgs=$2 file best bestname kind name dir
     while IFS= read -r file; do
-        case $file in
-        Cargo.toml | Cargo.lock | rust-toolchain | rust-toolchain.toml | .cargo/*)
-            echo WORKSPACE
-            continue
-            ;;
-        *.rs | */Cargo.toml | */build.rs) ;;
-        *) continue ;;
-        esac
-        best= bestname=
+        best="" bestname=""
         while IFS=$'\t' read -r kind name dir; do
-            [ "$kind" = P ] || continue
-            dir=${dir#"$root"/}
-            case $file in
-            "$dir"/*) if [ ${#dir} -gt ${#best} ]; then best=$dir bestname=$name; fi ;;
-            esac
+            if [ "$kind" = P ]; then
+                dir=${dir#"$root"/}
+                case $file in
+                "$dir"/*) if [ ${#dir} -gt ${#best} ]; then best=$dir bestname=$name; fi ;;
+                esac
+            fi
         done <<<"$pkgs"
-        [ -n "$bestname" ] && echo "$bestname"
+        if [ -n "$bestname" ]; then echo "$bestname"; else echo WORKSPACE; fi
     done | sort -u
 }
 
-# stdin: crate names. stdout: those crates plus every workspace crate that
-# depends on them, directly or not.
+# $1 packages, stdin: crate names. Those plus every workspace crate that
+# depends on them, directly or not (dev-dependencies included).
 with_rdeps() {
-    local pkgs seen new
-    pkgs=$(ws_packages)
+    local pkgs=$1 seen new kind name dep
     seen=$(sort -u)
     while :; do
         new=$(
             {
                 echo "$seen"
                 while IFS=$'\t' read -r kind name dep; do
-                    [ "$kind" = D ] && grep -qx "$dep" <<<"$seen" && echo "$name"
+                    if [ "$kind" = D ] && grep -qx "$dep" <<<"$seen"; then echo "$name"; fi
                 done <<<"$pkgs"
             } | sort -u
         )
-        [ "$new" = "$seen" ] && break
+        if [ "$new" = "$seen" ]; then break; fi
         seen=$new
     done
-    echo "$seen" | sed '/^$/d'
+    echo "$seen"
 }
 
-# Print the files a push changes, or nothing. $1 local sha, $2 remote sha.
-pushed_files() {
-    local base
-    if [ "$2" = "$ZERO" ]; then
-        base=$(git merge-base origin/main "$1" 2>/dev/null) || return 0
-    else
-        git cat-file -e "$2^{commit}" 2>/dev/null || return 0
-        base=$2
+# The diff baseline for one ref: the remote sha when it is a known commit; a
+# new branch is measured from its merge-base with origin/main (fetched
+# first). Fails when neither resolves.
+baseline() { # $1 remote name, $2 local sha, $3 remote sha
+    if [ "$3" != "$ZERO" ]; then
+        git cat-file -e "$3^{commit}" 2>/dev/null && echo "$3"
+        return
     fi
-    git diff --name-only "$base" "$1"
+    git fetch -q "$1" main 2>/dev/null || say "could not fetch $1 main; using the local copy"
+    git merge-base "refs/remotes/$1/main" "$2" 2>/dev/null
+}
+
+full_check() {
+    say "scope: whole tree"
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo test --workspace
+    say "OK"
 }
 
 main() {
-    local root files="" lref lsha rref rsha crates
+    local remote=${1:-origin} root lref lsha rref rsha base paths
+    command -v git >/dev/null || {
+        echo "pre-push: 'git' not found in PATH" >&2
+        exit 1
+    }
+    command -v cargo >/dev/null || {
+        echo "pre-push: 'cargo' not found in PATH (install rustup)" >&2
+        exit 1
+    }
     root=$(git rev-parse --show-toplevel)
-    cd "$root" || exit 1
+    cd "$root"
 
-    local head=
+    # Per live ref: "skip", or "full" / the changed non-docs paths.
+    local full=0 tip="" tips=0 allpaths=""
     while read -r lref lsha rref rsha; do
-        [ -n "$lsha" ] || continue
+        [ -n "${lsha:-}" ] || continue
         case $rref in refs/tags/*) continue ;; esac
         [ "$lsha" = "$ZERO" ] && continue # deletion: nothing is pushed
-        files+=$(pushed_files "$lsha" "$rsha")$'\n'
-        head=$lsha
+        if ! base=$(baseline "$remote" "$lsha" "$rsha") || ! paths=$(git diff --name-only "$base" "$lsha"); then
+            say "cannot work out what $lref changes; the whole tree will be checked"
+            paths="" full=1
+        fi
+        local code="" f
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            is_docs "$f" || code+="$f"$'\n'
+        done <<<"$paths"
+        if [ "$full" = 0 ] && [ -z "$code" ]; then continue; fi # docs-only or empty
+        if [ "$tip" != "$lsha" ]; then
+            tips=$((tips + 1))
+            tip=$lsha
+        fi
+        allpaths+=$code
     done
 
-    # The scope logic has its own tests; run them when the hook changes.
-    if grep -q '^\.githooks/' <<<"$files" && [ -z "${PREPUSH_PLAN_ONLY:-}" ]; then
-        echo "[pre-push] hook changed: running its scope tests"
-        .githooks/test-pre-push.sh || exit 1
-    fi
-
-    crates=$(printf '%s' "$files" | sed '/^$/d' | owning_crates "$root")
-    if [ -z "$crates" ]; then
-        echo "[pre-push] no Rust code in this push: nothing to pre-flight (CI is the full gate)"
-        [ -n "${PREPUSH_PLAN_ONLY:-}" ] && echo "PLAN skip"
+    if [ "$tips" = 0 ]; then
+        say "nothing to check (tags, deletions and docs-only pushes skip; CI is the full gate)"
+        [ -z "${PREPUSH_PLAN_ONLY:-}" ] || echo "PLAN skip"
         exit 0
     fi
-    local pkgargs=() fmtargs=()
-    if grep -qx WORKSPACE <<<"$crates"; then
-        pkgargs=(--workspace) fmtargs=(--all)
-        plan="workspace"
+    [ "$tips" = 1 ] || refuse "several branches are being pushed; push one branch at a time"
+    [ "$tip" = "$(git rev-parse HEAD)" ] ||
+        refuse "$tip is not the checked-out commit; check it out first (the checks run on the working tree)"
+    [ -z "$(git status --porcelain)" ] ||
+        refuse "the working tree has modified or untracked files; commit them or move them out (the checks run on the working tree)"
+
+    # Scope from the pushed tree (it is the working tree now).
+    local scope=crates pkgs="" crates=""
+    if [ "$full" = 1 ]; then
+        scope=full
+    elif ! command -v jq >/dev/null 2>&1; then
+        say "'jq' not found (install: apt install jq / brew install jq); the whole tree will be checked"
+        scope=full
+    elif ! pkgs=$(ws_packages); then
+        say "cargo metadata failed; the whole tree will be checked"
+        scope=full
     else
-        crates=$(printf '%s\n' "$crates" | with_rdeps)
-        plan="crates: $(echo $crates)"
-        local c
-        for c in $crates; do pkgargs+=(-p "$c") fmtargs+=(-p "$c"); done
+        crates=$(printf '%s' "$allpaths" | owners "$root" "$pkgs")
+        if grep -qx WORKSPACE <<<"$crates"; then scope=full; fi
     fi
-    if [ -n "${PREPUSH_PLAN_ONLY:-}" ]; then
-        echo "PLAN $plan"
+
+    if [ "$scope" = full ]; then
+        if [ -n "${PREPUSH_PLAN_ONLY:-}" ]; then
+            echo "PLAN full"
+            exit 0
+        fi
+        if grep -q '^\.githooks/' <<<"$allpaths"; then .githooks/test-pre-push.sh; fi
+        full_check
         exit 0
     fi
 
-    # Check the pushed commit, not the working tree.
-    local dir=$root
-    if [ "$head" != "$(git rev-parse HEAD)" ] || [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-        dir=$(mktemp -d)
-        trap 'git worktree remove --force "$dir" >/dev/null 2>&1; rm -rf "$dir"' EXIT
-        git worktree add --detach "$dir" "$head" >/dev/null
-        export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$root/target}
-        echo "[pre-push] checking $head in a scratch worktree"
+    crates=$(printf '%s\n' "$crates" | with_rdeps "$pkgs")
+    if [ -n "${PREPUSH_PLAN_ONLY:-}" ]; then
+        echo "PLAN crates: ${crates//$'\n'/ }"
+        exit 0
     fi
-    cd "$dir" || exit 1
-
-    echo "[pre-push] scope: $plan"
-    set -e
-    cargo fmt "${fmtargs[@]}" -- --check
+    local pkgargs=() c
+    for c in $crates; do pkgargs+=(-p "$c"); done
+    say "scope: ${crates//$'\n'/ }"
+    cargo fmt "${pkgargs[@]}" -- --check
     cargo clippy "${pkgargs[@]}" --all-targets -- -D warnings
     cargo test "${pkgargs[@]}"
-    echo "[pre-push] OK"
+    say "OK"
 }
 
-# Run only when executed; the test script sources this file for its helpers.
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-    main
-fi
+main "$@"
