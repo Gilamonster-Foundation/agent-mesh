@@ -16,17 +16,80 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
+/// The epoch after the last operation and the first failure to persist, under
+/// ONE mutex with the condvar that announces changes to them. Whoever changes
+/// either does so holding that mutex and then notifies, so a waiter that has
+/// just evaluated its predicate cannot miss the change (a notification sent
+/// between the check and the wait would be lost if they were separate).
+struct Signal {
+    gate: Mutex<Gate>,
+    moved: Condvar,
+}
+
+struct Gate {
+    epoch: u64,
+    failure: Option<String>,
+}
+
+impl Signal {
+    fn new(epoch: u64) -> Self {
+        Self {
+            gate: Mutex::new(Gate {
+                epoch,
+                failure: None,
+            }),
+            moved: Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Gate> {
+        self.gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn set_epoch(&self, epoch: u64) {
+        self.lock().epoch = epoch;
+        self.moved.notify_all();
+    }
+
+    /// Record the first failure. Returns whether this call recorded it.
+    fn fail(&self, why: String) {
+        let mut g = self.lock();
+        g.failure.get_or_insert(why);
+        drop(g);
+        self.moved.notify_all();
+    }
+
+    fn failure(&self) -> Option<String> {
+        self.lock().failure.clone()
+    }
+
+    /// Block until the epoch reaches `n` (true) or a failure is recorded
+    /// (false). `checked` runs once per evaluation of a false predicate, with
+    /// the mutex held, between the check and the wait: tests use it to land
+    /// a change in exactly that window.
+    fn wait_epoch(&self, n: u64, mut checked: impl FnMut()) -> bool {
+        let mut g = self.lock();
+        while g.epoch < n && g.failure.is_none() {
+            checked();
+            g = self
+                .moved
+                .wait(g)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        g.epoch >= n
+    }
+}
+
 /// What the connection threads share: the server, and the first failure to
 /// persist anything. After such a failure the server refuses everything (it
 /// poisons itself), so the loop stops too instead of carrying on half-alive.
 struct Shared {
     server: Mutex<Server>,
-    fatal: Mutex<Option<String>>,
     path: PathBuf,
-    /// The epoch after the last operation, and a signal when it moves (or
-    /// when a failure is recorded): waiters block on this, never poll.
-    epoch: Mutex<u64>,
-    moved: Condvar,
+    /// The epoch and the first failure, with their condvar.
+    signal: Signal,
     /// Every connection thread, so a stop can end and join them all.
     conns: Mutex<Vec<(UnixStream, JoinHandle<()>)>>,
 }
@@ -53,28 +116,13 @@ impl Serving {
     /// Returns whether the epoch got there. Causal: woken by the operation
     /// that moves it.
     pub fn wait_epoch(&self, n: u64) -> bool {
-        let s = &self.shared;
-        let mut at = s
-            .epoch
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while *at < n && !failed(s) {
-            at = s
-                .moved
-                .wait(at)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
-        *at >= n
+        self.shared.signal.wait_epoch(n, || {})
     }
 
     /// The first failure to persist, if one happened.
     #[must_use]
     pub fn failure(&self) -> Option<String> {
-        self.shared
-            .fatal
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.shared.signal.failure()
     }
 
     /// Test-only: arm a crash for the server's next append, as
@@ -106,12 +154,11 @@ pub fn serve(server: Server, listener: UnixListener) -> std::io::Result<Serving>
         .map(Path::to_path_buf)
         .ok_or_else(|| std::io::Error::other("unnamed socket"))?;
     let stop = Arc::new(AtomicBool::new(false));
+    let signal = Signal::new(server.epoch());
     let shared = Arc::new(Shared {
         server: Mutex::new(server),
-        fatal: Mutex::new(None),
+        signal,
         path,
-        epoch: Mutex::new(0),
-        moved: Condvar::new(),
         conns: Mutex::new(Vec::new()),
     });
     let (flag, state) = (stop.clone(), shared.clone());
@@ -155,10 +202,7 @@ fn with<T>(s: &Shared, f: impl FnOnce(&mut Server) -> T) -> T {
 }
 
 fn failed(s: &Shared) -> bool {
-    s.fatal
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .is_some()
+    s.signal.failure().is_some()
 }
 
 /// Shut every connection and wait for its thread, so nothing still holds the
@@ -178,21 +222,12 @@ fn end_connections(s: &Shared) {
 
 /// Publish the epoch after an operation, while still holding the server.
 fn publish(s: &Shared, server: &Server) {
-    *s.epoch
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = server.epoch();
-    s.moved.notify_all();
+    s.signal.set_epoch(server.epoch());
 }
 
 /// Record a failure to persist and wake the accept loop so it stops.
 fn fail(s: &Shared, e: &ServerError) {
-    let mut f = s
-        .fatal
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    f.get_or_insert_with(|| e.to_string());
-    drop(f);
-    s.moved.notify_all();
+    s.signal.fail(e.to_string());
     let _wake = UnixStream::connect(&s.path);
 }
 
@@ -284,4 +319,32 @@ fn handle(server: &mut Server, req: Req, bound: &mut Option<String>) -> Result<R
         }
         Req::End => Resp::Ok,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Signal;
+
+    /// The waiter has evaluated its predicate (no failure yet) and is about
+    /// to wait; a failure lands in exactly that window. It must return false
+    /// on that failure alone: no further operation, no timeout. With the
+    /// failure kept apart from the waiter's mutex the notification is lost
+    /// and this test never returns.
+    #[test]
+    fn a_failure_landing_between_the_check_and_the_wait_wakes_the_waiter() {
+        let sig = std::sync::Arc::new(Signal::new(0));
+        let mut landed = None;
+        let reached = sig.wait_epoch(1, || {
+            let s = sig.clone();
+            landed.get_or_insert_with(|| std::thread::spawn(move || s.fail("disk gone".into())));
+        });
+        assert!(!reached);
+        landed.unwrap().join().unwrap();
+        assert_eq!(sig.failure().as_deref(), Some("disk gone"));
+    }
+
+    #[test]
+    fn an_epoch_already_reached_returns_at_once() {
+        assert!(Signal::new(2).wait_epoch(1, || panic!("must not wait")));
+    }
 }
