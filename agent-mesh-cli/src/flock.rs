@@ -180,15 +180,26 @@ fn render(
 /// The member's session status and its lanes, from the verified log.
 fn flock_state(snap: &Snapshot, member: &str) -> String {
     let sessions = snap.sessions();
-    let session = sessions
+    // A member can hold one active session and pending replacements; the log
+    // iterates them by fingerprint, so count them rather than take the first.
+    let (mut active, mut pending) = (0, 0);
+    for s in sessions
         .live()
         .filter_map(|(s, _, _)| sessions.get(s))
-        .find(|s| s.member == member)
-        .map_or("no session", |s| match s.status {
-            Status::Active => "session active",
-            Status::Pending => "session pending",
-            Status::Ended => "no session",
-        });
+        .filter(|s| s.member == member)
+    {
+        match s.status {
+            Status::Active => active += 1,
+            Status::Pending => pending += 1,
+            Status::Ended => {}
+        }
+    }
+    let session = match (active, pending) {
+        (0, 0) => "no session".to_owned(),
+        (0, _) => "session pending".to_owned(),
+        (_, 0) => "session active".to_owned(),
+        (_, n) => format!("session active (+{n} pending)"),
+    };
     let lanes: Vec<String> = snap
         .board()
         .lanes()
@@ -197,7 +208,7 @@ fn flock_state(snap: &Snapshot, member: &str) -> String {
         .map(|l| format!("{} {}", l.lane, l.latest.label()))
         .collect();
     if lanes.is_empty() {
-        session.to_owned()
+        session
     } else {
         format!("{session} · {}", lanes.join(", "))
     }
@@ -207,4 +218,81 @@ fn addressed_to(snap: &Snapshot, attempt: &AttemptView, member: &str) -> bool {
     snap.board()
         .get(&attempt.brief)
         .is_some_and(|e| matches!(&e.event.body, Body::Brief { to, .. } if to == member))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_mesh_flock::EndReason;
+    use agent_mesh_flock_server::Server;
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use rand::rngs::OsRng;
+    use tempfile::TempDir;
+
+    fn flock() -> (TempDir, Server) {
+        let dir = TempDir::new().unwrap();
+        let roster = ["shep:shepherd", "h1:helper"]
+            .map(|m| parse_member(m).unwrap())
+            .to_vec();
+        let spec = InitSpec {
+            name: "t".into(),
+            roster,
+            salt: "s".into(),
+            host: "fixture".into(),
+            issued_at: "2026-10-15T00:00:00Z".into(),
+        };
+        flock_init(dir.path(), &UserKey::generate(), spec).unwrap();
+        let server = Server::open(dir.path()).unwrap();
+        (dir, server)
+    }
+
+    /// Enroll a fresh key for `member`; returns its session id.
+    fn enroll(server: &mut Server, member: &str) -> String {
+        let invite = server.invite(member).unwrap();
+        let sk = SigningKey::generate(&mut OsRng);
+        let ch = server
+            .enroll_begin(&invite.token, member, sk.verifying_key().to_bytes())
+            .unwrap();
+        let proof = sk.sign(&ch.signing_bytes());
+        server.enroll_finish(&ch, &proof).unwrap().session
+    }
+
+    fn row(dir: &TempDir, member: &str) -> String {
+        let snap = Snapshot::read(dir.path()).unwrap();
+        let out = render(&snap, &[], &BTreeMap::new(), None).unwrap();
+        out.lines()
+            .find(|l| l.starts_with(member))
+            .unwrap()
+            .to_owned()
+    }
+
+    /// PR #126: sessions iterate by fingerprint, so a pending replacement
+    /// that sorts before the active holder used to hide it. Retry fresh
+    /// flocks until the adverse order (active id > pending id) comes up; each
+    /// attempt is decided by the ids it got, not by time.
+    #[test]
+    fn a_pending_replacement_that_sorts_first_does_not_hide_the_active_holder() {
+        for _ in 0..64 {
+            let (dir, mut server) = flock();
+            let active = enroll(&mut server, "h1");
+            let pending = enroll(&mut server, "h1");
+            if active > pending {
+                let row = row(&dir, "h1");
+                assert!(row.contains("session active (+1 pending)"), "{row}");
+                return;
+            }
+        }
+        panic!("no adverse fingerprint ordering in 64 tries");
+    }
+
+    #[test]
+    fn a_member_with_only_a_pending_session_shows_pending() {
+        let (dir, mut server) = flock();
+        let first = enroll(&mut server, "h1");
+        server.end_session(&first, EndReason::Closed).unwrap();
+        enroll(&mut server, "h1"); // any session after the first starts pending
+        let row = row(&dir, "h1");
+        assert!(row.contains("session pending"), "{row}");
+        assert!(!row.contains("active"), "{row}");
+    }
 }
