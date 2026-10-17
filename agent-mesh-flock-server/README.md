@@ -125,7 +125,13 @@ epoch-bounded certificate for the key it names.
   `lost`, and `End` is answered only once the end is durable. If persisting
   fails the server stops (`Serving::wait` returns the failure). It is the flock owner's local surface, not the SSH stream of
   step 9, which authenticates by a fresh signed challenge.
-- Not yet: `watch` (step 6), the epoch bump when a member leaves the roster,
+- `watch` (Unix, on `serve`): `Journal` holds the committed frames, published
+  after the fsync and readable without the writer's lock; `Cursor` resumes
+  after a signed `Head`; `Follower` verifies frames from a saved head and
+  refuses one that does not extend it. A stream opens only after the session
+  key signs a fresh `StreamChallenge` (an active session of a current member)
+  and closes after the frame that ends that session.
+- Not yet: the `amesh flock watch` command (step 7), the epoch bump when a member leaves the roster,
   per-device operator listing in the roster (so no operator approval),
   operator-signed events, any CLI beyond `amesh flock init`, MCP or TUI.
 - Unix only (file modes and `flock(2)`); on other hosts the crate builds, the

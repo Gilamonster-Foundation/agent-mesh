@@ -135,6 +135,13 @@ impl Serving {
         lock(&self.shared.server).plan_crash(plan);
     }
 
+    /// Test-only: run `f` on the served server (an administration primitive
+    /// that has no wire request yet, such as `handoff`).
+    #[doc(hidden)]
+    pub fn with_server<T>(&self, f: impl FnOnce(&mut Server) -> T) -> T {
+        with(&self.shared, f)
+    }
+
     /// Stop accepting, end every connection, and release the log: when this
     /// returns the log's lock is free.
     pub fn stop(mut self) {

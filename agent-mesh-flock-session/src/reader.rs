@@ -113,7 +113,7 @@ impl<F: Fs> Reader<F> {
     pub fn sync(&mut self, serve: &Path, key: &AgentKey) -> Result<(), ReaderError> {
         let mut w = Watch::open(serve, key, self.follower.head().cloned())?;
         loop {
-            match w.next()? {
+            match w.next_event()? {
                 WatchEvent::Frame(f) => {
                     self.apply(f)?;
                     self.save()?;
@@ -162,7 +162,7 @@ impl Watch {
     ///
     /// # Errors
     /// A refusal, a rollback signal, or a broken stream.
-    pub fn next(&mut self) -> Result<WatchEvent, ReaderError> {
+    pub fn next_event(&mut self) -> Result<WatchEvent, ReaderError> {
         match read_msg::<Resp>(&mut self.conn)? {
             Some(Resp::Frame(f)) => Ok(WatchEvent::Frame(f)),
             Some(Resp::Caught { index }) => Ok(WatchEvent::Caught(index)),

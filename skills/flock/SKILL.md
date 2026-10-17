@@ -91,10 +91,29 @@ Built (plan steps 1–4 and the read-only herdr view, 4c):
   claims next to the verified flock state. It only ever lists; it never
   prompts, sends keys or renames. Off-roster panes are never shown.
 
+- **`watch --from (index, signed head)`** (library and `serve`; the `amesh flock
+  watch` command is step 7). One stream carries the replay, a `Caught` marker,
+  then live frames, each exactly once: the server publishes a frame to a
+  journal only after its fsync, and readers read the journal without the
+  writer's lock. The resume token is the last signed admission record. The
+  reader (`Reader`, in `agent-mesh-flock-session`) verifies every frame from
+  its own saved head, so an older backup, a shorter history, or an altered
+  prefix is refused as a `Rollback` whatever the server says; a server that
+  forks different histories to different readers is not caught by one reader.
+  The reader's state is one file (the verified frames) saved by write temp,
+  fsync, rename, fsync directory; a head is witnessed only after that returns.
+  A stream needs an *active* session of a *current* member signing a fresh
+  challenge bound to the flock and the connection (a certified non-member, a
+  pending or ended session, or a proof from another connection is refused),
+  and it closes right after the frame that ends that session (`session-end` or
+  a hand-off away). Ceilings: the journal is in memory; the reader rewrites its
+  whole file per save.
+
 **Planned, not built:** the epoch bump when a member is removed from the
-roster; operator device keys listed per device in the roster, and with them operator
+roster (until then a dropped member cannot open a stream, but one already
+open is not closed by the roster event; step 6b); operator device keys listed per device in the roster, and with them operator
 approval of a shepherd or delegate hand-off (refused today), plus
-operator-signed events; the pane announcement (a session telling the log which herdr pane it is in); `watch`; the rest of
+operator-signed events; the pane announcement (a session telling the log which herdr pane it is in); the rest of
 the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; only `init`,
 `serve`, `invite`, `session` and `panes` exist); `amesh-tui`; attaching from another host; the
 `amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native

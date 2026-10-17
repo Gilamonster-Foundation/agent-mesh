@@ -171,7 +171,7 @@ fn indexes(f: &[Sealed]) -> Vec<u64> {
 
 fn next_frame(w: &mut Watch) -> Vec<Sealed> {
     loop {
-        match w.next().unwrap() {
+        match w.next_event().unwrap() {
             WatchEvent::Frame(f) => return f,
             WatchEvent::Caught(_) => {}
             WatchEvent::Closed(why) => panic!("closed: {why}"),
@@ -194,7 +194,7 @@ fn an_event_appended_mid_replay_arrives_once_and_the_replay_boundary_is_marked()
     // the rest of the replay, the marker, then the live event
     let mut caught = None;
     while (seen.len() as u64) < mid {
-        match w.next().unwrap() {
+        match w.next_event().unwrap() {
             WatchEvent::Frame(f) => seen.extend(indexes(&f)),
             WatchEvent::Caught(i) => caught = Some(i),
             WatchEvent::Closed(why) => panic!("{why}"),
@@ -242,7 +242,7 @@ fn a_reader_killed_anywhere_resumes_with_no_duplicate_and_no_gap() {
     let mut all = vec![];
     let mut w = Watch::open(&r.sock, &shep.key, None).unwrap();
     loop {
-        match w.next().unwrap() {
+        match w.next_event().unwrap() {
             WatchEvent::Frame(f) => all.push(f),
             WatchEvent::Caught(_) => break,
             WatchEvent::Closed(why) => panic!("{why}"),
@@ -293,7 +293,7 @@ fn a_certified_non_member_a_pending_or_ended_session_and_a_replayed_proof_open_n
     );
     let refused = |key: &AgentKey, r: &Rig| {
         let mut w = Watch::open(&r.sock, key, None).unwrap();
-        matches!(w.next(), Err(ReaderError::Stream(_)))
+        matches!(w.next_event(), Err(ReaderError::Stream(_)))
     };
     assert!(refused(&stranger, &r));
     // a pending replacement
@@ -301,7 +301,7 @@ fn a_certified_non_member_a_pending_or_ended_session_and_a_replayed_proof_open_n
     assert!(refused(&pending.key, &r));
     // and the legitimate member still gets in
     let mut ok = Watch::open(&r.sock, &shep.key, None).unwrap();
-    assert!(matches!(ok.next().unwrap(), WatchEvent::Frame(_)));
+    assert!(matches!(ok.next_event().unwrap(), WatchEvent::Frame(_)));
     // a proof signed for one connection's challenge, presented on another
     let mut a = r.conn();
     let Resp::StreamChallenge(ch_a) = rpc(&mut a, &Req::WatchBegin) else {
@@ -331,7 +331,7 @@ fn a_watch_closes_right_after_the_epoch_bump_that_ends_its_session() {
     let mut w = Watch::open(&r.sock, &shep.key, None).unwrap();
     // drain the replay
     loop {
-        if let WatchEvent::Caught(_) = w.next().unwrap() {
+        if let WatchEvent::Caught(_) = w.next_event().unwrap() {
             break;
         }
     }
@@ -339,7 +339,7 @@ fn a_watch_closes_right_after_the_epoch_bump_that_ends_its_session() {
     assert!(matches!(rpc(&mut shep.conn, &Req::End), Resp::Ok));
     let mut kinds = vec![];
     let reason = loop {
-        match w.next().unwrap() {
+        match w.next_event().unwrap() {
             WatchEvent::Frame(f) => kinds.extend(f.iter().map(|s| s.event.payload.kind)),
             WatchEvent::Closed(why) => break why,
             WatchEvent::Caught(_) => {}
@@ -411,8 +411,8 @@ mod power {
 
     impl PowerFs {
         /// An independent copy of the whole model.
-        pub fn fork(&self) -> PowerFs {
-            PowerFs(Arc::new(Mutex::new(self.0.lock().unwrap().clone())))
+        pub fn fork(&self) -> Self {
+            Self(Arc::new(Mutex::new(self.0.lock().unwrap().clone())))
         }
         pub fn steps(&self) -> usize {
             self.0.lock().unwrap().steps
@@ -427,7 +427,7 @@ mod power {
             m.crash_at = None;
         }
         /// What a restart finds: only the durable names, with durable bytes.
-        pub fn after_power_loss(&self) -> PowerFs {
+        pub fn after_power_loss(&self) -> Self {
             let m = self.0.lock().unwrap();
             let mut n = Model::default();
             for (name, ino) in &m.durable_names {
@@ -436,7 +436,7 @@ mod power {
                 n.names.insert(name.clone(), n.inodes.len() - 1);
             }
             n.durable_names = n.names.clone();
-            PowerFs(Arc::new(Mutex::new(n)))
+            Self(Arc::new(Mutex::new(n)))
         }
     }
 
@@ -497,7 +497,7 @@ fn power_loss_at_any_step_of_a_save_never_loses_a_witnessed_head() {
     let mut all = vec![];
     let mut w = Watch::open(&r.sock, &shep.key, None).unwrap();
     loop {
-        match w.next().unwrap() {
+        match w.next_event().unwrap() {
             WatchEvent::Frame(f) => all.push(f),
             WatchEvent::Caught(_) => break,
             WatchEvent::Closed(why) => panic!("{why}"),
@@ -544,4 +544,49 @@ fn power_loss_at_any_step_of_a_save_never_loses_a_witnessed_head() {
             );
         }
     }
+}
+
+#[test]
+fn a_watch_also_closes_right_after_a_hand_off_away_from_its_session() {
+    use agent_mesh_flock::{FileRef, HandoffApproval};
+    use content_addressable::RawContentId;
+    let r = rig();
+    let shep = r.enrol("shep");
+    let old = r.enrol("h1");
+    let new = r.enrol("h1"); // pending replacement
+    let mut w = Watch::open(&r.sock, &old.key, None).unwrap();
+    loop {
+        if let WatchEvent::Caught(_) = w.next_event().unwrap() {
+            break;
+        }
+    }
+    let approval = r.serving().with_server(|s| {
+        let start = s.sessions().get(&old.session).unwrap().start;
+        MerkleNode::genesis(HandoffApproval {
+            flock: s.flock(),
+            member: "h1".into(),
+            from: old.session.clone(),
+            to: new.session.clone(),
+            resume: s.board().head_of(&old.session).unwrap_or(start),
+            context: Some(FileRef {
+                root: "r".into(),
+                path: "HANDOFF.md".into(),
+                id: RawContentId::from_content(b"h"),
+            }),
+        })
+    });
+    let sig = Assertion::sign(&shep.key, &approval.content_id().unwrap());
+    r.serving()
+        .with_server(|s| s.handoff(approval, sig))
+        .unwrap();
+    let mut kinds = vec![];
+    let reason = loop {
+        match w.next_event().unwrap() {
+            WatchEvent::Frame(f) => kinds.extend(f.iter().map(|s| s.event.payload.kind)),
+            WatchEvent::Closed(why) => break why,
+            WatchEvent::Caught(_) => {}
+        }
+    };
+    assert_eq!(kinds, vec![Kind::Handoff, Kind::Epoch]);
+    assert!(reason.contains("ended"), "{reason}");
 }

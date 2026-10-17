@@ -222,7 +222,7 @@ fn an_altered_prefix_with_an_unchanged_last_event_does_not_extend_the_head() {
 
     // `shep` writes X on A and X' on B; `h1` then writes the very same Y on
     // both (its chain does not pass through X), then each writes one more.
-    let mut write = |env: &mut Env, s: &mut Server, who: &AgentKey, kind, body: Body, at: u64| {
+    let write = |env: &mut Env, s: &mut Server, who: &AgentKey, kind, body: Body, at: u64| {
         env.at = at;
         let prev = s.board().head_of(&who.fingerprint().hex());
         let (node, sig) = env.event(who, kind, prev, &[], body);
@@ -288,4 +288,44 @@ fn an_altered_prefix_with_an_unchanged_last_event_does_not_extend_the_head() {
         Err(FollowError::DoesNotExtend(_))
     ));
     f.apply(&fa[at_y + 1]).unwrap();
+}
+
+#[test]
+fn a_member_the_roster_dropped_may_not_open_a_stream_though_its_session_is_still_active() {
+    use agent_mesh_flock::{Body, Kind, Member, Role};
+    let mut env = Env::new();
+    let mut server = env.open();
+    let shep = enroll(&mut server, "shep");
+    let h1 = enroll(&mut server, "h1");
+    let (_, _, id) = proof(&h1.key, &server, 1);
+    let keep: Vec<Member> = ["shep", "herdr", "op"]
+        .iter()
+        .map(|n| Member {
+            name: (*n).into(),
+            role: match *n {
+                "shep" => Role::Shepherd,
+                "herdr" => Role::Adapter,
+                _ => Role::Operator,
+            },
+        })
+        .collect();
+    let prev = server.board().head_of(&shep.key.fingerprint().hex());
+    let replaces = server.board().roster_id();
+    let (node, sig) = env.event(
+        &shep.key,
+        Kind::Roster,
+        prev,
+        &[("replaces", replaces)],
+        Body::Roster { members: keep },
+    );
+    server.admit(node, sig).unwrap();
+    // removal-driven epoch bumps are a later step: the session is still
+    // Active in the table, but the stream must follow the roster
+    assert_eq!(
+        server.sessions().get(&h1.session).unwrap().status,
+        agent_mesh_flock_server::Status::Active
+    );
+    let (sig, _, id2) = proof(&h1.key, &server, 1);
+    let _ = id;
+    assert!(server.authorize_stream(&sig, &id2).is_err());
 }
