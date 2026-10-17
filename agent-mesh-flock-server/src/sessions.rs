@@ -6,10 +6,11 @@
 //! event ([`Sessions::resolve`]) and whether a server event is legal given
 //! what came before ([`Sessions::check`]).
 
+use crate::chain::Chain;
 use crate::frame::cert_cid;
-use agent_mesh_flock::{Board, Body, Event, Signer, SignerClass};
+use agent_mesh_flock::{Board, Body, Event, Role, Signer, SignerClass};
 use agent_mesh_protocol::{Assertion, Caveats, CertChain, Issuer, Scope};
-use content_addressable::{ContentId, RawContentId};
+use content_addressable::{ContentAddressable, ContentId, RawContentId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Where a session stands.
@@ -31,6 +32,8 @@ struct Session {
     status: Status,
     certs: BTreeSet<ContentId>,
     epoch: u64,
+    /// The `handoff` that activated it: its first event must have it as `prev`.
+    activated_by: Option<ContentId>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +75,11 @@ pub struct Sessions {
     verifiers: BTreeMap<RawContentId, ContentId>,
     sessions: BTreeMap<String, Session>,
     seen: BTreeSet<String>,
+    /// The session that holds each member's role (set by the first
+    /// session and moved only by a hand-off; an ended holder still holds).
+    holders: BTreeMap<String, String>,
+    /// Approvals already consumed by a hand-off.
+    approvals: BTreeSet<ContentId>,
 }
 
 /// The digest an `invite` event carries for a bearer token.
@@ -168,8 +176,9 @@ impl Sessions {
         board: &Board,
         ev: &Event,
         epoch: u64,
-        server: &[u8; 32],
+        chain: &Chain,
     ) -> Result<(), String> {
+        let server = &chain.server_pub;
         let live = |session: &str| {
             self.sessions
                 .get(session)
@@ -233,9 +242,111 @@ impl Sessions {
                 }
                 cert_ok(cert, session, epoch, server)?;
             }
+            Body::Handoff {
+                from,
+                to,
+                resume,
+                context,
+                approval,
+                approval_sig,
+            } => {
+                let ap_id = approval.content_id().map_err(|e| e.to_string())?;
+                let a = &approval.payload;
+                if !approval.parents.is_empty() || a.flock != board.flock() {
+                    return Err("approval is not for this flock".into());
+                }
+                if (&a.from, &a.to, &a.resume, &a.context) != (from, to, resume, context) {
+                    return Err("handoff differs from the approval it cites".into());
+                }
+                if a.context.is_none() {
+                    return Err("handoff cites no context file".into());
+                }
+                if self.approvals.contains(&ap_id) {
+                    return Err("approval already consumed".into());
+                }
+                let (Some(f), Some(t)) = (self.sessions.get(from), self.sessions.get(to)) else {
+                    return Err("handoff names an unknown session".into());
+                };
+                if f.member != a.member || t.member != a.member {
+                    return Err("sessions do not belong to the approved member".into());
+                }
+                if self.holders.get(&a.member) != Some(from) {
+                    return Err("from is not the member's current holder".into());
+                }
+                if t.status != Status::Pending {
+                    return Err("to is not a pending replacement".into());
+                }
+                if *resume != board.head_of(from).unwrap_or(f.start) {
+                    return Err("resume is not the old session's last head".into());
+                }
+                refs_are(
+                    ev,
+                    &[("from", f.start), ("resume", *resume), ("to", t.start)],
+                )?;
+                let role = board
+                    .members()
+                    .iter()
+                    .find(|m| m.name == a.member)
+                    .map(|m| m.role)
+                    .ok_or("member is not on the roster")?;
+                self.approver_ok(role, board, &ap_id, approval_sig, chain, epoch)?;
+            }
             _ => {}
         }
         Ok(())
+    }
+
+    /// The roster's hand-off authority signed it: an active shepherd session,
+    /// and only for a helper. Everything else fails closed. Operator approval
+    /// waits on a logged key-to-operator binding, which the roster cannot yet
+    /// carry; a key merely certified by the flock's user key is not one.
+    fn approver_ok(
+        &self,
+        role: Role,
+        board: &Board,
+        ap_id: &ContentId,
+        sig: &Assertion,
+        chain: &Chain,
+        epoch: u64,
+    ) -> Result<(), String> {
+        if matches!(sig.author().issuer, Issuer::User(_)) {
+            return Err("operator approval is not supported: no key-to-operator binding".into());
+        }
+        let signer = self.resolve(sig, ap_id, &chain.server_pub, epoch)?;
+        let SignerClass::Session {
+            member,
+            pending: false,
+        } = signer.class
+        else {
+            return Err("approval is not signed by a roster authority".into());
+        };
+        let approver_role = board
+            .members()
+            .iter()
+            .find(|m| m.name == member)
+            .map(|m| m.role);
+        if approver_role == Some(Role::Shepherd) && role == Role::Helper {
+            Ok(())
+        } else {
+            Err("only a shepherd approves a hand-off, and only a helper's".into())
+        }
+    }
+
+    /// A session a hand-off activated writes `prev = handoff` as its first
+    /// event, so a zombie cannot fork the chain.
+    ///
+    /// # Errors
+    /// The first event does not follow the hand-off.
+    pub fn first_link(&self, board: &Board, ev: &Event) -> Result<(), String> {
+        match self.sessions.get(&ev.author) {
+            Some(Session {
+                activated_by: Some(h),
+                ..
+            }) if board.head_of(&ev.author).is_none() && ev.prev != Some(*h) => {
+                Err("the first event after a hand-off must have prev = the handoff".into())
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Record an admitted server event. Call only after [`Self::check`].
@@ -263,6 +374,7 @@ impl Sessions {
                     i.consumed = true;
                 }
                 let status = if self.seen.insert(member.clone()) {
+                    self.holders.insert(member.clone(), session.clone());
                     Status::Active
                 } else {
                     Status::Pending
@@ -277,12 +389,27 @@ impl Sessions {
                         status,
                         certs,
                         epoch,
+                        activated_by: None,
                     },
                 );
             }
             Body::SessionEnd { session, .. } => {
                 if let Some(s) = self.sessions.get_mut(session) {
                     s.status = Status::Ended;
+                }
+            }
+            Body::Handoff {
+                from, to, approval, ..
+            } => {
+                self.approvals
+                    .insert(approval.content_id().map_err(|e| e.to_string())?);
+                if let Some(s) = self.sessions.get_mut(from) {
+                    s.status = Status::Ended;
+                }
+                if let Some(s) = self.sessions.get_mut(to) {
+                    s.status = Status::Active;
+                    s.activated_by = Some(id);
+                    self.holders.insert(s.member.clone(), to.clone());
                 }
             }
             Body::Renewal {
