@@ -85,6 +85,16 @@ pub enum Outcome {
     Failed,
 }
 
+/// Why a session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EndReason {
+    /// The session said goodbye.
+    Closed,
+    /// The server lost it (stream or process gone).
+    Lost,
+}
+
 /// A cited file: a root the roster declares, a path under it, and the bytes'
 /// id. A reference, never a parent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,10 +185,44 @@ pub enum Body {
         /// Target the nudge went to.
         target: String,
     },
-    /// Server bookkeeping events (epoch, renewal, session-*, handoff, invite).
-    Server {
-        /// What happened.
-        note: String,
+    /// Server: an invite for `member`. Carries only the token's digest, so a
+    /// reader of the log cannot redeem it.
+    Invite {
+        /// The roster member the token enrolls.
+        member: String,
+        /// Digest of the bearer token.
+        verifier: RawContentId,
+    },
+    /// Server: a session started. `refs.invite` names the invite it consumed.
+    SessionStart {
+        /// The roster member.
+        member: String,
+        /// The session key's fingerprint, hex.
+        session: String,
+        /// The bounded certificate the server issued.
+        cert: CertChain,
+    },
+    /// Server: a session ended. `refs.session` names its `session-start`.
+    SessionEnd {
+        /// The session key's fingerprint, hex.
+        session: String,
+        /// Why.
+        reason: EndReason,
+    },
+    /// Server: the epoch rose to `epoch`.
+    Epoch {
+        /// The new epoch.
+        epoch: u64,
+    },
+    /// Server: a session's certificate renewed for `epoch`. `refs.session`
+    /// names its `session-start`.
+    Renewal {
+        /// The session key's fingerprint, hex.
+        session: String,
+        /// The epoch the new certificate is bounded to.
+        epoch: u64,
+        /// The renewed certificate.
+        cert: CertChain,
     },
 }
 
@@ -202,15 +246,11 @@ impl Body {
                 | (Self::RelayedAnswer { .. }, K::RelayedAnswer)
                 | (Self::Status { .. }, K::Status)
                 | (Self::Nudged { .. }, K::Nudged)
-                | (
-                    Self::Server { .. },
-                    K::Epoch
-                        | K::Renewal
-                        | K::SessionStart
-                        | K::SessionEnd
-                        | K::Handoff
-                        | K::Invite
-                )
+                | (Self::Invite { .. }, K::Invite)
+                | (Self::SessionStart { .. }, K::SessionStart)
+                | (Self::SessionEnd { .. }, K::SessionEnd)
+                | (Self::Epoch { .. }, K::Epoch)
+                | (Self::Renewal { .. }, K::Renewal)
         )
     }
 }

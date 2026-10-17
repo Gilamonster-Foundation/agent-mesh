@@ -320,9 +320,7 @@ fn roster_replacement_names_the_current_roster() {
 #[test]
 fn server_kinds_are_the_servers() {
     let mut fx = Fx::new();
-    let note = Body::Server {
-        note: "bump".into(),
-    };
+    let note = Body::Epoch { epoch: 1 };
     assert_eq!(
         fx.judge("server", Kind::Epoch, note.clone(), &[]),
         Verdict::Admit
@@ -344,7 +342,7 @@ fn server_kinds_are_the_servers() {
         Verdict::Refuse(Refusal::NotAllowed)
     );
     assert_eq!(
-        fx.judge("op", Kind::Handoff, note, &[]),
+        fx.judge("op", Kind::Epoch, note, &[]),
         Verdict::Refuse(Refusal::NotAllowed)
     );
 }
