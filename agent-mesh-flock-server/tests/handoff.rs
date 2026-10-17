@@ -270,22 +270,81 @@ fn only_the_roster_authority_can_approve() {
 }
 
 #[test]
-fn a_shepherds_own_handoff_needs_the_operator() {
+fn the_shepherd_replaces_helpers_only() {
     let mut f = flock();
+    // protected targets: shepherd, operator and adapter roles, each refused
+    for member in ["shep", "op", "herdr"] {
+        let a = if member == "shep" {
+            clone(&f.shep)
+        } else {
+            enroll(&mut f.server, member)
+        };
+        let b = enroll(&mut f.server, member);
+        let ap = approval(&f.env, &f.server, member, &a, &b);
+        let why = session_err(
+            f.server
+                .handoff(ap.clone(), sign_approval(&f.shep.key, &ap)),
+        );
+        assert!(why.contains("helper"), "{member}: {why}");
+        assert_eq!(
+            f.server.sessions().get(&b.session).unwrap().status,
+            Status::Pending
+        );
+    }
+    assert_eq!(f.server.epoch(), 0);
+}
+
+#[test]
+fn a_user_certified_key_is_not_an_operator_device() {
+    let mut f = flock();
+    let (old, new) = (clone(&f.old), clone(&f.new));
+    let ap = approval(&f.env, &f.server, "h1", &old, &new);
+    let before = f.server.board().entries().count();
+    let why = session_err(
+        f.server
+            .handoff(ap.clone(), sign_approval(&operator(&f.env), &ap)),
+    );
+    assert!(why.contains("operator"), "{why}");
+    assert_eq!(
+        (f.server.epoch(), f.server.board().entries().count()),
+        (0, before)
+    );
+    assert_eq!(
+        f.server.sessions().get(&new.session).unwrap().status,
+        Status::Pending
+    );
+    // not even for the shepherd's own role
     let shep2 = enroll(&mut f.server, "shep");
-    let old = clone(&f.shep);
-    let ap = approval(&f.env, &f.server, "shep", &old, &shep2);
-    // the shepherd cannot approve its own replacement
+    let shep = clone(&f.shep);
+    let ap = approval(&f.env, &f.server, "shep", &shep, &shep2);
     session_err(
+        f.server
+            .handoff(ap.clone(), sign_approval(&operator(&f.env), &ap)),
+    );
+}
+
+#[test]
+fn a_handoff_without_its_context_is_refused_and_changes_nothing() {
+    let mut f = flock();
+    let (old, new) = (clone(&f.old), clone(&f.new));
+    let mut ap = approval(&f.env, &f.server, "h1", &old, &new);
+    ap.payload.context = None;
+    let before = f.server.board().entries().count();
+    let why = session_err(
         f.server
             .handoff(ap.clone(), sign_approval(&f.shep.key, &ap)),
     );
-    let op = operator(&f.env);
-    f.server
-        .handoff(ap.clone(), sign_approval(&op, &ap))
-        .unwrap();
+    assert!(why.contains("context"), "{why}");
     assert_eq!(
-        f.server.sessions().get(&shep2.session).unwrap().status,
+        (f.server.epoch(), f.server.board().entries().count()),
+        (0, before)
+    );
+    assert_eq!(
+        f.server.sessions().get(&new.session).unwrap().status,
+        Status::Pending
+    );
+    assert_eq!(
+        f.server.sessions().get(&old.session).unwrap().status,
         Status::Active
     );
 }
@@ -355,7 +414,7 @@ fn a_standalone_handoff_is_refused_live_and_a_frame_without_its_bump_fails_open(
             from: old.session.clone(),
             to: new.session.clone(),
             resume,
-            context: None,
+            context: support::approval_context(),
             approval: Box::new(ap.clone()),
             approval_sig: Box::new(sig.clone()),
         },
@@ -479,7 +538,7 @@ fn forged_handoff_frame(f: &mut Flock, body_to: &str, ref_to: Option<ContentId>)
             from: old.session.clone(),
             to: body_to.to_owned(),
             resume,
-            context: None,
+            context: support::approval_context(),
             approval: Box::new(ap),
             approval_sig: Box::new(sig),
         },
@@ -537,12 +596,14 @@ fn a_handoff_frame_written_by_hand_is_checked_on_replay() {
 #[test]
 fn the_approval_must_be_for_the_members_own_sessions() {
     let mut f = flock();
-    // the operator approves the shepherd's role moving to the helper's
-    // pending session, claiming the shepherd as the member
+    // the shepherd's role moving to the helper's pending session, claiming
+    // the shepherd as the member
     let (shep, new) = (clone(&f.shep), clone(&f.new));
     let ap = approval(&f.env, &f.server, "shep", &shep, &new);
-    let op = operator(&f.env);
-    let why = session_err(f.server.handoff(ap.clone(), sign_approval(&op, &ap)));
+    let why = session_err(
+        f.server
+            .handoff(ap.clone(), sign_approval(&f.shep.key, &ap)),
+    );
     assert!(why.contains("belong"), "{why}");
     // a session cannot replace itself
     let old = clone(&f.old);
@@ -552,15 +613,4 @@ fn the_approval_must_be_for_the_members_own_sessions() {
             .handoff(ap.clone(), sign_approval(&f.shep.key, &ap)),
     );
     assert!(why.contains("pending"), "{why}");
-}
-
-#[test]
-fn an_operator_approval_needs_an_operator_on_the_roster() {
-    let env = Env::without_operator();
-    let mut server = env.open();
-    let old = enroll(&mut server, "h1");
-    let new = enroll(&mut server, "h1");
-    let ap = approval(&env, &server, "h1", &old, &new);
-    let why = session_err(server.handoff(ap.clone(), sign_approval(&operator(&env), &ap)));
-    assert!(why.contains("no operator"), "{why}");
 }

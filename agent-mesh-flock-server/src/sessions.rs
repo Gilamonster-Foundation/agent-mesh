@@ -258,6 +258,9 @@ impl Sessions {
                 if (&a.from, &a.to, &a.resume, &a.context) != (from, to, resume, context) {
                     return Err("handoff differs from the approval it cites".into());
                 }
+                if a.context.is_none() {
+                    return Err("handoff cites no context file".into());
+                }
                 if self.approvals.contains(&ap_id) {
                     return Err("approval already consumed".into());
                 }
@@ -286,38 +289,28 @@ impl Sessions {
                     .find(|m| m.name == a.member)
                     .map(|m| m.role)
                     .ok_or("member is not on the roster")?;
-                self.approver_ok(board, role, &ap_id, approval_sig, chain, epoch)?;
+                self.approver_ok(role, board, &ap_id, approval_sig, chain, epoch)?;
             }
             _ => {}
         }
         Ok(())
     }
 
-    /// The roster's hand-off authority signed it: an active shepherd session
-    /// for a non-shepherd member, or an operator device key (certified by the
-    /// flock's user key, roster lists an operator) for anyone.
+    /// The roster's hand-off authority signed it: an active shepherd session,
+    /// and only for a helper. Everything else fails closed. Operator approval
+    /// waits on a logged key-to-operator binding, which the roster cannot yet
+    /// carry; a key merely certified by the flock's user key is not one.
     fn approver_ok(
         &self,
-        board: &Board,
         role: Role,
+        board: &Board,
         ap_id: &ContentId,
         sig: &Assertion,
         chain: &Chain,
         epoch: u64,
     ) -> Result<(), String> {
-        let cert = sig.author();
-        if matches!(cert.issuer, Issuer::User(_)) && cert.agent_pubkey != chain.server_pub {
-            cert.verify()
-                .map_err(|e| format!("operator certificate: {e}"))?;
-            if cert.user_fingerprint() != chain.user {
-                return Err("operator is not certified by this flock's user key".into());
-            }
-            if !board.members().iter().any(|m| m.role == Role::Operator) {
-                return Err("the roster lists no operator".into());
-            }
-            return sig
-                .verify(ap_id, &cert.agent_pubkey, epoch)
-                .map_err(|e| format!("approval signature: {e}"));
+        if matches!(sig.author().issuer, Issuer::User(_)) {
+            return Err("operator approval is not supported: no key-to-operator binding".into());
         }
         let signer = self.resolve(sig, ap_id, &chain.server_pub, epoch)?;
         let SignerClass::Session {
@@ -332,13 +325,10 @@ impl Sessions {
             .iter()
             .find(|m| m.name == member)
             .map(|m| m.role);
-        if approver_role == Some(Role::Shepherd) && role != Role::Shepherd {
+        if approver_role == Some(Role::Shepherd) && role == Role::Helper {
             Ok(())
         } else {
-            Err(
-                "only the operator approves a shepherd's hand-off, and only a shepherd a helper's"
-                    .into(),
-            )
+            Err("only a shepherd approves a hand-off, and only a helper's".into())
         }
     }
 

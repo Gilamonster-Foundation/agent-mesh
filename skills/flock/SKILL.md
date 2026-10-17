@@ -63,17 +63,20 @@ Built (plan steps 1–4):
   session that missed bumps, each logged with its certificate. A member's
   later sessions start pending;
 - **hand-off**: `handoff(approval, sig)` on a single-use approval bound to
-  `{flock, member, from, to, resume, context}` (signed by an active shepherd
-  for a non-shepherd member, or by an operator device key for anyone). One
+  `{flock, member, from, to, resume, context}`; `context` (the `HANDOFF.md`
+  file ref) is required. Signed by an active shepherd, for a helper only: the
+  shepherd, operator and adapter roles are refused, and so is a key merely
+  certified by the user key (no operator approval until the roster binds
+  operator devices). One
   frame: `handoff` ends `from`, activates the pending `to` and is followed by
   the `epoch` bump. The new session's first event must have `prev = handoff`;
   only a member's current holder can be handed off, so competing hand-offs
   yield one winner.
 
 **Planned, not built:** the epoch bump when a member is removed from the
-roster; operator device keys listed per device in the roster (today an operator
-is any key the flock's user key certified, with an operator on the roster) and
-operator-signed events beyond hand-off approvals; `amesh flock session` (the session process); `watch`; the rest of
+roster; operator device keys listed per device in the roster, and with them operator
+approval of a shepherd or delegate hand-off (refused today), plus
+operator-signed events; `amesh flock session` (the session process); `watch`; the rest of
 the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; `init`
 is still the only subcommand); `amesh-tui`; attaching from another host; the
 `amesh-herdr` adapter; native newt receive. Until they land, lanes run on files

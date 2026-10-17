@@ -99,8 +99,10 @@ admitted `pending` and signs nothing until a hand-off activates it.
 
 `handoff(approval, sig)` moves a member's role. The approval
 (`HandoffApproval`: flock, member, from, to, resume, context) is signed by an
-active shepherd session (for a non-shepherd member) or by an operator device
-key (certified by the flock's user key; the roster must list an operator). The
+active shepherd session, and only for a helper; the context (the `HANDOFF.md`
+file ref) is required. Operator, shepherd and adapter hand-offs, and any key
+merely certified by the user key, are refused until the roster binds operator
+devices. The
 `handoff` event carries the approval and its signature, so a reader re-checks
 the authority. It ends `from`, activates the pending `to` and is followed by
 an `epoch` bump in the same frame; `admit` refuses it alone and `open` refuses
@@ -115,8 +117,8 @@ epoch-bounded certificate for the key it names.
 - The entry points are plain calls; the SSH stream that carries them is step 5.
   Who may ask for an `invite` (the roster role) is for that caller to establish.
 - Not yet: `watch` (step 6), the epoch bump when a member leaves the roster,
-  per-device operator listing in the roster, operator-signed events other than
-  approvals, any CLI beyond `amesh flock init`, MCP or TUI.
+  per-device operator listing in the roster (so no operator approval),
+  operator-signed events, any CLI beyond `amesh flock init`, MCP or TUI.
 - Unix only (file modes and `flock(2)`); on other hosts the crate builds, the
   key and lock functions return an unsupported-host error, and the Unix tests
   are not compiled.

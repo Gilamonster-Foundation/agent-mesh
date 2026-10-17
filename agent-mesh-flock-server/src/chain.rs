@@ -9,7 +9,6 @@
 use crate::frame::{cert_cid, AdmissionRecord, Sealed};
 use crate::ServerError;
 use agent_mesh_flock::Kind;
-use agent_mesh_protocol::Fingerprint;
 use content_addressable::{ContentAddressable, ContentError, ContentId};
 
 /// Running state of a chain: what the next record must extend.
@@ -23,20 +22,17 @@ pub struct Chain {
     pub epoch: u64,
     /// The server's agent public key, from genesis.
     pub server_pub: [u8; 32],
-    /// The user key the server (and every operator device) chains to.
-    pub user: Fingerprint,
 }
 
 impl Chain {
     /// Start after genesis.
     #[must_use]
-    pub fn new(genesis: ContentId, server_pub: [u8; 32], user: Fingerprint) -> Self {
+    pub fn new(genesis: ContentId, server_pub: [u8; 32]) -> Self {
         Self {
             prev: genesis,
             next_index: 1,
             epoch: 0,
             server_pub,
-            user,
         }
     }
 

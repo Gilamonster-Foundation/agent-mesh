@@ -95,13 +95,6 @@ impl Env {
         Self::with_spec(spec())
     }
 
-    /// A flock whose roster lists no operator.
-    pub fn without_operator() -> Self {
-        let mut spec = spec();
-        spec.roster.retain(|m| m.role != Role::Operator);
-        Self::with_spec(spec)
-    }
-
     fn with_spec(spec: InitSpec) -> Self {
         let tmp = TempDir::new().unwrap();
         let user = UserKey::generate();
@@ -248,7 +241,16 @@ pub fn approval(
         from: from.session.clone(),
         to: to.session.clone(),
         resume,
-        context: None,
+        context: approval_context(),
+    })
+}
+
+/// The cited `HANDOFF.md` the fixtures' approvals carry.
+pub fn approval_context() -> Option<agent_mesh_flock::FileRef> {
+    Some(agent_mesh_flock::FileRef {
+        root: "handoff".into(),
+        path: "HANDOFF.md".into(),
+        id: content_addressable::RawContentId::from_content(b"HANDOFF.md bytes"),
     })
 }
 

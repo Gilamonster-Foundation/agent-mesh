@@ -67,11 +67,7 @@ impl Server {
         let (mut refusal_log, entries) = Log::open::<RefusalEntry>(&dir.join(REFUSALS_FILE))?;
         let board = Board::new(&genesis.node).map_err(enc)?;
         let mut st = State {
-            chain: Chain::new(
-                board.flock(),
-                server_pub,
-                genesis.node.payload.server_cert.user_fingerprint(),
-            ),
+            chain: Chain::new(board.flock(), server_pub),
             board,
             sessions: Sessions::default(),
         };
