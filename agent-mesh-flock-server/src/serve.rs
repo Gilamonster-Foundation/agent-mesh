@@ -13,7 +13,7 @@ use agent_mesh_flock::EndReason;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 /// What the connection threads share: the server, and the first failure to
@@ -23,6 +23,12 @@ struct Shared {
     server: Mutex<Server>,
     fatal: Mutex<Option<String>>,
     path: PathBuf,
+    /// The epoch after the last operation, and a signal when it moves (or
+    /// when a failure is recorded): waiters block on this, never poll.
+    epoch: Mutex<u64>,
+    moved: Condvar,
+    /// Every connection thread, so a stop can end and join them all.
+    conns: Mutex<Vec<(UnixStream, JoinHandle<()>)>>,
 }
 
 /// A running server loop.
@@ -39,7 +45,26 @@ impl Serving {
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
+        end_connections(&self.shared);
         self.failure()
+    }
+
+    /// Block until the epoch is at least `n`, or the server has failed.
+    /// Returns whether the epoch got there. Causal: woken by the operation
+    /// that moves it.
+    pub fn wait_epoch(&self, n: u64) -> bool {
+        let s = &self.shared;
+        let mut at = s
+            .epoch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *at < n && !failed(s) {
+            at = s
+                .moved
+                .wait(at)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *at >= n
     }
 
     /// The first failure to persist, if one happened.
@@ -58,13 +83,15 @@ impl Serving {
         lock(&self.shared.server).plan_crash(plan);
     }
 
-    /// Stop accepting, wait for the loop, and release the log.
+    /// Stop accepting, end every connection, and release the log: when this
+    /// returns the log's lock is free.
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let _wake = UnixStream::connect(&self.shared.path);
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
+        end_connections(&self.shared);
     }
 }
 
@@ -83,6 +110,9 @@ pub fn serve(server: Server, listener: UnixListener) -> std::io::Result<Serving>
         server: Mutex::new(server),
         fatal: Mutex::new(None),
         path,
+        epoch: Mutex::new(0),
+        moved: Condvar::new(),
+        conns: Mutex::new(Vec::new()),
     });
     let (flag, state) = (stop.clone(), shared.clone());
     let join = std::thread::spawn(move || {
@@ -94,8 +124,15 @@ pub fn serve(server: Server, listener: UnixListener) -> std::io::Result<Serving>
             if crate::peer_ok(&conn).is_err() {
                 continue;
             }
-            let state = state.clone();
-            std::thread::spawn(move || connection(&state, conn));
+            let Ok(mine) = conn.try_clone() else { continue };
+            let st = state.clone();
+            let handle = std::thread::spawn(move || connection(&st, conn));
+            let mut conns = state
+                .conns
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            conns.retain(|(_, h)| !h.is_finished());
+            conns.push((mine, handle));
         }
     });
     Ok(Serving {
@@ -109,11 +146,42 @@ fn lock(m: &Mutex<Server>) -> MutexGuard<'_, Server> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Run `f` on the server, then publish the epoch it left.
+fn with<T>(s: &Shared, f: impl FnOnce(&mut Server) -> T) -> T {
+    let mut server = lock(&s.server);
+    let out = f(&mut server);
+    publish(s, &server);
+    out
+}
+
 fn failed(s: &Shared) -> bool {
     s.fatal
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .is_some()
+}
+
+/// Shut every connection and wait for its thread, so nothing still holds the
+/// server (and so its log lock) afterwards.
+fn end_connections(s: &Shared) {
+    let conns = std::mem::take(
+        &mut *s
+            .conns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for (stream, handle) in conns {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        let _ = handle.join();
+    }
+}
+
+/// Publish the epoch after an operation, while still holding the server.
+fn publish(s: &Shared, server: &Server) {
+    *s.epoch
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = server.epoch();
+    s.moved.notify_all();
 }
 
 /// Record a failure to persist and wake the accept loop so it stops.
@@ -124,6 +192,7 @@ fn fail(s: &Shared, e: &ServerError) {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     f.get_or_insert_with(|| e.to_string());
     drop(f);
+    s.moved.notify_all();
     let _wake = UnixStream::connect(&s.path);
 }
 
@@ -142,11 +211,11 @@ fn connection(shared: &Shared, mut conn: UnixStream) {
             bound
                 .take()
                 .map_or(Ok(()), |s| {
-                    lock(&shared.server).end_session(&s, EndReason::Closed)
+                    with(shared, |srv| srv.end_session(&s, EndReason::Closed))
                 })
                 .map(|()| Resp::Ok)
         } else {
-            handle(&mut lock(&shared.server), req, &mut bound)
+            with(shared, |srv| handle(srv, req, &mut bound))
         };
         let resp = result.unwrap_or_else(|e| {
             if is_fatal(&e) {
@@ -160,7 +229,7 @@ fn connection(shared: &Shared, mut conn: UnixStream) {
     }
     if let Some(s) = bound {
         // EOF without `End`: the stream or the process is gone.
-        if let Err(e) = lock(&shared.server).end_session(&s, EndReason::Lost) {
+        if let Err(e) = with(shared, |srv| srv.end_session(&s, EndReason::Lost)) {
             if is_fatal(&e) {
                 fail(shared, &e);
             }
