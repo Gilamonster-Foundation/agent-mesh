@@ -191,9 +191,9 @@ impl Server {
                 conflict: None,
             });
         }
-        if node.payload.kind == Kind::SessionEnd {
+        if matches!(node.payload.kind, Kind::SessionEnd | Kind::Handoff) {
             return Err(ServerError::Session(
-                "session-end is admitted only with its epoch bump (end_session)".into(),
+                "session-end and handoff are admitted only with their epoch bump".into(),
             ));
         }
         let prepared = match self.st.prepare(&self.key, &node, sig) {

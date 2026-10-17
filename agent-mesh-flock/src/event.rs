@@ -1,7 +1,7 @@
 //! Genesis and event schema. Both are `MerkleNode` payloads; the node's id is
 //! the event's identity, and the signature is detached (`Assertion`).
 
-use agent_mesh_protocol::CertChain;
+use agent_mesh_protocol::{Assertion, CertChain};
 use content_addressable::{ContentId, MerkleNode, RawContentId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -107,6 +107,26 @@ pub struct FileRef {
     pub id: RawContentId,
 }
 
+/// What the roster's hand-off authority signs: one specific hand-off, bound to
+/// this flock, member, sessions, resume point and context. A standalone node
+/// (no parents); its id is what the approver's `Assertion` covers, and what is
+/// consumed when the hand-off is admitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffApproval {
+    /// The flock (genesis id).
+    pub flock: ContentId,
+    /// The roster member whose role moves.
+    pub member: String,
+    /// The session giving up the role (fingerprint, hex).
+    pub from: String,
+    /// The pending session taking it (fingerprint, hex).
+    pub to: String,
+    /// `from`'s last head, or its `session-start` if it never wrote.
+    pub resume: ContentId,
+    /// The `HANDOFF.md` the new session resumes from.
+    pub context: Option<FileRef>,
+}
+
 /// Kind-specific content. Its variant must match the event's [`Kind`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -209,6 +229,23 @@ pub enum Body {
         /// Why.
         reason: EndReason,
     },
+    /// Server: `role` moved from `from` to `to`. `refs` name `from`'s and
+    /// `to`'s `session-start` and the `resume` event. Carries the approval
+    /// and the approver's signature so any reader can check the authority.
+    Handoff {
+        /// The session giving up the role (fingerprint, hex).
+        from: String,
+        /// The pending session taking it (fingerprint, hex).
+        to: String,
+        /// `from`'s last head (or its `session-start`).
+        resume: ContentId,
+        /// The `HANDOFF.md` the new session resumes from.
+        context: Option<FileRef>,
+        /// The single-use approval this hand-off consumes.
+        approval: Box<MerkleNode<HandoffApproval>>,
+        /// The approver's signature over the approval's id.
+        approval_sig: Box<Assertion>,
+    },
     /// Server: the epoch rose to `epoch`.
     Epoch {
         /// The new epoch.
@@ -249,6 +286,7 @@ impl Body {
                 | (Self::Invite { .. }, K::Invite)
                 | (Self::SessionStart { .. }, K::SessionStart)
                 | (Self::SessionEnd { .. }, K::SessionEnd)
+                | (Self::Handoff { .. }, K::Handoff)
                 | (Self::Epoch { .. }, K::Epoch)
                 | (Self::Renewal { .. }, K::Renewal)
         )

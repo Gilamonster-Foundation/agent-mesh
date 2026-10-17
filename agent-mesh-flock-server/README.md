@@ -95,8 +95,20 @@ and bound to a session and epoch: an answer that races a bump or a session end
 is refused. A restart forgets outstanding challenges; the holder asks again.
 
 A member's first session is active. Any later session for the same member is
-admitted `pending` and signs nothing (the hand-off that activates it is the
-next step). Server-signed events are checked against the log too: a
+admitted `pending` and signs nothing until a hand-off activates it.
+
+`handoff(approval, sig)` moves a member's role. The approval
+(`HandoffApproval`: flock, member, from, to, resume, context) is signed by an
+active shepherd session, and only for a helper; the context (the `HANDOFF.md`
+file ref) is required. Operator, shepherd and adapter hand-offs, and any key
+merely certified by the user key, are refused until the roster binds operator
+devices. The
+`handoff` event carries the approval and its signature, so a reader re-checks
+the authority. It ends `from`, activates the pending `to` and is followed by
+an `epoch` bump in the same frame; `admit` refuses it alone and `open` refuses
+a frame without the bump. `from` must be the member's current holder, so of two
+competing replacements exactly one is activated, and an approval cannot be
+reused. The activated session's first event must have `prev = handoff`. Server-signed events are checked against the log too: a
 `session-start` must consume an unconsumed invite for its member and carry an
 epoch-bounded certificate for the key it names.
 
@@ -104,9 +116,9 @@ epoch-bounded certificate for the key it names.
 
 - The entry points are plain calls; the SSH stream that carries them is step 5.
   Who may ask for an `invite` (the roster role) is for that caller to establish.
-- Not yet: hand-off and its approval, the zombie refusal, `watch` (step 6), the
-  epoch bump when a member leaves the roster, operator-class signers, any CLI
-  beyond `amesh flock init`, MCP or TUI.
+- Not yet: `watch` (step 6), the epoch bump when a member leaves the roster,
+  per-device operator listing in the roster (so no operator approval),
+  operator-signed events, any CLI beyond `amesh flock init`, MCP or TUI.
 - Unix only (file modes and `flock(2)`); on other hosts the crate builds, the
   key and lock functions return an unsupported-host error, and the Unix tests
   are not compiled.

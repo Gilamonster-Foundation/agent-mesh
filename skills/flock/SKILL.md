@@ -44,7 +44,7 @@ session starts pending and can sign nothing until a hand-off activates it.
 
 ## Built vs planned
 
-Built (plan steps 1–3 and 4a):
+Built (plan steps 1–4):
 - the detached author `Assertion` (`agent-mesh-protocol`);
 - the `agent-mesh-flock` model crate: schema, admission table, board fold, and
   real `invite`, `session-start`, `session-end`, `epoch` and `renewal` bodies;
@@ -61,11 +61,22 @@ Built (plan steps 1–3 and 4a):
   as one frame, enforced at admission and on replay;
 - **renewal**: the renewal exchange after a bump and the `renew` entry for a
   session that missed bumps, each logged with its certificate. A member's
-  later sessions start pending.
+  later sessions start pending;
+- **hand-off**: `handoff(approval, sig)` on a single-use approval bound to
+  `{flock, member, from, to, resume, context}`; `context` (the `HANDOFF.md`
+  file ref) is required. Signed by an active shepherd, for a helper only: the
+  shepherd, operator and adapter roles are refused, and so is a key merely
+  certified by the user key (no operator approval until the roster binds
+  operator devices). One
+  frame: `handoff` ends `from`, activates the pending `to` and is followed by
+  the `epoch` bump. The new session's first event must have `prev = handoff`;
+  only a member's current holder can be handed off, so competing hand-offs
+  yield one winner.
 
-**Planned, not built:** hand-off and the activation of pending sessions;
-the epoch bump when a member is removed from the roster; operator-class signer
-resolution; `amesh flock session` (the session process); `watch`; the rest of
+**Planned, not built:** the epoch bump when a member is removed from the
+roster; operator device keys listed per device in the roster, and with them operator
+approval of a shepherd or delegate hand-off (refused today), plus
+operator-signed events; `amesh flock session` (the session process); `watch`; the rest of
 the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; `init`
 is still the only subcommand); `amesh-tui`; attaching from another host; the
 `amesh-herdr` adapter; native newt receive. Until they land, lanes run on files
