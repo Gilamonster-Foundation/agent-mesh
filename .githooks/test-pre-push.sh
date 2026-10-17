@@ -139,11 +139,21 @@ echo x >hidden.txt # a workspace-level input, e.g. include_str!("../../hidden.tx
 run "refs/heads/w $proto refs/heads/w $leaf"
 refused "ignored files that would build" "an ignored root-level file is refused too"
 rm hidden.txt
+# An output-like ancestor name does not excuse consumed source (#[path] module).
+echo 'dist/' >>.git/info/exclude
+mkdir -p agent-mesh-transport-ssh/src/dist && echo x >agent-mesh-transport-ssh/src/dist/x.rs
+run "refs/heads/w $proto refs/heads/w $leaf"
+refused "ignored files that would build" "ignored source under a dist/ ancestor is refused"
+rm -r agent-mesh-transport-ssh/src/dist
 mkdir -p agent-mesh-transport-ssh/target && echo x >agent-mesh-transport-ssh/target/out
 echo 'target/' >>.git/info/exclude
 run "refs/heads/w $proto refs/heads/w $leaf"
 plan_has 'agent-mesh-protocol' "ignored build output under a crate's target/ is fine"
 rm -r agent-mesh-transport-ssh/target
+mkdir target && echo x >target/out
+run "refs/heads/w $proto refs/heads/w $leaf"
+plan_has 'agent-mesh-protocol' "ignored output under the root target/ is fine"
+rm -r target
 
 # Ref order must not change the result: unknown baseline (code) + docs-only.
 unknown="refs/heads/a $proto refs/heads/a deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"

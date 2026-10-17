@@ -39,13 +39,18 @@ set -euo pipefail
 ZERO=0000000000000000000000000000000000000000
 
 # Ignored files the checks may run beside: disposable build and tool output.
-# Anything else ignored (a stray include_str! input, a local cargo config...)
-# would build here but not from the pushed commit, so it blocks the push. A
-# path is allowed when any of its components matches one of these globs.
-ALLOWED_IGNORED=(
-    target lcov.info __pycache__ .pytest_cache '*.egg-info' dist venv .venv
-    '*.so' .DS_Store '*.swp' '*.swo' .idea .vscode
+# Anything else ignored (a stray include_str! or #[path] input, a local cargo
+# config...) would build here but not from the pushed commit, so it blocks the
+# push. Entries come from `git ls-files -oi --directory`: a wholly ignored
+# directory is one entry ending in "/".
+#   ANCHORED   whole-path globs, so a name deep in a source tree does not count
+#              (a crate's own target/ is handled in ignored_ok);
+#   ANY_DEPTH  last-component globs for names that cannot be build input.
+ANCHORED_IGNORED=(
+    'target/' lcov.info .idea/ .vscode/ dist/ venv/ .venv/
+    'agent-mesh-py/python/agent_mesh/*.so'
 )
+ANY_DEPTH_IGNORED=(.DS_Store '*.swp' '*.swo' __pycache__ .pytest_cache '*.egg-info')
 
 say() { echo "[pre-push] $*" >&2; }
 refuse() {
@@ -122,31 +127,44 @@ baseline() { # $1 remote name, $2 local sha, $3 remote sha
     git merge-base "refs/remotes/$1/main" "$2" 2>/dev/null
 }
 
+# $1 ignored entry, $2 tracked crate manifests. Is it known build output?
+ignored_ok() {
+    local e=$1 base pat
+    base=${e%/}
+    base=${base##*/}
+    for pat in "${ANCHORED_IGNORED[@]}"; do
+        # shellcheck disable=SC2053 # $pat is a glob on purpose
+        if [[ $e == $pat ]]; then return 0; fi
+    done
+    for pat in "${ANY_DEPTH_IGNORED[@]}"; do
+        # shellcheck disable=SC2053
+        if [[ $base == $pat ]]; then return 0; fi
+    done
+    # target/ directly in a workspace crate directory.
+    if [[ $e == */target/ ]] && has_line "${e%target/}Cargo.toml" "$2"; then return 0; fi
+    return 1
+}
+
 # The checks run on the working tree, so it must equal the pushed commit:
 # nothing modified, nothing untracked (whatever status.showUntrackedFiles
-# says), and no ignored file beyond ALLOWED_IGNORED. A failing git command
+# says), and no ignored file beyond known build output. A failing git command
 # refuses rather than counting as "clean".
 check_clean() {
-    local status ignored e part pat ok bad=""
+    local status ignored manifests e bad=""
     status=$(git -c status.showUntrackedFiles=all status --porcelain --untracked-files=all) ||
         refuse "git status failed; fix the repository (git fsck, git status) and push again"
     [ -z "$status" ] ||
         refuse "the working tree has modified or untracked files; commit them or move them out (the checks run on the working tree)"
     ignored=$(git ls-files -oi --exclude-standard --directory) ||
         refuse "git ls-files failed; fix the repository and push again"
+    manifests=$(git ls-files -- '*/Cargo.toml') ||
+        refuse "git ls-files failed; fix the repository and push again"
     while IFS= read -r e; do
         [ -n "$e" ] || continue
-        ok=0
-        while IFS= read -r part; do
-            for pat in "${ALLOWED_IGNORED[@]}"; do
-                # shellcheck disable=SC2053 # $pat is a glob on purpose
-                if [[ $part == $pat ]]; then ok=1; fi
-            done
-        done <<<"${e//\//$'\n'}"
-        if [ "$ok" = 0 ]; then bad+=" $e"; fi
+        if ! ignored_ok "$e" "$manifests"; then bad+=" $e"; fi
     done <<<"$ignored"
     [ -z "$bad" ] ||
-        refuse "ignored files that would build here but not in CI:$bad -- move or delete them (or add known build output to ALLOWED_IGNORED in the hook)"
+        refuse "ignored files that would build here but not in CI:$bad -- move or delete them (or add known build output to the ignored allowlists at the top of the hook)"
 }
 
 full_check() {
