@@ -11,6 +11,8 @@
 # PIPELINE PARITY: This hook mirrors .github/workflows/ci.yml and the
 # `check` / `cov-ci` recipes in justfile. When editing this hook, audit
 # the workflow + justfile in the same PR.
+# CI-only, deliberately not mirrored here: the "flock sockets refuse another
+# user" step in ci.yml (needs root), and the macOS job.
 #
 # Do NOT skip this hook with `--no-verify`. If a check fails, fix the
 # issue — bypassing only moves the failure to the remote.
