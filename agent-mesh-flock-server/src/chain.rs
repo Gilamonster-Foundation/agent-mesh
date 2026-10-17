@@ -7,8 +7,8 @@
 //! and moves the epoch only as an `epoch` event does.
 
 use crate::frame::{cert_cid, AdmissionRecord, Sealed};
-use crate::{ServerError, SignerResolver};
-use agent_mesh_flock::{Board, Kind, Signer};
+use crate::ServerError;
+use agent_mesh_flock::Kind;
 use content_addressable::{ContentAddressable, ContentError, ContentId};
 
 /// Running state of a chain: what the next record must extend.
@@ -58,16 +58,18 @@ fn bad(why: &str) -> ServerError {
     ServerError::Signer(why.into())
 }
 
-/// Verify `sealed` extends `chain` and resolve its event's signer.
+/// Verify `sealed` is the next record of `chain`: signed by the server key,
+/// extending the previous record, contiguous, naming its event and the
+/// certificate that event was signed with, at the epoch the event implies.
+/// Returns the event id and the record id. Who signed the event, and whether
+/// the model admits it, is for the caller to establish at `record.epoch`.
 ///
 /// # Errors
 /// [`ServerError::Signer`] when the chain or a signature does not verify.
-pub fn verify_entry(
+pub fn verify_record(
     chain: &Chain,
-    board: &Board,
     sealed: &Sealed,
-    resolver: &dyn SignerResolver,
-) -> Result<Signer, ServerError> {
+) -> Result<(ContentId, ContentId), ServerError> {
     let rec = &sealed.record.payload;
     let record_id = sealed.record.content_id().map_err(enc)?;
     if sealed.record_sig.author().agent_pubkey != chain.server_pub {
@@ -93,13 +95,5 @@ pub fn verify_entry(
     if rec.epoch != chain.epoch_for(sealed.event.payload.kind) {
         return Err(bad("epoch does not follow the logged transitions"));
     }
-    resolver
-        .resolve(
-            board,
-            &chain.server_pub,
-            &sealed.event_sig,
-            &event_id,
-            rec.epoch,
-        )
-        .map_err(|e| bad(&e))
+    Ok((event_id, record_id))
 }

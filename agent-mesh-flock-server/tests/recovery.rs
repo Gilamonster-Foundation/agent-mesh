@@ -4,7 +4,7 @@ mod support;
 
 use agent_mesh_flock::Kind;
 use agent_mesh_flock_server::{
-    cert_cid, encode, seal, CrashPlan, Frame, Sealed, Server, ServerError, ServerOnly,
+    cert_cid, encode, seal, CrashPlan, Frame, Sealed, Server, ServerError,
 };
 use content_addressable::{ContentAddressable, ContentId};
 use std::io::Write;
@@ -29,7 +29,7 @@ fn append_raw(env: &Env, frames: &[Sealed]) {
 }
 
 fn reopen(env: &Env) -> Result<Server, ServerError> {
-    Server::open(&env.dir(), Box::new(ServerOnly))
+    Server::open(&env.dir())
 }
 
 #[test]
@@ -139,16 +139,17 @@ fn damage_in_committed_history_fails_closed() {
 #[test]
 fn state_is_rebuilt_from_the_retained_frames() {
     let mut env = Env::new();
-    let shep = env.session("shep", false);
     let mut s = env.open();
+    let shep = env.session(&mut s, "shep");
+    let base = s.admitted();
     let (a, sa) = env.brief(&shep, None, "lane-a");
     let a_id = id(&a);
     s.admit(a, sa).unwrap();
     let (n, sig) = env.server_event("inv");
     s.admit(n, sig).unwrap();
     drop(s);
-    let s = Server::open(&env.dir(), Box::new(env.sessions.clone())).unwrap();
-    assert_eq!(s.admitted(), 2);
+    let s = Server::open(&env.dir()).unwrap();
+    assert_eq!(s.admitted(), base + 2);
     assert_eq!(s.epoch(), 0);
     assert_eq!(s.board().head_of(&shep.fingerprint().hex()), Some(a_id));
     assert!(s.board().lanes().iter().any(|l| l.lane == "lane-a"));
@@ -162,8 +163,14 @@ fn forged(env: &mut Env, prev: ContentId, index: u64, epoch: u64, kind: Kind) ->
         kind,
         None,
         &[],
-        agent_mesh_flock::Body::Server {
-            note: format!("{index}"),
+        match kind {
+            Kind::Epoch => agent_mesh_flock::Body::Epoch { epoch },
+            _ => agent_mesh_flock::Body::Invite {
+                member: "h1".into(),
+                verifier: content_addressable::RawContentId::from_content(
+                    format!("{index}").as_bytes(),
+                ),
+            },
         },
     );
     seal(&key, prev, index, epoch, node, sig).unwrap()
@@ -173,15 +180,10 @@ fn forged(env: &mut Env, prev: ContentId, index: u64, epoch: u64, kind: Kind) ->
 fn a_member_built_chain_extending_a_real_head_is_refused() {
     let mut env = Env::new();
     let mut s = env.open();
-    let (n, sig) = env.server_event("real");
-    s.admit(n, sig).unwrap();
-    drop(s);
-    let head = {
-        let s = reopen(&env).unwrap();
-        s.head_record()
-    };
     // a session certified by the server signs the record itself
-    let member = env.session("shep", false);
+    let member = env.session(&mut s, "shep");
+    let (head, next) = (s.head_record(), s.admitted() + 1);
+    drop(s);
     let (node, sig) = env.event(
         &member,
         Kind::Brief,
@@ -192,9 +194,9 @@ fn a_member_built_chain_extending_a_real_head_is_refused() {
             lane: "x".into(),
         },
     );
-    let sealed = seal(&member, head, 2, 0, node, sig).unwrap();
+    let sealed = seal(&member, head, next, 0, node, sig).unwrap();
     append_raw(&env, &[sealed]);
-    let e = Server::open(&env.dir(), Box::new(env.sessions.clone()));
+    let e = Server::open(&env.dir());
     assert!(corrupt_at(e), "records lack the server's signature");
 }
 
@@ -289,10 +291,12 @@ fn a_record_must_name_the_event_and_certificate_it_carries() {
 fn a_corrupt_prefix_plus_a_torn_tail_is_refused_and_left_untouched() {
     let mut env = Env::new();
     let mut s = env.open();
-    for note in ["victim-text", "other"] {
-        let (n, sig) = env.server_event(note);
-        s.admit(n, sig).unwrap();
-    }
+    let shep = env.session(&mut s, "shep");
+    let (a, sa) = env.brief(&shep, None, "victim-text");
+    let a_id = id(&a);
+    s.admit(a, sa).unwrap();
+    let (b, sb) = env.brief(&shep, Some(a_id), "other");
+    s.admit(b, sb).unwrap();
     drop(s);
     let mut bytes = std::fs::read(env.log_path()).unwrap();
     // flip one bit inside the first event's text: still canonical, but the
@@ -313,8 +317,8 @@ fn a_corrupt_prefix_plus_a_torn_tail_is_refused_and_left_untouched() {
 #[test]
 fn a_torn_refusal_tail_is_cut_only_after_verification() {
     let mut env = Env::new();
-    let shep = env.session("shep", false);
     let mut s = env.open();
+    let shep = env.session(&mut s, "shep");
     let (a, sa) = env.brief(&shep, None, "l");
     let a_id = id(&a);
     s.admit(a, sa).unwrap();
@@ -329,7 +333,7 @@ fn a_torn_refusal_tail_is_cut_only_after_verification() {
     let mut torn = good.clone();
     torn.extend_from_slice(&[0, 0, 1]);
     std::fs::write(&path, &torn).unwrap();
-    let s = Server::open(&env.dir(), Box::new(env.sessions.clone())).unwrap();
+    let s = Server::open(&env.dir()).unwrap();
     assert_eq!(s.refusals().len(), 1);
     drop(s);
     assert_eq!(std::fs::read(&path).unwrap(), good);
@@ -339,6 +343,6 @@ fn a_torn_refusal_tail_is_cut_only_after_verification() {
     let n = log.len();
     log[n - 20] ^= 1;
     std::fs::write(env.log_path(), &log).unwrap();
-    assert!(Server::open(&env.dir(), Box::new(env.sessions.clone())).is_err());
+    assert!(Server::open(&env.dir()).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), torn);
 }

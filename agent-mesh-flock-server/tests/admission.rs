@@ -37,8 +37,8 @@ fn an_unknown_signer_is_refused_and_writes_nothing() {
 #[test]
 fn a_refused_event_is_refused_by_the_table_and_writes_nothing() {
     let mut env = Env::new();
-    let h1 = env.session("h1", false);
     let mut server = env.open();
+    let h1 = env.session(&mut server, "h1");
     let (n, s) = env.brief(&h1, None, "lane-a"); // a helper may not brief
     let before = env.log_len();
     assert!(matches!(
@@ -51,8 +51,8 @@ fn a_refused_event_is_refused_by_the_table_and_writes_nothing() {
 #[test]
 fn a_fork_attempt_is_refused_and_logged() {
     let mut env = Env::new();
-    let shep = env.session("shep", false);
     let mut server = env.open();
+    let shep = env.session(&mut server, "shep");
     let (a, sa) = env.brief(&shep, None, "lane-a");
     let a_id = id(&a);
     server.admit(a, sa).unwrap();
@@ -79,11 +79,16 @@ fn a_fork_attempt_is_refused_and_logged() {
 #[test]
 fn retrying_a_committed_node_returns_its_index_after_its_session_ended() {
     let mut env = Env::new();
-    let shep = env.session("shep", false);
     let mut server = env.open();
+    let shep = env.session(&mut server, "shep");
     let (n, s) = env.brief(&shep, None, "lane-a");
     let first = server.admit(n.clone(), s.clone()).unwrap();
-    env.sessions.end(&shep);
+    server
+        .end_session(
+            &shep.fingerprint().hex(),
+            agent_mesh_flock::EndReason::Closed,
+        )
+        .unwrap();
     let len = env.log_len();
     let again = server.admit(n, s).unwrap();
     assert_eq!((again.index, again.duplicate), (first.index, true));
@@ -135,10 +140,7 @@ fn two_racing_roster_replacements_exactly_one_wins() {
 fn a_second_server_on_the_same_log_refuses_to_start() {
     let env = Env::new();
     let _first = env.open();
-    let second = agent_mesh_flock_server::Server::open(
-        &env.dir(),
-        Box::new(agent_mesh_flock_server::ServerOnly),
-    );
+    let second = agent_mesh_flock_server::Server::open(&env.dir());
     assert!(matches!(second, Err(ServerError::Locked)));
 }
 
@@ -146,8 +148,8 @@ fn a_second_server_on_the_same_log_refuses_to_start() {
 /// refused. Returns the env (log paths) and the dropped server's refusal count.
 fn three_refusals() -> Env {
     let mut env = Env::new();
-    let shep = env.session("shep", false);
     let mut server = env.open();
+    let shep = env.session(&mut server, "shep");
     let (a, sa) = env.brief(&shep, None, "lane-a");
     let a_id = id(&a);
     server.admit(a, sa).unwrap();
@@ -163,7 +165,7 @@ fn three_refusals() -> Env {
 }
 
 fn reopen(env: &Env) -> Result<agent_mesh_flock_server::Server, ServerError> {
-    agent_mesh_flock_server::Server::open(&env.dir(), Box::new(env.sessions.clone()))
+    agent_mesh_flock_server::Server::open(&env.dir())
 }
 
 /// Split a log file into its whole frames.
@@ -187,8 +189,9 @@ fn a_refusal_is_a_typed_signed_record_that_consumes_no_index() {
     assert!(r
         .iter()
         .all(|e| e.record.payload.reason == agent_mesh_flock_server::Reason::WriterFork));
-    assert!(r.iter().all(|e| e.record.payload.admitted == 2));
-    assert_eq!(server.admitted(), 2, "refusals take no admission index");
+    // invite + session-start for the shepherd, then two briefs
+    assert!(r.iter().all(|e| e.record.payload.admitted == 4));
+    assert_eq!(server.admitted(), 4, "refusals take no admission index");
 }
 
 #[test]

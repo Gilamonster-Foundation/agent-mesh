@@ -1,15 +1,15 @@
 //! A flock in a temp dir. Every key is generated at runtime.
 #![allow(dead_code)]
 
-use agent_mesh_flock::{Board, Body, Event, Kind, Member, Role, Signer, SignerClass};
-use agent_mesh_flock_server::{
-    init, load_server_key, InitSpec, Server, ServerOnly, SignerResolver, KEY_FILE, LOG_FILE,
-};
-use agent_mesh_protocol::{AgentKey, AgentMetadata, Assertion, Caveats, Fingerprint, UserKey};
-use content_addressable::{ContentAddressable, ContentId, MerkleNode};
-use std::collections::{BTreeMap, HashMap};
+use agent_mesh_flock::{Body, Event, Kind, Member, Role};
+use agent_mesh_flock_server::{init, load_server_key, InitSpec, Server, KEY_FILE, LOG_FILE};
+use agent_mesh_protocol::agent_key::PossessionChallenge;
+use agent_mesh_protocol::{AgentKey, AgentMetadata, Assertion, Caveats, CertChain, UserKey};
+use content_addressable::{ContentAddressable, ContentId, MerkleNode, RawContentId};
+use ed25519_dalek::{Signature, Signer as _, SigningKey};
+use rand::rngs::OsRng;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 pub const ROSTER: &[(&str, Role)] = &[
@@ -21,7 +21,6 @@ pub const ROSTER: &[(&str, Role)] = &[
 pub struct Env {
     pub tmp: TempDir,
     pub flock: ContentId,
-    pub sessions: Sessions,
     pub at: u64,
 }
 
@@ -52,53 +51,40 @@ pub fn spec() -> InitSpec {
     }
 }
 
-/// Test session table: member sessions certified by the server, plus flags.
-/// fingerprint hex -> (member, pending, ended)
-type Table = HashMap<String, (String, bool, bool)>;
+/// A session key held the way a session process holds it: the seed stays
+/// here, the certificate comes from the server and is replaced on renewal.
+pub struct Enrolment {
+    pub sk: SigningKey,
+    pub key: AgentKey,
+    pub session: String,
+    pub pending: bool,
+}
 
-#[derive(Clone, Default)]
-pub struct Sessions(Arc<Mutex<Table>>);
-
-impl Sessions {
-    pub fn add(&self, key: &AgentKey, member: &str, pending: bool) {
-        self.0
-            .lock()
-            .unwrap()
-            .insert(key.fingerprint().hex(), (member.into(), pending, false));
+impl Enrolment {
+    pub fn prove(&self, ch: &PossessionChallenge) -> Signature {
+        self.sk.sign(&ch.signing_bytes())
     }
-    pub fn end(&self, key: &AgentKey) {
-        if let Some(s) = self.0.lock().unwrap().get_mut(&key.fingerprint().hex()) {
-            s.2 = true;
-        }
+    /// Take a renewed certificate.
+    pub fn recertify(&mut self, cert: CertChain) {
+        self.key = AgentKey::from_seed_and_cert(&self.sk.to_bytes(), cert).unwrap();
     }
 }
 
-impl SignerResolver for Sessions {
-    fn resolve(
-        &self,
-        board: &Board,
-        server_pub: &[u8; 32],
-        sig: &Assertion,
-        event: &ContentId,
-        epoch: u64,
-    ) -> Result<Signer, String> {
-        let fp = Fingerprint::of_bytes(&sig.author().agent_pubkey);
-        if &sig.author().agent_pubkey == server_pub {
-            return ServerOnly.resolve(board, server_pub, sig, event, epoch);
-        }
-        sig.verify(event, server_pub, epoch)
-            .map_err(|e| e.to_string())?;
-        match self.0.lock().unwrap().get(&fp.hex()) {
-            Some((_, _, true)) => Err("session ended".into()),
-            Some((member, pending, false)) => Ok(Signer {
-                fingerprint: fp,
-                class: SignerClass::Session {
-                    member: member.clone(),
-                    pending: *pending,
-                },
-            }),
-            None => Err("unknown session".into()),
-        }
+/// Invite `member`, then enroll a fresh key through the two-step exchange.
+pub fn enroll(server: &mut Server, member: &str) -> Enrolment {
+    let invite = server.invite(member).unwrap();
+    let sk = SigningKey::generate(&mut OsRng);
+    let ch = server
+        .enroll_begin(&invite.token, member, sk.verifying_key().to_bytes())
+        .unwrap();
+    let proof = sk.sign(&ch.signing_bytes());
+    let done = server.enroll_finish(&ch, &proof).unwrap();
+    let key = AgentKey::from_seed_and_cert(&sk.to_bytes(), done.cert).unwrap();
+    Enrolment {
+        sk,
+        key,
+        session: done.session,
+        pending: done.pending,
     }
 }
 
@@ -107,12 +93,7 @@ impl Env {
         let tmp = TempDir::new().unwrap();
         let user = UserKey::generate();
         let flock = init(tmp.path(), &user, spec()).unwrap();
-        Self {
-            tmp,
-            flock,
-            sessions: Sessions::default(),
-            at: 0,
-        }
+        Self { tmp, flock, at: 0 }
     }
 
     pub fn dir(&self) -> PathBuf {
@@ -125,16 +106,14 @@ impl Env {
         std::fs::metadata(self.log_path()).unwrap().len()
     }
     pub fn open(&self) -> Server {
-        Server::open(self.tmp.path(), Box::new(self.sessions.clone())).unwrap()
+        Server::open(self.tmp.path()).unwrap()
     }
     pub fn server_key(&self) -> AgentKey {
         load_server_key(&self.tmp.path().join(KEY_FILE)).unwrap()
     }
-    /// A session key certified by the server, registered in the table.
-    pub fn session(&self, member: &str, pending: bool) -> AgentKey {
-        let key = self.server_key().delegate(meta(member)).unwrap();
-        self.sessions.add(&key, member, pending);
-        key
+    /// A session for `member`, enrolled through `server`.
+    pub fn session(&self, server: &mut Server, member: &str) -> AgentKey {
+        enroll(server, member).key
     }
 
     /// `key`'s event of `kind`, chained after `prev`, with its signature.
@@ -165,8 +144,8 @@ impl Env {
         (node, sig)
     }
 
-    /// A server-signed bookkeeping event (`invite`), the one kind step 3 can
-    /// admit without a session table.
+    /// A server-signed `invite` for `h1` whose verifier is `note`'s digest:
+    /// the cheapest server event that needs no session.
     pub fn server_event(&mut self, note: &str) -> (MerkleNode<Event>, Assertion) {
         let key = self.server_key();
         self.event(
@@ -174,7 +153,10 @@ impl Env {
             Kind::Invite,
             None,
             &[],
-            Body::Server { note: note.into() },
+            Body::Invite {
+                member: "h1".into(),
+                verifier: RawContentId::from_content(note.as_bytes()),
+            },
         )
     }
 
@@ -199,4 +181,32 @@ impl Env {
 
 pub fn id(node: &MerkleNode<Event>) -> ContentId {
     node.content_id().unwrap()
+}
+
+/// Every whole frame in the log file, decoded.
+pub fn read_frames(env: &Env) -> Vec<agent_mesh_flock_server::Frame> {
+    let bytes = std::fs::read(env.log_path()).unwrap();
+    let mut at = 0;
+    let mut out = Vec::new();
+    while at < bytes.len() {
+        let len = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        let payload = &bytes[at + 8..at + 8 + len];
+        out.push(content_addressable::canonical::from_canonical_dagcbor_checked(payload).unwrap());
+        at += 8 + len;
+    }
+    out
+}
+
+/// End `e`'s session and answer the renewal exchange for every other live
+/// session in `others`, the way a connected session would.
+pub fn bump_and_renew(server: &mut Server, ended: &Enrolment, others: &mut [&mut Enrolment]) {
+    server
+        .end_session(&ended.session, agent_mesh_flock::EndReason::Closed)
+        .unwrap();
+    for (session, ch) in server.renewal_challenges() {
+        if let Some(e) = others.iter_mut().find(|e| e.session == session) {
+            let cert = server.renew_finish(&ch, &e.prove(&ch)).unwrap();
+            e.recertify(cert);
+        }
+    }
 }
