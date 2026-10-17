@@ -18,10 +18,15 @@ mod init;
 mod keyfile;
 mod lock;
 mod log;
+#[cfg(unix)]
+mod private;
 mod refusal;
+#[cfg(unix)]
+mod serve;
 mod server;
 mod sessions;
 mod state;
+pub mod wire;
 
 pub use chain::{verify_record, Chain};
 pub use entry::{Enrolled, Invited};
@@ -32,6 +37,10 @@ pub use init::{
 };
 pub use keyfile::{load_server_key, store_server_key};
 pub use log::CrashPlan;
+#[cfg(unix)]
+pub use private::{bind_private, peer_ok, private_dir, uid_allowed};
 pub use refusal::{Reason, RefusalEntry, RefusalRecord};
+#[cfg(unix)]
+pub use serve::{serve, Serving};
 pub use server::{Receipt, Server};
 pub use sessions::{session_caveats, token_digest, InviteInfo, SessionInfo, Sessions, Status};

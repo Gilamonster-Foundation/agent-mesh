@@ -38,7 +38,11 @@ serde_json.workspace = true
 hex.workspace = true
 rand.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+agent-mesh-flock-session.workspace = true
+
 [dev-dependencies]
+content-addressable.workspace = true
 tempfile.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true

@@ -23,7 +23,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process", "net"] }
+libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true

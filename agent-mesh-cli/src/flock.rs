@@ -25,12 +25,61 @@ pub enum FlockCommand {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// Serve the flock's log on a local socket (owns the log; run once).
+    #[cfg(unix)]
+    Serve {
+        /// Flock directory.
+        #[arg(long)]
+        dir: PathBuf,
+    },
+    /// Mint an invite for a member through the running server; prints the
+    /// token once.
+    #[cfg(unix)]
+    Invite {
+        /// Flock directory.
+        #[arg(long)]
+        dir: PathBuf,
+        /// The roster member.
+        member: String,
+    },
+    /// Hold one session key in memory and serve the CLI over a socket
+    /// (like ssh-agent -D). The key is locked in RAM; core dumps are off.
+    #[cfg(unix)]
+    Session {
+        /// Flock directory (where the server's socket is).
+        #[arg(long)]
+        dir: PathBuf,
+        /// The roster member to enroll as.
+        #[arg(long)]
+        member: String,
+        /// Invite token. Prefer the environment: argv shows in `ps`.
+        #[arg(long, env = "AMESH_FLOCK_TOKEN", hide_env_values = true)]
+        token: String,
+        /// Where to listen (default: `<dir>/run/session-<pid>.sock`).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        /// Carry on if memory cannot be locked: the key may reach swap.
+        #[arg(long)]
+        allow_unlocked: bool,
+    },
 }
 
 /// Dispatch a flock subcommand.
 pub fn run(home: PathBuf, cmd: FlockCommand) -> Result<()> {
     match cmd {
         FlockCommand::Init { name, members, dir } => init(home, name, &members, dir),
+        #[cfg(unix)]
+        FlockCommand::Serve { dir } => unix::serve(&dir),
+        #[cfg(unix)]
+        FlockCommand::Invite { dir, member } => unix::invite(&dir, &member),
+        #[cfg(unix)]
+        FlockCommand::Session {
+            dir,
+            member,
+            token,
+            socket,
+            allow_unlocked,
+        } => unix::session(&dir, &member, &token, socket, allow_unlocked),
     }
 }
 
@@ -74,4 +123,70 @@ fn init(home: PathBuf, name: String, members: &[String], dir: Option<PathBuf>) -
     println!("flock id: {flock}");
     println!("dir:      {}", dir.display());
     Ok(())
+}
+
+#[cfg(unix)]
+mod unix {
+    use super::{anyhow, Context, PathBuf, Result};
+    use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp};
+    use agent_mesh_flock_server::{bind_private, serve as serve_log, Server};
+    use agent_mesh_flock_session::Policy;
+    use std::os::unix::net::UnixStream;
+    use std::path::Path;
+
+    fn sock(dir: &Path) -> PathBuf {
+        dir.join("run").join("serve.sock")
+    }
+
+    pub fn serve(dir: &Path) -> Result<()> {
+        let server = Server::open(dir).with_context(|| format!("open {}", dir.display()))?;
+        // The log lock is ours, so any socket file left behind is stale.
+        let listener = bind_private(&sock(dir))?;
+        println!("serving {}", sock(dir).display());
+        serve_log(server, listener)?.wait();
+        Ok(())
+    }
+
+    pub fn invite(dir: &Path, member: &str) -> Result<()> {
+        let mut c = UnixStream::connect(sock(dir)).context("is `amesh flock serve` running?")?;
+        write_msg(
+            &mut c,
+            &Req::Invite {
+                member: member.into(),
+            },
+        )?;
+        match read_msg::<Resp>(&mut c)? {
+            Some(Resp::Invited { token }) => println!("{token}"),
+            Some(Resp::Err(why)) => return Err(anyhow!("refused: {why}")),
+            _ => return Err(anyhow!("unexpected answer")),
+        }
+        Ok(())
+    }
+
+    pub fn session(
+        dir: &Path,
+        member: &str,
+        token: &str,
+        socket: Option<PathBuf>,
+        allow_unlocked: bool,
+    ) -> Result<()> {
+        let path = socket.unwrap_or_else(|| {
+            dir.join("run")
+                .join(format!("session-{}.sock", std::process::id()))
+        });
+        let listener = bind_private(&path)?;
+        let policy = if allow_unlocked {
+            eprintln!("warning: --allow-unlocked: the session key may be swapped to disk");
+            Policy::AllowUnlocked
+        } else {
+            Policy::Locked
+        };
+        let result =
+            agent_mesh_flock_session::run(&sock(dir), token, member, policy, &listener, |s| {
+                println!("session: {}", s.id());
+                println!("socket: {}", path.display());
+            });
+        let _ = std::fs::remove_file(&path);
+        result.map_err(Into::into)
+    }
 }

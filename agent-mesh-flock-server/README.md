@@ -116,6 +116,11 @@ epoch-bounded certificate for the key it names.
 
 - The entry points are plain calls; the SSH stream that carries them is step 5.
   Who may ask for an `invite` (the roster role) is for that caller to establish.
+- `serve` (Unix) owns the log and answers the wire in `wire.rs` on a 0600
+  socket in a 0700 directory (`private.rs` refuses a loose directory and checks
+  the peer's uid on accept). A connection that ends without `End` records its
+  session `lost`. It is the flock owner's local surface, not the SSH stream of
+  step 9, which authenticates by a fresh signed challenge.
 - Not yet: `watch` (step 6), the epoch bump when a member leaves the roster,
   per-device operator listing in the roster (so no operator approval),
   operator-signed events, any CLI beyond `amesh flock init`, MCP or TUI.

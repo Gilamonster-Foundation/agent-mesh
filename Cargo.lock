@@ -72,12 +72,14 @@ dependencies = [
  "agent-mesh-discovery",
  "agent-mesh-flock",
  "agent-mesh-flock-server",
+ "agent-mesh-flock-session",
  "agent-mesh-protocol",
  "agent-mesh-transport",
  "anyhow",
  "assert_cmd",
  "chrono",
  "clap",
+ "content-addressable",
  "dirs",
  "hex",
  "predicates",
@@ -132,12 +134,31 @@ dependencies = [
  "content-addressable",
  "ed25519-dalek 2.2.0",
  "hex",
+ "libc",
  "rand 0.8.6",
  "rustix",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "agent-mesh-flock-session"
+version = "0.7.0"
+dependencies = [
+ "agent-mesh-flock",
+ "agent-mesh-flock-server",
+ "agent-mesh-protocol",
+ "content-addressable",
+ "ed25519-dalek 2.2.0",
+ "libc",
+ "rand 0.8.6",
+ "rustix",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]
