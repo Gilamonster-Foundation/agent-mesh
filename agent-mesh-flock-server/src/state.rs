@@ -37,6 +37,23 @@ fn enc(e: content_addressable::ContentError) -> ServerError {
     ServerError::Encoding(e.to_string())
 }
 
+/// A `session-end` authority shrink and its `epoch` bump are one
+/// transaction: every `session-end` in a frame is followed at once by the
+/// `epoch` event.
+///
+/// # Errors
+/// Which position breaks the rule.
+pub fn check_frame_shape(sealed: &[Sealed]) -> Result<(), String> {
+    for (i, s) in sealed.iter().enumerate() {
+        if s.event.payload.kind == Kind::SessionEnd
+            && sealed.get(i + 1).map(|n| n.event.payload.kind) != Some(Kind::Epoch)
+        {
+            return Err("session-end is not followed by its epoch bump in the same frame".into());
+        }
+    }
+    Ok(())
+}
+
 impl State {
     /// Signer, then the model's table, then the session rules: the order the
     /// log is verified in live and on replay.

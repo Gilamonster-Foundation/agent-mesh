@@ -44,19 +44,32 @@ session starts pending and can sign nothing until a hand-off activates it.
 
 ## Built vs planned
 
-Built (plan steps 1–3):
+Built (plan steps 1–3 and 4a):
 - the detached author `Assertion` (`agent-mesh-protocol`);
-- the `agent-mesh-flock` model crate: schema, admission table, board fold;
+- the `agent-mesh-flock` model crate: schema, admission table, board fold, and
+  real `invite`, `session-start`, `session-end`, `epoch` and `renewal` bodies;
 - `agent-mesh-flock-server` (init, signed log, admission, recovery; the epoch
   counter is signed into each admission and verified on replay) and
-  `amesh flock init`.
+  `amesh flock init`;
+- server API for **invites and enrollment** (`invite`, `enroll_begin` /
+  `enroll_finish`: a digest-only invite, a server-minted possession challenge,
+  token and challenge consumed with `session-start` in one transaction);
+- the **log-derived session resolver**: who may sign comes from replaying the
+  log in order, and a session must present a certificate the log recorded for
+  it, never a peer-issued one;
+- **end-driven epoch bumps**: `end_session` writes `session-end` and `epoch`
+  as one frame, enforced at admission and on replay;
+- **renewal**: the renewal exchange after a bump and the `renew` entry for a
+  session that missed bumps, each logged with its certificate. A member's
+  later sessions start pending.
 
-**Planned, not built:** invites, sessions, automatic epoch bumps, renewal and
-hand-off;
-`amesh flock session`; `watch`; the rest of the CLI (`join`, `inbox`, `take`,
-`result`, `verdict`, `run`, `answer`); `amesh-tui`; attaching from another host;
-the `amesh-herdr` adapter; native newt receive. Until they land, lanes run on
-files as the herdr-flock skill describes. Status: epic #109.
+**Planned, not built:** hand-off and the activation of pending sessions;
+the epoch bump when a member is removed from the roster; operator-class signer
+resolution; `amesh flock session` (the session process); `watch`; the rest of
+the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; `init`
+is still the only subcommand); `amesh-tui`; attaching from another host; the
+`amesh-herdr` adapter; native newt receive. Until they land, lanes run on files
+as the herdr-flock skill describes. Status: epic #109.
 
 ## Keep this current
 

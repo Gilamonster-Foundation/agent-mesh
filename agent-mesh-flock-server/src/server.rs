@@ -7,9 +7,9 @@ use crate::init::{load_genesis, KEY_FILE, LOG_FILE, REFUSALS_FILE};
 use crate::log::Log;
 use crate::refusal::{Reason, RefusalEntry, RefusalRecord};
 use crate::sessions::Sessions;
-use crate::state::{Spec, State};
+use crate::state::{check_frame_shape, Spec, State};
 use crate::{load_server_key, CrashPlan, ServerError};
-use agent_mesh_flock::{Board, ConflictKind, Event, Refusal};
+use agent_mesh_flock::{Board, ConflictKind, Event, Kind, Refusal};
 use agent_mesh_protocol::{AgentKey, Assertion};
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
 use std::collections::BTreeMap;
@@ -76,6 +76,7 @@ impl Server {
             if frame.sealed.is_empty() {
                 return Err(corrupt("empty frame".into()));
             }
+            check_frame_shape(&frame.sealed).map_err(corrupt)?;
             for sealed in &frame.sealed {
                 st.replay(sealed).map_err(|e| corrupt(e.to_string()))?;
             }
@@ -189,6 +190,11 @@ impl Server {
                 duplicate: true,
                 conflict: None,
             });
+        }
+        if node.payload.kind == Kind::SessionEnd {
+            return Err(ServerError::Session(
+                "session-end is admitted only with its epoch bump (end_session)".into(),
+            ));
         }
         let prepared = match self.st.prepare(&self.key, &node, sig) {
             Ok(p) => p,

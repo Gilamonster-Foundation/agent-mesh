@@ -143,6 +143,12 @@ impl Sessions {
             if s.status == Status::Ended {
                 return Err("session ended".into());
             }
+            // only a certificate the log recorded for this session (its
+            // session-start or a renewal): a peer cannot certify it
+            let presented = cert_cid(sig.author()).map_err(|e| e.to_string())?;
+            if !s.certs.contains(&presented) {
+                return Err("certificate was not issued to this session by the server".into());
+            }
             SignerClass::Session {
                 member: s.member.clone(),
                 pending: s.status == Status::Pending,

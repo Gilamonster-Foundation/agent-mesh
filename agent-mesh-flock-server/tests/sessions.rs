@@ -749,3 +749,78 @@ fn renew_wants_a_certificate_the_log_recorded() {
     session_err(server.renew_begin(&unlogged));
     server.renew_begin(shep.key.cert()).unwrap();
 }
+
+#[test]
+fn a_peer_issued_certificate_for_a_stale_session_is_refused() {
+    let mut env = Env::new();
+    let mut server = env.open();
+    let shep = enroll(&mut server, "shep");
+    let mut h1 = enroll(&mut server, "h1");
+    let spare = enroll(&mut server, "h1");
+    // epoch 1; only the helper renews
+    bump_and_renew(&mut server, &spare, &mut [&mut h1]);
+    // the helper certifies the shepherd's key at epoch 1: it verifies and
+    // chains to the server, but the server never issued it
+    let ch = h1
+        .key
+        .possession_challenge(shep.sk.verifying_key().to_bytes());
+    let mut meta = support::meta("shep");
+    meta.caveats = session_caveats(1);
+    let by_peer = h1
+        .key
+        .delegate_external(&ch, &shep.sk.sign(&ch.signing_bytes()), meta)
+        .unwrap();
+    assert!(by_peer.verify_at(1).is_ok());
+    let revived = AgentKey::from_seed_and_cert(&shep.sk.to_bytes(), by_peer).unwrap();
+    let (n, s) = env.brief(&revived, None, "lane-a");
+    let why = match server.admit(n, s) {
+        Err(ServerError::Signer(why)) => why,
+        other => panic!("expected a signer refusal, got {other:?}"),
+    };
+    assert!(why.contains("issued"), "{why}");
+}
+
+#[test]
+fn a_standalone_session_end_is_refused_live() {
+    let mut env = Env::new();
+    let mut server = env.open();
+    let key = env.server_key();
+    let h1 = enroll(&mut server, "h1");
+    let start = server.sessions().get(&h1.session).unwrap().start;
+    let (n, s) = env.event(
+        &key,
+        Kind::SessionEnd,
+        None,
+        &[("session", start)],
+        Body::SessionEnd {
+            session: h1.session.clone(),
+            reason: EndReason::Closed,
+        },
+    );
+    let before = server.admitted();
+    let why = session_err(server.admit(n, s));
+    assert!(why.contains("epoch"), "{why}");
+    assert_eq!((server.admitted(), server.epoch()), (before, 0));
+}
+
+#[test]
+fn a_frame_with_a_session_end_but_no_epoch_bump_fails_open_and_is_left_alone() {
+    let env = Env::new();
+    let mut server = env.open();
+    let h1 = enroll(&mut server, "h1");
+    server.end_session(&h1.session, EndReason::Closed).unwrap();
+    drop(server);
+    // re-encode canonically, with the epoch event removed from the last frame
+    let mut frames = read_frames(&env);
+    frames.last_mut().unwrap().sealed.truncate(1);
+    let bytes: Vec<u8> = frames
+        .iter()
+        .flat_map(|f| agent_mesh_flock_server::encode(f).unwrap())
+        .collect();
+    std::fs::write(env.log_path(), &bytes).unwrap();
+    assert!(matches!(
+        agent_mesh_flock_server::Server::open(&env.dir()),
+        Err(ServerError::Corrupt { .. })
+    ));
+    assert_eq!(std::fs::read(env.log_path()).unwrap(), bytes);
+}

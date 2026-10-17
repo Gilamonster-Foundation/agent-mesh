@@ -81,6 +81,12 @@ still a session at index 8, and today's flags are never applied to old events.
 | `renew_begin(last_cert)` | the `renew` entry: an earlier logged certificate of a session that has not ended |
 | `renew_finish(challenge, proof)` | new certificate, `renewal` event |
 
+A session must sign with a certificate the log recorded for it (its
+`session-start` or a renewal); a certificate another session issued fails even
+if it verifies. A `session-end` is admitted only together with its `epoch`
+bump: `admit` refuses it alone and `Server::open` refuses a frame that holds
+one without the other.
+
 A session certificate is `delegate_external` with `valid_for_generation =
 Only({epoch})`, so an old-epoch certificate fails `verify_at`. Each admission
 record names the certificate its event was verified with, so a reader checks
