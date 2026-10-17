@@ -38,6 +38,15 @@ set -euo pipefail
 
 ZERO=0000000000000000000000000000000000000000
 
+# Ignored files the checks may run beside: disposable build and tool output.
+# Anything else ignored (a stray include_str! input, a local cargo config...)
+# would build here but not from the pushed commit, so it blocks the push. A
+# path is allowed when any of its components matches one of these globs.
+ALLOWED_IGNORED=(
+    target lcov.info __pycache__ .pytest_cache '*.egg-info' dist venv .venv
+    '*.so' .DS_Store '*.swp' '*.swo' .idea .vscode
+)
+
 say() { echo "[pre-push] $*" >&2; }
 refuse() {
     say "refusing: $*"
@@ -115,34 +124,29 @@ baseline() { # $1 remote name, $2 local sha, $3 remote sha
 
 # The checks run on the working tree, so it must equal the pushed commit:
 # nothing modified, nothing untracked (whatever status.showUntrackedFiles
-# says), and no ignored file inside a crate other than its target/ (an
-# ignored module would build here and not in CI). A failing git command
+# says), and no ignored file beyond ALLOWED_IGNORED. A failing git command
 # refuses rather than counting as "clean".
 check_clean() {
-    local status ignored crate_dirs d e rest bad=""
+    local status ignored e part pat ok bad=""
     status=$(git -c status.showUntrackedFiles=all status --porcelain --untracked-files=all) ||
         refuse "git status failed; fix the repository (git fsck, git status) and push again"
     [ -z "$status" ] ||
         refuse "the working tree has modified or untracked files; commit them or move them out (the checks run on the working tree)"
     ignored=$(git ls-files -oi --exclude-standard --directory) ||
         refuse "git ls-files failed; fix the repository and push again"
-    crate_dirs=$(git ls-files -- '*/Cargo.toml') ||
-        refuse "git ls-files failed; fix the repository and push again"
     while IFS= read -r e; do
         [ -n "$e" ] || continue
-        while IFS= read -r d; do
-            [ -n "$d" ] || continue
-            d=${d%/Cargo.toml}
-            case $e in
-            "$d"/*)
-                rest=${e#"$d"/}
-                case $rest in target | target/*) ;; *) bad+=" $e" ;; esac
-                ;;
-            esac
-        done <<<"$crate_dirs"
+        ok=0
+        while IFS= read -r part; do
+            for pat in "${ALLOWED_IGNORED[@]}"; do
+                # shellcheck disable=SC2053 # $pat is a glob on purpose
+                if [[ $part == $pat ]]; then ok=1; fi
+            done
+        done <<<"${e//\//$'\n'}"
+        if [ "$ok" = 0 ]; then bad+=" $e"; fi
     done <<<"$ignored"
     [ -z "$bad" ] ||
-        refuse "ignored files inside a crate would build here but not in CI:$bad -- move or delete them"
+        refuse "ignored files that would build here but not in CI:$bad -- move or delete them (or add known build output to ALLOWED_IGNORED in the hook)"
 }
 
 full_check() {

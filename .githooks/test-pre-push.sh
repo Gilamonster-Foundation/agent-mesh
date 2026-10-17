@@ -132,8 +132,13 @@ git config --unset status.showUntrackedFiles
 echo 'agent-mesh-transport-ssh/src/hidden.rs' >>.git/info/exclude
 echo x >agent-mesh-transport-ssh/src/hidden.rs
 run "refs/heads/w $proto refs/heads/w $leaf"
-refused "ignored files inside a crate" "an ignored source file inside a crate is refused"
+refused "ignored files that would build" "an ignored source file inside a crate is refused"
 rm agent-mesh-transport-ssh/src/hidden.rs
+echo hidden.txt >>.git/info/exclude
+echo x >hidden.txt # a workspace-level input, e.g. include_str!("../../hidden.txt")
+run "refs/heads/w $proto refs/heads/w $leaf"
+refused "ignored files that would build" "an ignored root-level file is refused too"
+rm hidden.txt
 mkdir -p agent-mesh-transport-ssh/target && echo x >agent-mesh-transport-ssh/target/out
 echo 'target/' >>.git/info/exclude
 run "refs/heads/w $proto refs/heads/w $leaf"

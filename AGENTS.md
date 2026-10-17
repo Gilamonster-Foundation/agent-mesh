@@ -36,7 +36,7 @@ crates that own the changed paths and their dependents; tags, deletions
 and docs-only pushes skip it, a change outside every crate (or a scope it
 cannot work out) checks the whole tree, and coverage is CI-only (CRAFT-14).
 A code push must be of HEAD with a clean tree (no untracked files, and no
-ignored files inside a crate besides `target/`), one branch at a time, and the
+ignored files except known build output), one branch at a time, and the
 hook needs `jq` (without it, it checks the whole tree). Do NOT bypass the hook with `--no-verify`. If a
 check fails, fix the underlying issue.
 
