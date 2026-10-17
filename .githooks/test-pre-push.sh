@@ -155,6 +155,15 @@ echo x >.DS_Store
 run "refs/heads/w $proto refs/heads/w $leaf"
 plan_has 'agent-mesh-protocol' "Python caches under agent-mesh-py/python and a .DS_Store file are fine"
 rm -r agent-mesh-py/python/agent_mesh/__pycache__ .DS_Store
+# A * is one path segment: egg-info right under agent-mesh-py, not under its src.
+mkdir -p agent-mesh-py/x.egg-info && echo x >agent-mesh-py/x.egg-info/PKG
+run "refs/heads/w $proto refs/heads/w $leaf"
+plan_has 'agent-mesh-protocol' "agent-mesh-py/x.egg-info/ is fine"
+rm -r agent-mesh-py/x.egg-info
+mkdir -p agent-mesh-py/src/x.egg-info && echo x >agent-mesh-py/src/x.egg-info/a.rs
+run "refs/heads/w $proto refs/heads/w $leaf"
+refused "ignored files that would build" "agent-mesh-py/src/x.egg-info/ is refused (the * does not cross /)"
+rm -r agent-mesh-py/src/x.egg-info
 mkdir -p agent-mesh-transport-ssh/target && echo x >agent-mesh-transport-ssh/target/out
 echo 'target/' >>.git/info/exclude
 run "refs/heads/w $proto refs/heads/w $leaf"

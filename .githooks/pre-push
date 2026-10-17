@@ -44,14 +44,15 @@ ZERO=0000000000000000000000000000000000000000
 # push. Entries come from `git ls-files -oi --directory`: a wholly ignored
 # directory is one entry ending in "/", and Rust can read source from ANY
 # directory, so no directory is allowed by its name alone.
-#   ANCHORED   whole-path globs (a crate's own target/ is handled in
+#   ANCHORED   whole-path globs, each * one path segment (a crate's own target/ is handled in
 #              ignored_ok); the Python cache dirs only under the Python parts
 #              of agent-mesh-py;
 #   FILES      editor/OS junk files, any depth; an entry ending in "/" never
 #              matches these.
 ANCHORED_IGNORED=(
     'target/' lcov.info .idea/ .vscode/ dist/ venv/ .venv/ .pytest_cache/
-    'agent-mesh-py/python/*__pycache__/' 'agent-mesh-py/tests/*__pycache__/'
+    'agent-mesh-py/python/__pycache__/' 'agent-mesh-py/python/*/__pycache__/'
+    'agent-mesh-py/tests/__pycache__/'
     'agent-mesh-py/.pytest_cache/' 'agent-mesh-py/*.egg-info/'
     'agent-mesh-py/python/agent_mesh/*.so'
 )
@@ -132,6 +133,12 @@ baseline() { # $1 remote name, $2 local sha, $3 remote sha
     git merge-base "refs/remotes/$1/main" "$2" 2>/dev/null
 }
 
+# Number of "/" in $1.
+slashes() {
+    local t=${1//[^\/]/}
+    echo "${#t}"
+}
+
 # $1 ignored entry, $2 tracked crate manifests. Is it known build output?
 ignored_ok() {
     local e=$1 base pat
@@ -139,7 +146,8 @@ ignored_ok() {
     base=${base##*/}
     for pat in "${ANCHORED_IGNORED[@]}"; do
         # shellcheck disable=SC2053 # $pat is a glob on purpose
-        if [[ $e == $pat ]]; then return 0; fi
+        # A * may not cross "/": the match must have the pattern's depth.
+        if [[ $e == $pat ]] && [ "$(slashes "$e")" = "$(slashes "$pat")" ]; then return 0; fi
     done
     if [[ $e != */ ]]; then
         for pat in "${IGNORED_FILES[@]}"; do
