@@ -70,6 +70,8 @@ version = "0.7.0"
 dependencies = [
  "agent-mesh-bus",
  "agent-mesh-discovery",
+ "agent-mesh-flock",
+ "agent-mesh-flock-server",
  "agent-mesh-protocol",
  "agent-mesh-transport",
  "anyhow",
@@ -118,6 +120,22 @@ dependencies = [
  "agent-mesh-protocol",
  "content-addressable",
  "serde",
+]
+
+[[package]]
+name = "agent-mesh-flock-server"
+version = "0.7.0"
+dependencies = [
+ "agent-mesh-flock",
+ "agent-mesh-protocol",
+ "blake3",
+ "content-addressable",
+ "hex",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

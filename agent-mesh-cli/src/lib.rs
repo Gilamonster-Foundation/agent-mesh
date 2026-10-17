@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 mod announce;
 mod bind;
+mod flock;
 mod keygen;
 mod listen;
 mod mcp;
@@ -44,6 +45,11 @@ pub enum Command {
     Bind {
         #[command(subcommand)]
         target: BindTarget,
+    },
+    /// Create and run a flock: a signed channel and roster for a team of agents.
+    Flock {
+        #[command(subcommand)]
+        command: flock::FlockCommand,
     },
     /// Print the local user identity.
     Whoami,
@@ -161,6 +167,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Bind { target } => match target {
             BindTarget::Github { ssh_key, username } => bind::github(home, ssh_key, username),
         },
+        Command::Flock { command } => flock::run(home, command),
         Command::Whoami => whoami::run(home),
         Command::Verify {
             binding,

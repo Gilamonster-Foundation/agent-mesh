@@ -22,6 +22,8 @@ agent-mesh-protocol.workspace = true
 agent-mesh-discovery.workspace = true
 agent-mesh-transport.workspace = true
 agent-mesh-bus.workspace = true
+agent-mesh-flock.workspace = true
+agent-mesh-flock-server.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
@@ -34,13 +36,13 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
 wiremock.workspace = true
-rand.workspace = true
 
 [lints]
 workspace = true
