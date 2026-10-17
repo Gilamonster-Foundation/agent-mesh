@@ -208,11 +208,22 @@ mod unix {
         } else {
             Policy::Locked
         };
-        let result =
-            agent_mesh_flock_session::run(&sock(dir), token, member, policy, &listener, |s| {
+        // herdr sets both in every pane; either alone is not a claim.
+        let pane = std::env::var("HERDR_PANE_ID")
+            .ok()
+            .zip(std::env::var("HERDR_TAB_ID").ok());
+        let result = agent_mesh_flock_session::run(
+            &sock(dir),
+            token,
+            member,
+            policy,
+            &listener,
+            pane,
+            |s| {
                 println!("session: {}", s.id());
                 println!("socket: {}", path.display());
-            });
+            },
+        );
         let _ = std::fs::remove_file(&path);
         result.map_err(Into::into)
     }
@@ -264,10 +275,19 @@ fn render(
     );
     let _ = writeln!(
         out,
-        "{:<10} {:<9} {:<8} {:<16} FLOCK (verified)",
-        "MEMBER", "ROLE", "PANE", "HERDR (claimed)"
+        "{:<10} {:<9} {:<8} {:<8} {:<16} FLOCK (verified)",
+        "MEMBER", "ROLE", "PANE", "VIA", "HERDR (claimed)"
     );
-    for (member, pane) in herdr::join(board.members(), live, explicit, tab)? {
+    let claims = announced(snap, live, tab);
+    let mut effective = claims.clone();
+    effective.extend(explicit.iter().map(|(k, v)| (k.clone(), v.clone())));
+    for (member, pane) in herdr::join(board.members(), live, &effective, tab)? {
+        let via = match &pane {
+            Ok(_) if explicit.contains_key(&member.name) => "map",
+            Ok(_) if claims.contains_key(&member.name) => "session",
+            Ok(_) => "label",
+            Err(_) => "-",
+        };
         let (id, claimed) = match &pane {
             Ok(p) => (
                 p.pane_id.clone(),
@@ -283,15 +303,48 @@ fn render(
         };
         let _ = writeln!(
             out,
-            "{:<10} {:<9} {:<8} {:<16} {}",
+            "{:<10} {:<9} {:<8} {:<8} {:<16} {}",
             member.name,
             format!("{:?}", member.role).to_lowercase(),
             id,
+            via,
             claimed,
             flock_state(snap, &member.name)
         );
     }
     Ok(out)
+}
+
+/// The pane each member's active session last claimed, when herdr still has
+/// that pane (and it is in `tab`, if one is given). Only the active session
+/// counts: an ended or pending session's claim says nothing about who holds
+/// the role now. The claim is the session's word, signed; herdr and the log
+/// cannot confirm the pane.
+fn announced(snap: &Snapshot, live: &[Pane], tab: Option<&str>) -> BTreeMap<String, String> {
+    let sessions = snap.sessions();
+    let mut latest: BTreeMap<&str, (u64, &str)> = BTreeMap::new();
+    for e in snap.board().entries() {
+        let Body::Pane { pane, .. } = &e.event.body else {
+            continue;
+        };
+        let author = e.event.author.as_str();
+        if latest.get(author).map_or(true, |(i, _)| e.index > *i) {
+            latest.insert(author, (e.index, pane));
+        }
+    }
+    latest
+        .into_iter()
+        .filter_map(|(author, (_, pane))| {
+            let s = sessions
+                .get(author)
+                .filter(|s| s.status == Status::Active)
+                // a roster change can drop a member whose session is still
+                // Active in the table: its claim is not about anyone now
+                .filter(|s| snap.board().members().iter().any(|m| m.name == s.member))?;
+            let p = live.iter().find(|p| p.pane_id == pane)?;
+            (tab.is_none() || tab == Some(p.tab_id.as_str())).then(|| (s.member, pane.to_owned()))
+        })
+        .collect()
 }
 
 /// The member's session status and its lanes, from the verified log.
@@ -342,7 +395,8 @@ mod tests {
     use super::*;
     use agent_mesh_flock::EndReason;
     use agent_mesh_flock_server::Server;
-    use agent_mesh_protocol::Fingerprint;
+    use agent_mesh_protocol::{AgentKey, Fingerprint};
+    use content_addressable::ContentAddressable as _;
     use ed25519_dalek::{Signer as _, SigningKey};
     use rand::rngs::OsRng;
     use tempfile::TempDir;
@@ -416,5 +470,188 @@ mod tests {
         let row = row(&dir, "h1");
         assert!(row.contains("session pending"), "{row}");
         assert!(!row.contains("active"), "{row}");
+    }
+
+    /// Enroll a fresh key for `member`, keeping the certified key to sign with.
+    fn enroll_key(server: &mut Server, member: &str) -> AgentKey {
+        let sk = SigningKey::generate(&mut OsRng);
+        let invite = server.invite(member).unwrap();
+        let ch = server
+            .enroll_begin(&invite.token, member, sk.verifying_key().to_bytes())
+            .unwrap();
+        let done = server
+            .enroll_finish(&ch, &sk.sign(&ch.signing_bytes()))
+            .unwrap();
+        AgentKey::from_seed_and_cert(&sk.to_bytes(), done.cert).unwrap()
+    }
+
+    /// `key`'s session claims to be in `pane`.
+    fn claim(server: &mut Server, key: &AgentKey, pane: &str, tab: &str) {
+        let author = key.fingerprint().hex();
+        let node = agent_mesh_flock::Event {
+            flock: server.flock(),
+            kind: agent_mesh_flock::Kind::Pane,
+            prev: server.board().head_of(&author),
+            author,
+            refs: BTreeMap::new(),
+            files: vec![],
+            at: 0,
+            body: Body::Pane {
+                pane: pane.into(),
+                tab: tab.into(),
+            },
+        }
+        .node();
+        let sig = agent_mesh_protocol::Assertion::sign(key, &node.content_id().unwrap());
+        server.admit(node, sig).unwrap();
+    }
+
+    fn herdr_pane(id: &str, tab: &str, label: Option<&str>) -> Pane {
+        Pane {
+            pane_id: id.into(),
+            tab_id: tab.into(),
+            label: label.map(Into::into),
+            agent: Some("newt".into()),
+            agent_session: None,
+            agent_status: Some("idle".into()),
+        }
+    }
+
+    fn view(dir: &TempDir, live: &[Pane], map: &[(&str, &str)], tab: Option<&str>) -> String {
+        let snap = Snapshot::read(dir.path()).unwrap();
+        let explicit = map
+            .iter()
+            .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
+            .collect();
+        render(&snap, live, &explicit, tab).unwrap()
+    }
+
+    fn line<'a>(out: &'a str, member: &str) -> &'a str {
+        out.lines().find(|l| l.starts_with(member)).unwrap()
+    }
+
+    #[test]
+    fn a_sessions_signed_claim_links_its_pane_without_a_label() {
+        let (dir, mut server) = flock();
+        let key = enroll_key(&mut server, "h1");
+        claim(&mut server, &key, "w1:p9", "w1:t1");
+        claim(&mut server, &key, "w1:p7", "w1:t1"); // the later claim stands
+        let live = [
+            herdr_pane("w1:p7", "w1:t1", None),
+            herdr_pane("w1:p9", "w1:t1", None),
+        ];
+        let out = view(&dir, &live, &[], None);
+        let l = line(&out, "h1");
+        assert!(l.contains("w1:p7") && l.contains("session"), "{l}");
+    }
+
+    #[test]
+    fn a_claim_by_an_ended_or_pending_session_links_nothing() {
+        let (dir, mut server) = flock();
+        let old = enroll_key(&mut server, "h1");
+        claim(&mut server, &old, "w1:p1", "w1:t1");
+        let newer = enroll_key(&mut server, "h1"); // pending replacement
+        let live = [
+            herdr_pane("w1:p1", "w1:t1", None),
+            herdr_pane("w1:p2", "w1:t1", None),
+        ];
+        let after_pending = view(&dir, &live, &[], None);
+        assert!(line(&after_pending, "h1").contains("w1:p1")); // old still holds the role
+        server
+            .end_session(&old.fingerprint().hex(), EndReason::Lost)
+            .unwrap();
+        let out = view(&dir, &live, &[], None);
+        assert!(line(&out, "h1").contains("no pane"), "{}", line(&out, "h1"));
+        let _ = newer;
+    }
+
+    #[test]
+    fn a_claim_for_a_pane_herdr_lacks_or_outside_the_tab_is_ignored() {
+        let (dir, mut server) = flock();
+        let key = enroll_key(&mut server, "h1");
+        claim(&mut server, &key, "w1:p9", "w1:ta");
+        let gone = view(&dir, &[herdr_pane("w1:p1", "w1:ta", Some("h1"))], &[], None);
+        let l = line(&gone, "h1");
+        assert!(l.contains("w1:p1") && l.contains("label"), "{l}");
+        let live = [herdr_pane("w1:p9", "w1:ta", None)];
+        let other_tab = view(&dir, &live, &[], Some("w1:tb"));
+        assert!(line(&other_tab, "h1").contains("no pane"));
+    }
+
+    #[test]
+    fn an_explicit_map_beats_a_claim_and_a_claim_beats_a_label() {
+        let (dir, mut server) = flock();
+        let key = enroll_key(&mut server, "h1");
+        claim(&mut server, &key, "w1:p2", "w1:t1");
+        let live = [
+            herdr_pane("w1:p1", "w1:t1", Some("h1")),
+            herdr_pane("w1:p2", "w1:t1", None),
+            herdr_pane("w1:p3", "w1:t1", None),
+        ];
+        let by_claim = view(&dir, &live, &[], None);
+        let l = line(&by_claim, "h1");
+        assert!(l.contains("w1:p2") && l.contains("session"), "{l}");
+        let by_map = view(&dir, &live, &[("h1", "w1:p3")], None);
+        let l = line(&by_map, "h1");
+        assert!(l.contains("w1:p3") && l.contains("map"), "{l}");
+    }
+
+    #[test]
+    fn two_sessions_claiming_one_pane_are_both_ambiguous() {
+        let (dir, mut server) = flock();
+        let (a, b) = (
+            enroll_key(&mut server, "h1"),
+            enroll_key(&mut server, "shep"),
+        );
+        claim(&mut server, &a, "w1:p1", "w1:t1");
+        claim(&mut server, &b, "w1:p1", "w1:t1");
+        let out = view(&dir, &[herdr_pane("w1:p1", "w1:t1", None)], &[], None);
+        assert!(line(&out, "h1").contains("ambiguous (2)"));
+        assert!(line(&out, "shep").contains("ambiguous (2)"));
+    }
+
+    /// PR #131: a member dropped by a roster event keeps an Active session
+    /// until removal-driven epoch bumps exist; its old claim used to reach
+    /// `join` as an off-roster `--map` and blank the whole view.
+    #[test]
+    fn a_claim_by_a_member_the_roster_dropped_does_not_break_the_view() {
+        let (dir, mut server) = flock();
+        let (shep, h1) = (
+            enroll_key(&mut server, "shep"),
+            enroll_key(&mut server, "h1"),
+        );
+        claim(&mut server, &h1, "w1:p1", "w1:t1");
+        claim(&mut server, &shep, "w1:p2", "w1:t1");
+        // the shepherd signs a roster that keeps only the shepherd
+        let author = shep.fingerprint().hex();
+        let node = agent_mesh_flock::Event {
+            flock: server.flock(),
+            kind: agent_mesh_flock::Kind::Roster,
+            prev: server.board().head_of(&author),
+            author,
+            refs: BTreeMap::from([("replaces".to_owned(), server.board().roster_id())]),
+            files: vec![],
+            at: 0,
+            body: Body::Roster {
+                members: vec![agent_mesh_flock::Member {
+                    name: "shep".into(),
+                    role: agent_mesh_flock::Role::Shepherd,
+                }],
+            },
+        }
+        .node();
+        let sig = agent_mesh_protocol::Assertion::sign(&shep, &node.content_id().unwrap());
+        server.admit(node, sig).unwrap();
+        let live = [
+            herdr_pane("w1:p1", "w1:t1", None),
+            herdr_pane("w1:p2", "w1:t1", None),
+        ];
+        let out = view(&dir, &live, &[], None);
+        assert!(line(&out, "shep").contains("w1:p2"), "{out}");
+        assert!(!out.contains("h1"), "{out}");
+        // an explicit --map for someone off the roster is still an error
+        let snap = Snapshot::read(dir.path()).unwrap();
+        let bad = BTreeMap::from([("h1".to_owned(), "w1:p1".to_owned())]);
+        assert!(render(&snap, &live, &bad, None).is_err());
     }
 }

@@ -231,6 +231,7 @@ Checks, in order:
 | `answer` | operator class | `ask` | the ask |
 | `relayed-answer` | any member | `ask` | nothing |
 | `status`, `nudged` | the herdr adapter | | |
+| `pane` | any active session | | nothing. A claim of the herdr pane/tab the session runs in: signed by the session, vouched for by no one (herdr can't). Short, printable. The latest from the member's *active* session counts |
 | `epoch`, `renewal`, `session-*`, `handoff`, `invite` | server class | | |
 
 A second closer is admitted as `conflict` and never replaces the first.
