@@ -637,6 +637,7 @@ mod tests {
                 members: vec![agent_mesh_flock::Member {
                     name: "shep".into(),
                     role: agent_mesh_flock::Role::Shepherd,
+                    devices: vec![],
                 }],
             },
         }
