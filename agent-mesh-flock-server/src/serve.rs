@@ -8,8 +8,8 @@
 //! signed challenge instead; nothing here may be read as that.
 
 use crate::wire::{read_msg, write_msg, Req, Resp, StreamChallenge};
-use crate::{CrashPlan, Head, Journal, Resume, Sealed, Server, ServerError};
-use agent_mesh_flock::{Body, EndReason};
+use crate::{CrashPlan, Head, Journal, Resume, Server, ServerError};
+use agent_mesh_flock::{EndReason, Kind};
 use rand::RngCore as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -340,6 +340,9 @@ fn stream(shared: &Shared, conn: &mut UnixStream, session: &str, from: Option<&H
         }
     };
     let replay_end = shared.journal.len();
+    // Eligibility is re-checked at epoch boundaries from the frame on, not
+    // for history before this session existed.
+    let from_index = with(shared, |s| s.session_start_index(session)).unwrap_or(0);
     let mut caught = false;
     let mut at = cursor.delivered();
     loop {
@@ -349,7 +352,7 @@ fn stream(shared: &Shared, conn: &mut UnixStream, session: &str, from: Option<&H
                 return;
             }
         }
-        let Some(frame) = cursor.next_frame() else {
+        let Some((frame, eligible)) = cursor.next_frame() else {
             let _ = write_msg(
                 conn,
                 &Resp::Closed {
@@ -359,7 +362,8 @@ fn stream(shared: &Shared, conn: &mut UnixStream, session: &str, from: Option<&H
             return;
         };
         at = frame.last().map_or(at, |s| s.record.payload.index);
-        let over = ends_session(&frame, session);
+        let bump = frame.iter().any(|s| s.event.payload.kind == Kind::Epoch);
+        let over = bump && at >= from_index && !eligible.contains(session);
         if write_msg(conn, &Resp::Frame(frame.to_vec())).is_err() {
             return;
         }
@@ -367,23 +371,12 @@ fn stream(shared: &Shared, conn: &mut UnixStream, session: &str, from: Option<&H
             let _ = write_msg(
                 conn,
                 &Resp::Closed {
-                    reason: "your session ended".into(),
+                    reason: "your session ended or its member left the roster".into(),
                 },
             );
             return;
         }
     }
-}
-
-/// Whether `frame` ends `session`: its `session-end`, or a hand-off away
-/// from it. The epoch bump is in the same frame, so the stream closes
-/// right after delivering the bump.
-fn ends_session(frame: &[Sealed], session: &str) -> bool {
-    frame.iter().any(|s| match &s.event.payload.body {
-        Body::SessionEnd { session: x, .. } => x == session,
-        Body::Handoff { from, .. } => from == session,
-        _ => false,
-    })
 }
 
 fn handle(server: &mut Server, req: Req, bound: &mut Option<String>) -> Result<Resp, ServerError> {

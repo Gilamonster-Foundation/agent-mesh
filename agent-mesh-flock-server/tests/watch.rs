@@ -23,7 +23,7 @@ fn frames(server: &Server) -> Vec<std::sync::Arc<Vec<agent_mesh_flock_server::Se
     let mut c = j.cursor_from(None).unwrap();
     let mut out = vec![];
     while c.delivered() < j.len() {
-        out.push(c.next_frame().unwrap());
+        out.push(c.next_frame().unwrap().0);
     }
     out
 }
@@ -45,6 +45,7 @@ fn an_event_appended_mid_replay_is_delivered_exactly_once() {
             cursor
                 .next_frame()
                 .unwrap()
+                .0
                 .iter()
                 .map(|s| s.record.payload.index),
         );
@@ -55,6 +56,7 @@ fn an_event_appended_mid_replay_is_delivered_exactly_once() {
             cursor
                 .next_frame()
                 .unwrap()
+                .0
                 .iter()
                 .map(|s| s.record.payload.index),
         );
@@ -74,7 +76,7 @@ fn a_cursor_resumes_after_a_signed_head_and_refuses_what_it_cannot_extend() {
     let all = frames(&server);
     let head = Head::of(all[2].last().unwrap());
     let mut c = server.journal().cursor_from(Some(&head)).unwrap();
-    let next = c.next_frame().unwrap();
+    let next = c.next_frame().unwrap().0;
     assert_eq!(next[0].record.payload.index, head.index() + 1);
     // a head from beyond this history: the server is behind
     let mut ahead = head.clone();
@@ -328,4 +330,25 @@ fn a_member_the_roster_dropped_may_not_open_a_stream_though_its_session_is_still
     let (sig, _, id2) = proof(&h1.key, &server, 1);
     let _ = id;
     assert!(server.authorize_stream(&sig, &id2).is_err());
+}
+
+#[test]
+fn recovery_syncs_a_complete_unsynced_frame_before_it_is_published() {
+    let mut env = Env::new();
+    let mut server = env.open();
+    let shep = enroll(&mut server, "shep");
+    let before = server.admitted();
+    server.plan_crash(Some(CrashPlan::BeforeSync));
+    let prev = server.board().head_of(&shep.key.fingerprint().hex());
+    let (node, sig) = env.brief(&shep.key, prev, "unsynced");
+    assert!(server.admit(node, sig).is_err());
+    drop(server);
+    // the whole frame is on disk, never fsynced; a restart finds it
+    let server = env.open();
+    assert_eq!(server.admitted(), before + 1);
+    assert!(
+        server.log_syncs() >= 1,
+        "the recovered prefix was published without an fsync"
+    );
+    assert_eq!(server.journal().len(), before + 1);
 }

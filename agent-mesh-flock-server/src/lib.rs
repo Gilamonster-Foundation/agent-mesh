@@ -39,7 +39,7 @@ pub use frame::{cert_cid, encode, seal, AdmissionRecord, Frame, Sealed};
 pub use init::{
     init, load_genesis, InitSpec, SignedGenesis, GENESIS_FILE, KEY_FILE, LOG_FILE, REFUSALS_FILE,
 };
-pub use journal::{Cursor, Head, Journal, Resume};
+pub use journal::{Cursor, Eligible, Head, Journal, Published, Resume};
 pub use keyfile::{load_server_key, store_server_key};
 pub use log::CrashPlan;
 #[cfg(unix)]

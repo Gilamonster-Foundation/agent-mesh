@@ -23,6 +23,9 @@ pub enum SessionError {
 /// Why reading a flock failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ReaderError {
+    /// Another reader holds this state directory.
+    #[error("another reader holds this state directory")]
+    Locked,
     /// The server's history is not an extension of the saved head: shorter,
     /// rewritten, or with an altered prefix. Never resynchronized silently.
     #[error("rollback: {0}")]

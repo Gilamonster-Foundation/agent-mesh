@@ -32,6 +32,8 @@ pub struct Reader<F: Fs> {
     genesis: MerkleNode<Genesis>,
     follower: Follower,
     frames: Vec<Vec<Sealed>>,
+    /// Held for the reader's life: one checkpoint writer per directory.
+    _lock: Box<dyn std::any::Any + Send>,
 }
 
 fn follow(e: FollowError) -> ReaderError {
@@ -48,6 +50,13 @@ impl<F: Fs> Reader<F> {
     /// # Errors
     /// The saved state does not verify.
     pub fn open(genesis: MerkleNode<Genesis>, dir: &Path, fs: F) -> Result<Self, ReaderError> {
+        let lock = fs.lock_dir(dir).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                ReaderError::Locked
+            } else {
+                ReaderError::Io(e)
+            }
+        })?;
         let mut follower = Follower::new(&genesis)?;
         let frames = match fs.read(&dir.join(FILE))? {
             None => vec![],
@@ -66,6 +75,7 @@ impl<F: Fs> Reader<F> {
             genesis,
             follower,
             frames,
+            _lock: lock,
         })
     }
 
@@ -118,7 +128,17 @@ impl<F: Fs> Reader<F> {
                     self.apply(f)?;
                     self.save()?;
                 }
-                WatchEvent::Caught(_) => return Ok(()),
+                WatchEvent::Caught(i) => {
+                    // the marker must agree with what this reader verified
+                    return if i == self.follower.admitted() {
+                        Ok(())
+                    } else {
+                        Err(ReaderError::Invalid(format!(
+                            "the server says caught up at {i}; this reader verified {}",
+                            self.follower.admitted()
+                        )))
+                    };
+                }
                 WatchEvent::Closed(why) => return Err(ReaderError::Stream(why)),
             }
         }

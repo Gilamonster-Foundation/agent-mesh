@@ -219,3 +219,15 @@ pub fn read_msg<T: DeserializeOwned + Serialize>(
         .map(Some)
         .map_err(|e| ServerError::Encoding(e.to_string()))
 }
+
+/// Whether `frame` can be delivered to a watcher as one [`Resp::Frame`]: the
+/// message limit applies to the response, which carries the admission record
+/// and its signature on top of the request that caused it.
+///
+/// # Errors
+/// Encoding failure.
+pub fn frame_fits(frame: &[Sealed]) -> Result<bool, ServerError> {
+    let bytes = to_canonical_dagcbor(&Resp::Frame(frame.to_vec()))
+        .map_err(|e| ServerError::Encoding(e.to_string()))?;
+    Ok(bytes.len() <= MAX_MESSAGE)
+}

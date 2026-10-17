@@ -51,6 +51,8 @@ pub enum Refusal {
     HeadMismatch,
     /// `replaces` is not the current roster.
     StaleRoster,
+    /// The frame this would commit is too large to deliver to a watcher.
+    TooLarge,
     /// A claim (pane, tab) that is empty, too long or not printable.
     BadClaim,
 }

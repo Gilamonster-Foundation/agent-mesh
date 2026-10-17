@@ -117,6 +117,14 @@ impl Rig {
     }
     /// `who` admits a brief; returns the admission index.
     fn brief(&mut self, who: &mut Member1, lane: &str) -> u64 {
+        match self.try_brief(who, lane) {
+            Resp::Admitted { index, .. } => index,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `who` asks to admit a brief and gets the server's answer.
+    fn try_brief(&mut self, who: &mut Member1, lane: &str) -> Resp {
         let Resp::Head(prev) = rpc(
             &mut who.conn,
             &Req::Head {
@@ -144,10 +152,56 @@ impl Rig {
         }
         .node();
         let sig = Assertion::sign(&who.key, &node.content_id().unwrap());
-        match rpc(&mut who.conn, &Req::Admit { node, sig }) {
-            Resp::Admitted { index, .. } => index,
-            other => panic!("{other:?}"),
+        rpc(&mut who.conn, &Req::Admit { node, sig })
+    }
+
+    /// `who` (a shepherd) admits a roster that keeps only the shepherd.
+    fn drop_everyone_but_shep(&mut self, who: &mut Member1) {
+        let (flock, replaces) = self
+            .serving()
+            .with_server(|s| (s.flock(), s.board().roster_id()));
+        let Resp::Head(prev) = rpc(
+            &mut who.conn,
+            &Req::Head {
+                session: who.session.clone(),
+            },
+        ) else {
+            panic!()
+        };
+        self.at += 1;
+        let node = Event {
+            flock,
+            kind: Kind::Roster,
+            author: who.session.clone(),
+            prev,
+            refs: [("replaces".to_owned(), replaces)].into_iter().collect(),
+            files: vec![],
+            at: self.at,
+            body: Body::Roster {
+                members: vec![Member {
+                    name: "shep".into(),
+                    role: Role::Shepherd,
+                }],
+            },
         }
+        .node();
+        let sig = Assertion::sign(&who.key, &node.content_id().unwrap());
+        assert!(matches!(
+            rpc(&mut who.conn, &Req::Admit { node, sig }),
+            Resp::Admitted { .. }
+        ));
+    }
+
+    fn invite(&self, member: &str) {
+        assert!(matches!(
+            rpc(
+                &mut self.conn(),
+                &Req::Invite {
+                    member: member.into()
+                }
+            ),
+            Resp::Invited { .. }
+        ));
     }
     fn genesis(&self) -> MerkleNode<agent_mesh_flock::Genesis> {
         load_genesis(self.tmp.path()).unwrap().node
@@ -224,6 +278,7 @@ fn a_reconnect_resumes_from_the_saved_head_and_delivers_only_what_is_new() {
     let first = indexes(&next_frame(&mut w));
     assert_eq!(first, vec![h1.index() + 1]);
     // a fresh reader process picks the saved state up and catches up
+    drop(reader); // one writer per state directory
     let mut again = Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
     again.sync(&r.sock, &shep.key).unwrap();
     let now = r.serving().failure();
@@ -266,6 +321,7 @@ fn a_reader_killed_anywhere_resumes_with_no_duplicate_and_no_gap() {
             assert!(saved <= total);
             rd.sync(&r.sock, &shep.key).unwrap();
             assert_eq!(rd.follower().admitted(), total, "no gap");
+            drop(rd);
             // the reopened reader verifies a contiguous chain from genesis:
             // a duplicate would not extend the head, and would have failed
             let mut check = Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
@@ -381,6 +437,15 @@ fn an_older_backup_and_a_rolled_back_then_extended_history_are_refused_as_rollba
     r.sock = sock;
     let err = reader.sync(&r.sock, &shep.key).unwrap_err();
     assert!(matches!(err, ReaderError::Rollback(_)), "{err}");
+    // the rolled-back server now writes different events until it is longer
+    // than what the reader witnessed: same length or more, other records
+    shep.conn = r.conn();
+    for lane in ["b1", "b2", "b3"] {
+        r.brief(&mut shep, lane);
+    }
+    let err = reader.sync(&r.sock, &shep.key).unwrap_err();
+    assert!(matches!(err, ReaderError::Rollback(_)), "{err}");
+    drop(reader);
     let again = Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
     assert_eq!(
         again.follower().admitted(),
@@ -404,6 +469,7 @@ mod power {
         durable_names: BTreeMap<PathBuf, usize>,
         steps: usize,
         crash_at: Option<usize>,
+        locked: bool,
     }
 
     #[derive(Clone, Default)]
@@ -412,7 +478,9 @@ mod power {
     impl PowerFs {
         /// An independent copy of the whole model.
         pub fn fork(&self) -> Self {
-            Self(Arc::new(Mutex::new(self.0.lock().unwrap().clone())))
+            let mut m = self.0.lock().unwrap().clone();
+            m.locked = false;
+            Self(Arc::new(Mutex::new(m)))
         }
         pub fn steps(&self) -> usize {
             self.0.lock().unwrap().steps
@@ -479,6 +547,20 @@ mod power {
             step(&mut m)?;
             m.durable_names = m.names.clone();
             Ok(())
+        }
+        fn lock_dir(&self, _: &Path) -> io::Result<Box<dyn std::any::Any + Send>> {
+            struct Guard(Arc<Mutex<Model>>);
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    self.0.lock().unwrap().locked = false;
+                }
+            }
+            let mut m = self.0.lock().unwrap();
+            if m.locked {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            m.locked = true;
+            Ok(Box::new(Guard(self.0.clone())))
         }
         fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
             let m = self.0.lock().unwrap();
@@ -589,4 +671,171 @@ fn a_watch_also_closes_right_after_a_hand_off_away_from_its_session() {
     };
     assert_eq!(kinds, vec![Kind::Handoff, Kind::Epoch]);
     assert!(reason.contains("ended"), "{reason}");
+}
+
+fn kinds_until_closed_or_caught(w: &mut Watch) -> (Vec<Kind>, Option<String>) {
+    let mut kinds = vec![];
+    loop {
+        match w.next_event().unwrap() {
+            WatchEvent::Frame(f) => kinds.extend(f.iter().map(|s| s.event.payload.kind)),
+            WatchEvent::Closed(why) => return (kinds, Some(why)),
+            WatchEvent::Caught(_) => return (kinds, None),
+        }
+    }
+}
+
+#[test]
+fn an_off_roster_watch_closes_at_the_next_epoch_bump_and_never_sees_what_follows() {
+    let mut r = rig();
+    let mut shep = r.enrol("shep");
+    let h1 = r.enrol("h1");
+    let mut w = Watch::open(&r.sock, &h1.key, None).unwrap();
+    let (_, caught) = kinds_until_closed_or_caught(&mut w);
+    assert!(caught.is_none(), "open after the replay");
+    r.drop_everyone_but_shep(&mut shep);
+    // an existing bump (the shepherd's session ends), then an event after it
+    assert!(matches!(rpc(&mut shep.conn, &Req::End), Resp::Ok));
+    r.invite("shep");
+    let mut kinds = vec![];
+    let reason = loop {
+        match w.next_event().unwrap() {
+            WatchEvent::Frame(f) => kinds.extend(f.iter().map(|s| s.event.payload.kind)),
+            WatchEvent::Closed(why) => break why,
+            WatchEvent::Caught(_) => {}
+        }
+    };
+    assert_eq!(kinds, vec![Kind::Roster, Kind::SessionEnd, Kind::Epoch]);
+    assert!(reason.contains("roster"), "{reason}");
+}
+
+#[test]
+fn a_roster_event_alone_does_not_close_a_watch_yet_that_bump_is_step_6b() {
+    let mut r = rig();
+    let mut shep = r.enrol("shep");
+    let h1 = r.enrol("h1");
+    let mut w = Watch::open(&r.sock, &h1.key, None).unwrap();
+    let _ = kinds_until_closed_or_caught(&mut w);
+    r.drop_everyone_but_shep(&mut shep);
+    r.invite("shep");
+    // both frames arrive on the still-open stream; no bump, no close
+    for want in [Kind::Roster, Kind::Invite] {
+        match w.next_event().unwrap() {
+            WatchEvent::Frame(f) => assert_eq!(f[0].event.payload.kind, want),
+            other => panic!(
+                "expected a {want:?} frame, got {:?}",
+                matches!(other, WatchEvent::Closed(_))
+            ),
+        }
+    }
+}
+
+#[test]
+fn a_session_is_not_closed_by_an_epoch_bump_from_before_it_existed() {
+    let r = rig();
+    let mut early = r.enrol("h1");
+    assert!(matches!(rpc(&mut early.conn, &Req::End), Resp::Ok)); // bump #1
+    let shep = r.enrol("shep"); // enrolled after it, at the new epoch
+    let mut w = Watch::open(&r.sock, &shep.key, None).unwrap();
+    let (kinds, closed) = kinds_until_closed_or_caught(&mut w);
+    assert!(
+        closed.is_none(),
+        "replaying history from before this session"
+    );
+    assert!(kinds.contains(&Kind::Epoch));
+}
+
+#[test]
+fn a_second_reader_on_one_state_directory_is_refused_until_the_first_is_gone() {
+    let r = rig();
+    let dir = TempDir::new().unwrap();
+    let first = Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
+    assert!(matches!(
+        Reader::open(r.genesis(), dir.path(), RealFs),
+        Err(ReaderError::Locked)
+    ));
+    drop(first);
+    Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
+}
+
+#[test]
+fn a_catch_up_marker_that_disagrees_with_the_verified_head_is_an_error() {
+    let mut r = rig();
+    let mut shep = r.enrol("shep");
+    for l in ["a", "b"] {
+        r.brief(&mut shep, l);
+    }
+    let dir = TempDir::new().unwrap();
+    let mut reader = Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
+    reader.sync(&r.sock, &shep.key).unwrap();
+    assert!(reader.follower().admitted() > 1);
+    // a scripted peer claims "caught up at 0" to a reader at a later head
+    let fake = dir.path().join("fake.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&fake).unwrap();
+    let flock = reader.follower().board().flock();
+    let peer = std::thread::spawn(move || {
+        let (mut c, _) = listener.accept().unwrap();
+        assert!(matches!(
+            read_msg::<Req>(&mut c).unwrap(),
+            Some(Req::WatchBegin)
+        ));
+        write_msg(
+            &mut c,
+            &Resp::StreamChallenge(agent_mesh_flock_server::wire::StreamChallenge {
+                flock,
+                nonce: [7; 32],
+            }),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_msg::<Req>(&mut c).unwrap(),
+            Some(Req::Watch { .. })
+        ));
+        write_msg(&mut c, &Resp::Caught { index: 0 }).unwrap();
+    });
+    let err = reader.sync(&fake, &shep.key).unwrap_err();
+    peer.join().unwrap();
+    assert!(matches!(err, ReaderError::Invalid(_)), "{err}");
+}
+
+#[test]
+fn a_request_whose_frame_could_not_be_delivered_is_refused_and_one_that_just_fits_is_watchable() {
+    use agent_mesh_flock_server::wire::MAX_MESSAGE;
+    use content_addressable::canonical::to_canonical_dagcbor;
+    let mut r = rig();
+    let mut shep = r.enrol("shep");
+    r.brief(&mut shep, "first"); // so the next event has a `prev`, like the rest
+                                 // the size of one big frame: a lane of 100_000 bytes (the string header
+                                 // is the same size from 64 KiB up, so the frame grows one byte per byte)
+    let probe = 100_000;
+    r.brief(&mut shep, &"x".repeat(probe));
+    let mut w = Watch::open(&r.sock, &shep.key, None).unwrap();
+    let mut last = vec![];
+    loop {
+        match w.next_event().unwrap() {
+            WatchEvent::Frame(f) => last = f,
+            WatchEvent::Caught(_) => break,
+            WatchEvent::Closed(why) => panic!("{why}"),
+        }
+    }
+    let size = to_canonical_dagcbor(&Resp::Frame(last)).unwrap().len();
+    let fits = probe + (MAX_MESSAGE - size);
+    let before = r.serving().with_server(|s| s.admitted());
+    // over the limit: refused, nothing committed
+    // (byte strings are CBOR integer arrays, so a frame's size moves by a few
+    // hundred bytes with the random signature bytes: stay well clear of the
+    // edge on both sides)
+    // (the window is the record + its signature, ~850 bytes: the request fits
+    // the wire limit while the frame it would commit does not)
+    const SLACK: usize = 300;
+    let refused = r.try_brief(&mut shep, &"x".repeat(fits + SLACK));
+    assert!(
+        matches!(refused, Resp::Err(ref why) if why.contains("TooLarge")),
+        "{refused:?}"
+    );
+    assert_eq!(r.serving().with_server(|s| s.admitted()), before);
+    // just under the limit: committed, and the stream can carry it
+    let index = r.brief(&mut shep, &"x".repeat(fits - SLACK));
+    let (kinds, _) =
+        kinds_until_closed_or_caught(&mut Watch::open(&r.sock, &shep.key, None).unwrap());
+    assert!(kinds.len() as u64 >= index);
 }

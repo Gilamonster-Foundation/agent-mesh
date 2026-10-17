@@ -116,8 +116,12 @@ Built (plan steps 1–4 and the read-only herdr view, 4c):
   A stream needs an *active* session of a *current* member signing a fresh
   challenge bound to the flock and the connection (a certified non-member, a
   pending or ended session, or a proof from another connection is refused),
-  and it closes right after the frame that ends that session (`session-end` or
-  a hand-off away). Ceilings: the journal is in memory; the reader rewrites its
+  and it closes right after any epoch-bearing frame after which its session is no
+  longer live or its member is no longer on the roster (a `session-end`, a
+  hand-off away, or an existing bump after a roster change; the roster change
+  alone does not bump yet, step 6b). A request whose frame would not fit one
+  stream message is refused (`TooLarge`) before it is committed, so every
+  admitted frame can be watched. One reader per state directory (locked). Ceilings: the journal is in memory; the reader rewrites its
   whole file per save.
 
 **Planned, not built:** the epoch bump when a member is removed from the

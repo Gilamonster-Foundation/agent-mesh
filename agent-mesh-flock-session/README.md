@@ -26,4 +26,6 @@ no blocking call in between. Unix only: elsewhere the crate is empty.
 `Reader` is the client side of `watch`: a verified prefix of a flock saved in one
 file by write-temp, fsync, rename, fsync-directory (`Fs` makes each step
 injectable), extended by `Watch` from its own head; it refuses any history that
-does not extend that head.
+does not extend that head, and a `Caught` marker that disagrees with its own
+verified head. One `Reader` per state directory (an exclusive lock held for
+its life).

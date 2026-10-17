@@ -53,6 +53,16 @@ pub(crate) fn rebuild(
     server_pub: [u8; 32],
     frames: Vec<(u64, Frame)>,
 ) -> Result<State, ServerError> {
+    rebuild_with(genesis, server_pub, frames, |_| {})
+}
+
+/// [`rebuild`], calling `after` with the state after each whole frame.
+pub(crate) fn rebuild_with(
+    genesis: &MerkleNode<agent_mesh_flock::Genesis>,
+    server_pub: [u8; 32],
+    frames: Vec<(u64, Frame)>,
+    mut after: impl FnMut(&State),
+) -> Result<State, ServerError> {
     let board = Board::new(genesis).map_err(enc)?;
     let mut st = State {
         chain: Chain::new(board.flock(), server_pub),
@@ -68,6 +78,7 @@ pub(crate) fn rebuild(
         for sealed in &frame.sealed {
             st.replay(sealed).map_err(|e| corrupt(e.to_string()))?;
         }
+        after(&st);
     }
     Ok(st)
 }
@@ -93,8 +104,15 @@ impl Server {
         // only then cut a torn tail.
         let (mut log, frames) = Log::open::<Frame>(&dir.join(LOG_FILE))?;
         let (mut refusal_log, entries) = Log::open::<RefusalEntry>(&dir.join(REFUSALS_FILE))?;
-        let published = frames.iter().map(|(_, f)| f.sealed.clone()).collect();
-        let st = rebuild(&genesis.node, server_pub, frames)?;
+        let mut sealed_frames: Vec<Vec<Sealed>> =
+            frames.iter().map(|(_, f)| f.sealed.clone()).collect();
+        sealed_frames.reverse();
+        let mut published = Vec::new();
+        let st = rebuild_with(&genesis.node, server_pub, frames, |st| {
+            if let Some(f) = sealed_frames.pop() {
+                published.push((f, st.eligible()));
+            }
+        })?;
         let mut refusal_prev = st.board.flock();
         let mut last = 0;
         for (offset, entry) in &entries {
@@ -165,6 +183,20 @@ impl Server {
                 "a stream needs an active session of a current member".into(),
             )),
         }
+    }
+
+    /// Test-only: how many fsyncs the log has done.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn log_syncs(&self) -> u64 {
+        self.log.syncs()
+    }
+
+    /// The admission index of `session`'s `session-start`, if it has one.
+    #[must_use]
+    pub fn session_start_index(&self, session: &str) -> Option<u64> {
+        let start = self.st.sessions.get(session)?.start;
+        self.st.board.get(&start).map(|e| e.index)
     }
 
     /// The flock id.
@@ -259,9 +291,15 @@ impl Server {
             }
             Err(e) => return Err(e),
         };
+        if !crate::wire::frame_fits(std::slice::from_ref(&prepared.sealed))? {
+            let why = Refusal::TooLarge;
+            self.record_refusal(&cid, &node, &why)?;
+            return Err(ServerError::Refused(why));
+        }
         self.append(vec![prepared.sealed.clone()])?;
         self.st.commit(&prepared)?;
-        self.journal.publish(vec![prepared.sealed.clone()]);
+        self.journal
+            .publish(vec![prepared.sealed.clone()], self.st.eligible());
         Ok(Receipt {
             index: prepared.sealed.record.payload.index,
             duplicate: false,
@@ -285,9 +323,14 @@ impl Server {
             ids.push(p.id);
             sealed.push(p.sealed);
         }
+        if !crate::wire::frame_fits(&sealed)? {
+            return Err(ServerError::Session(
+                "the frame would be too large to deliver to a watcher".into(),
+            ));
+        }
         self.append(sealed.clone())?;
         self.st = next;
-        self.journal.publish(sealed);
+        self.journal.publish(sealed, self.st.eligible());
         Ok(ids)
     }
 

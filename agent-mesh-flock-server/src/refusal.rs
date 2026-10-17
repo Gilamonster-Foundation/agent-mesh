@@ -53,6 +53,8 @@ pub enum Reason {
     HeadMismatch,
     /// `replaces` is not the current roster.
     StaleRoster,
+    /// The frame it would commit is too large to deliver to a watcher.
+    TooLarge,
     /// A pane or tab claim that is empty, too long or not printable.
     BadClaim,
 }
@@ -79,6 +81,7 @@ impl From<&Refusal> for Reason {
             Refusal::AdapterCannotAck => Self::AdapterCannotAck,
             Refusal::HeadMismatch => Self::HeadMismatch,
             Refusal::StaleRoster => Self::StaleRoster,
+            Refusal::TooLarge => Self::TooLarge,
             Refusal::BadClaim => Self::BadClaim,
         }
     }

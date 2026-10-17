@@ -27,6 +27,9 @@ pub struct Log {
     /// Where an incomplete final frame begins; cut by [`Log::commit_recovery`].
     cut: Option<u64>,
     plan: Option<CrashPlan>,
+    /// How many times the file has been fsynced (recovery and appends): a
+    /// test-visible witness that a barrier happened.
+    syncs: u64,
 }
 
 impl Log {
@@ -53,6 +56,7 @@ impl Log {
             end: at,
             cut,
             plan: None,
+            syncs: 0,
         };
         Ok((log, frames))
     }
@@ -66,8 +70,20 @@ impl Log {
         if let Some(at) = self.cut.take() {
             self.file.set_len(at)?;
             self.file.sync_all()?;
+        } else {
+            // Whole frames can be on disk without ever having been synced
+            // (an append that died before its fsync). Once they are about
+            // to be published to readers they must be durable.
+            self.file.sync_data()?;
         }
+        self.syncs += 1;
         Ok(())
+    }
+
+    /// How many fsyncs the log has done.
+    #[must_use]
+    pub fn syncs(&self) -> u64 {
+        self.syncs
     }
 
     /// Arm a crash for the next append.
@@ -102,6 +118,7 @@ impl Log {
         }
         self.file.write_all(&bytes)?;
         self.file.sync_data()?;
+        self.syncs += 1;
         self.end += bytes.len() as u64;
         Ok(())
     }

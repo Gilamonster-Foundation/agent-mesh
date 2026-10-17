@@ -10,6 +10,7 @@ use crate::frame::{AdmissionRecord, Sealed};
 use agent_mesh_protocol::Assertion;
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 /// A signed head: an admission record and the server's signature over it.
@@ -63,8 +64,17 @@ pub enum Resume {
     NotABoundary,
 }
 
+/// The sessions that were live and belonged to a current member of the
+/// roster once a frame had been applied: immutable, published with the
+/// frame, so a stream can re-check its own eligibility without the writer's
+/// lock.
+pub type Eligible = Arc<BTreeSet<String>>;
+
+/// One published frame and who was eligible after it.
+pub type Published = (Arc<Vec<Sealed>>, Eligible);
+
 struct Inner {
-    frames: Vec<Arc<Vec<Sealed>>>,
+    frames: Vec<Published>,
     stopped: bool,
 }
 
@@ -79,10 +89,10 @@ fn last_index(f: &[Sealed]) -> u64 {
 }
 
 impl Journal {
-    pub(crate) fn new(frames: Vec<Vec<Sealed>>) -> Arc<Self> {
+    pub(crate) fn new(frames: Vec<(Vec<Sealed>, Eligible)>) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(Inner {
-                frames: frames.into_iter().map(Arc::new).collect(),
+                frames: frames.into_iter().map(|(f, e)| (Arc::new(f), e)).collect(),
                 stopped: false,
             }),
             more: Condvar::new(),
@@ -96,8 +106,8 @@ impl Journal {
     }
 
     /// Publish a committed frame (after its fsync).
-    pub(crate) fn publish(&self, frame: Vec<Sealed>) {
-        self.lock().frames.push(Arc::new(frame));
+    pub(crate) fn publish(&self, frame: Vec<Sealed>, eligible: Eligible) {
+        self.lock().frames.push((Arc::new(frame), eligible));
         self.more.notify_all();
     }
 
@@ -110,7 +120,7 @@ impl Journal {
     /// How many events are published.
     #[must_use]
     pub fn len(&self) -> u64 {
-        self.lock().frames.last().map_or(0, |f| last_index(f))
+        self.lock().frames.last().map_or(0, |(f, _)| last_index(f))
     }
 
     /// Whether nothing is published yet.
@@ -129,12 +139,12 @@ impl Journal {
             None => 0,
             Some(h) => {
                 let at = h.index();
-                let have = g.frames.last().map_or(0, |f| last_index(f));
+                let have = g.frames.last().map_or(0, |(f, _)| last_index(f));
                 if at > have {
                     return Err(Resume::Behind { have });
                 }
-                let pos = g.frames.partition_point(|f| last_index(f) < at);
-                let frame = &g.frames[pos];
+                let pos = g.frames.partition_point(|(f, _)| last_index(f) < at);
+                let frame = &g.frames[pos].0;
                 if last_index(frame) != at {
                     return Err(Resume::NotABoundary);
                 }
@@ -166,13 +176,13 @@ impl Cursor {
         let g = self.journal.lock();
         match self.next {
             0 => 0,
-            n => g.frames.get(n - 1).map_or(0, |f| last_index(f)),
+            n => g.frames.get(n - 1).map_or(0, |(f, _)| last_index(f)),
         }
     }
 
     /// The next frame, blocking until one is published; `None` once the
     /// journal is stopped and drained.
-    pub fn next_frame(&mut self) -> Option<Arc<Vec<Sealed>>> {
+    pub fn next_frame(&mut self) -> Option<Published> {
         let mut g = self.journal.lock();
         loop {
             if let Some(f) = g.frames.get(self.next) {
