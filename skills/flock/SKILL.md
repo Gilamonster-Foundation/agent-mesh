@@ -44,7 +44,7 @@ session starts pending and can sign nothing until a hand-off activates it.
 
 ## Built vs planned
 
-Built (plan steps 1–4):
+Built (plan steps 1–4 and the read-only herdr view, 4c):
 - the detached author `Assertion` (`agent-mesh-protocol`);
 - the `agent-mesh-flock` model crate: schema, admission table, board fold, and
   real `invite`, `session-start`, `session-end`, `epoch` and `renewal` bodies;
@@ -83,14 +83,22 @@ Built (plan steps 1–4):
   users, not other harnesses under the same account (agent-bridle's job). The
   CLI side so far is the library (`call`/`CtlReq`); the user-facing commands
   that use it come in step 7. Unix only.
+- **`Snapshot`** (`agent-mesh-flock-server`): reads and replays the log with no
+  lock and no repair, stopping at a torn tail, so it runs beside a live server;
+- **`amesh flock panes --name <flock> [--tab <id>] [--map member=pane]`**:
+  read-only. Joins the roster to `herdr pane list` (a member is the pane whose
+  label is its name, within `--tab`; `--map` overrides) and prints herdr's
+  claims next to the verified flock state. It only ever lists; it never
+  prompts, sends keys or renames. Off-roster panes are never shown.
 
 **Planned, not built:** the epoch bump when a member is removed from the
 roster; operator device keys listed per device in the roster, and with them operator
 approval of a shepherd or delegate hand-off (refused today), plus
-operator-signed events; the pane announcement (`amesh flock panes` linking a pane to a session); `watch`; the rest of
-the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; only
-`init`, `serve`, `invite` and `session` exist); `amesh-tui`; attaching from another host; the
-`amesh-herdr` adapter; native newt receive. Until they land, lanes run on files
+operator-signed events; the pane announcement (a session telling the log which herdr pane it is in); `watch`; the rest of
+the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; only `init`,
+`serve`, `invite`, `session` and `panes` exist); `amesh-tui`; attaching from another host; the
+`amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native
+newt receive. Until they land, lanes run on files
 as the herdr-flock skill describes. Status: epic #109.
 
 ## Keep this current
