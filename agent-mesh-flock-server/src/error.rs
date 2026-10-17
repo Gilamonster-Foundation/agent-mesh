@@ -31,6 +31,9 @@ pub enum ServerError {
     /// The signature did not resolve to a signer the server accepts.
     #[error("signer refused: {0}")]
     Signer(String),
+    /// A session, invite, challenge or epoch rule refused the request.
+    #[error("session rule: {0}")]
+    Session(String),
     /// The admission table refused the event.
     #[error("refused: {0:?}")]
     Refused(Refusal),

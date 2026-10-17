@@ -65,12 +65,48 @@ session key delegated by the server does not qualify). Recovery checks the
 signature, the parent, the contiguous index, that the record names its event
 and certificate, and that the epoch moves only with an `epoch` event, by one.
 
+## Sessions and the epoch ratchet
+
+Who may sign is derived from the log, never stored: `Sessions` is rebuilt by
+replaying admitted events in order, so a session that ended at index 9 was
+still a session at index 8, and today's flags are never applied to old events.
+
+| Call | What happens |
+|---|---|
+| `invite(member)` | `invite` event with only a **digest** of a random token; the token is returned once and never stored, so a log reader cannot redeem it |
+| `enroll_begin(token, member, pubkey)` | token, claimed member and key checked; the server mints a `PossessionChallenge` for that key |
+| `enroll_finish(challenge, proof)` | challenge consumed, key certified, `session-start` admitted (which consumes the token), one frame |
+| `end_session(session, reason)` | `session-end` then `epoch`, **one frame** |
+| `renewal_challenges()` | after a bump, a challenge for each live session behind the epoch |
+| `renew_begin(last_cert)` | the `renew` entry: an earlier logged certificate of a session that has not ended |
+| `renew_finish(challenge, proof)` | new certificate, `renewal` event |
+
+A session must sign with a certificate the log recorded for it (its
+`session-start` or a renewal); a certificate another session issued fails even
+if it verifies. A `session-end` is admitted only together with its `epoch`
+bump: `admit` refuses it alone and `Server::open` refuses a frame that holds
+one without the other.
+
+A session certificate is `delegate_external` with `valid_for_generation =
+Only({epoch})`, so an old-epoch certificate fails `verify_at`. Each admission
+record names the certificate its event was verified with, so a reader checks
+any old event at its own epoch. Challenges are held in memory, consumed once,
+and bound to a session and epoch: an answer that races a bump or a session end
+is refused. A restart forgets outstanding challenges; the holder asks again.
+
+A member's first session is active. Any later session for the same member is
+admitted `pending` and signs nothing (the hand-off that activates it is the
+next step). Server-signed events are checked against the log too: a
+`session-start` must consume an unconsumed invite for its member and carry an
+epoch-bounded certificate for the key it names.
+
 ## Boundaries
 
-- Signers come from a `SignerResolver`. The default accepts only the server's
-  own key; invites, sessions, epoch bumps and hand-off (step 4) supply the
-  session table.
-- No `watch` (step 6), no CLI beyond `amesh flock init`, no MCP or TUI.
+- The entry points are plain calls; the SSH stream that carries them is step 5.
+  Who may ask for an `invite` (the roster role) is for that caller to establish.
+- Not yet: hand-off and its approval, the zombie refusal, `watch` (step 6), the
+  epoch bump when a member leaves the roster, operator-class signers, any CLI
+  beyond `amesh flock init`, MCP or TUI.
 - Unix only (file modes and `flock(2)`); on other hosts the crate builds, the
   key and lock functions return an unsupported-host error, and the Unix tests
   are not compiled.

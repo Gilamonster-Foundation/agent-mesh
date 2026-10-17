@@ -1,0 +1,343 @@
+//! The session table, derived from the admitted log in replay order.
+//!
+//! Nothing here is stored: every reader that folds the same log in the same
+//! order gets the same table, so a session that ended at index 9 was still a
+//! session at index 8. Two questions are answered from it: who signed an
+//! event ([`Sessions::resolve`]) and whether a server event is legal given
+//! what came before ([`Sessions::check`]).
+
+use crate::frame::cert_cid;
+use agent_mesh_flock::{Board, Body, Event, Signer, SignerClass};
+use agent_mesh_protocol::{Assertion, Caveats, CertChain, Issuer, Scope};
+use content_addressable::{ContentId, RawContentId};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Where a session stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    /// May sign.
+    Active,
+    /// A replacement: signs nothing until a hand-off activates it.
+    Pending,
+    /// Over. Never renewed, never signs.
+    Ended,
+}
+
+#[derive(Debug, Clone)]
+struct Session {
+    member: String,
+    pubkey: [u8; 32],
+    start: ContentId,
+    status: Status,
+    certs: BTreeSet<ContentId>,
+    epoch: u64,
+}
+
+#[derive(Debug, Clone)]
+struct Invite {
+    member: String,
+    consumed: bool,
+}
+
+/// An invite as the server looks it up by token digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InviteInfo {
+    /// The `invite` event.
+    pub event: ContentId,
+    /// The member it enrolls.
+    pub member: String,
+    /// A `session-start` already consumed it.
+    pub consumed: bool,
+}
+
+/// A live session as the server renews it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionInfo {
+    /// The member.
+    pub member: String,
+    /// Its public key.
+    pub pubkey: [u8; 32],
+    /// Its `session-start` event.
+    pub start: ContentId,
+    /// Its status.
+    pub status: Status,
+    /// The epoch of its latest certificate.
+    pub epoch: u64,
+}
+
+/// Invites and sessions, rebuilt from the log.
+#[derive(Debug, Clone, Default)]
+pub struct Sessions {
+    invites: BTreeMap<ContentId, Invite>,
+    verifiers: BTreeMap<RawContentId, ContentId>,
+    sessions: BTreeMap<String, Session>,
+    seen: BTreeSet<String>,
+}
+
+/// The digest an `invite` event carries for a bearer token.
+#[must_use]
+pub fn token_digest(token: &str) -> RawContentId {
+    RawContentId::from_content(token.as_bytes())
+}
+
+/// What a session certificate must be: `top`, bounded to `epoch`.
+fn bounded(epoch: u64) -> Caveats {
+    Caveats {
+        valid_for_generation: Scope::only([epoch]),
+        ..Caveats::top()
+    }
+}
+
+/// The metadata caveats for a session certificate valid at `epoch` only.
+#[must_use]
+pub fn session_caveats(epoch: u64) -> Caveats {
+    bounded(epoch)
+}
+
+fn cert_ok(cert: &CertChain, session: &str, epoch: u64, server: &[u8; 32]) -> Result<(), String> {
+    if cert.agent_fingerprint().hex() != session {
+        return Err("certificate is for another key".into());
+    }
+    cert.verify_at(epoch)
+        .map_err(|e| format!("certificate: {e}"))?;
+    match &cert.issuer {
+        Issuer::Agent { pubkey, .. } if pubkey == server => {}
+        _ => return Err("certificate is not issued by the server key".into()),
+    }
+    if cert.metadata.caveats != bounded(epoch) {
+        return Err("certificate is not bounded to this epoch alone".into());
+    }
+    Ok(())
+}
+
+fn refs_are(ev: &Event, want: &[(&str, ContentId)]) -> Result<(), String> {
+    let got: Vec<_> = ev.refs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    if got == want {
+        Ok(())
+    } else {
+        Err("references are not the ones this event takes".into())
+    }
+}
+
+impl Sessions {
+    /// Who signed `event`: the server, or a session that is not ended, with
+    /// a certificate valid at `epoch`.
+    ///
+    /// # Errors
+    /// Why the signature is not acceptable.
+    pub fn resolve(
+        &self,
+        sig: &Assertion,
+        event: &ContentId,
+        server: &[u8; 32],
+        epoch: u64,
+    ) -> Result<Signer, String> {
+        let fingerprint = sig.author().agent_fingerprint();
+        let class = if &sig.author().agent_pubkey == server {
+            SignerClass::Server
+        } else {
+            let s = self
+                .sessions
+                .get(&fingerprint.hex())
+                .ok_or("not a session of this flock")?;
+            if s.status == Status::Ended {
+                return Err("session ended".into());
+            }
+            // only a certificate the log recorded for this session (its
+            // session-start or a renewal): a peer cannot certify it
+            let presented = cert_cid(sig.author()).map_err(|e| e.to_string())?;
+            if !s.certs.contains(&presented) {
+                return Err("certificate was not issued to this session by the server".into());
+            }
+            SignerClass::Session {
+                member: s.member.clone(),
+                pending: s.status == Status::Pending,
+            }
+        };
+        sig.verify(event, server, epoch)
+            .map_err(|e| e.to_string())?;
+        Ok(Signer { fingerprint, class })
+    }
+
+    /// Whether a server event is legal now, at record epoch `epoch`.
+    ///
+    /// # Errors
+    /// Why it is not.
+    pub fn check(
+        &self,
+        board: &Board,
+        ev: &Event,
+        epoch: u64,
+        server: &[u8; 32],
+    ) -> Result<(), String> {
+        let live = |session: &str| {
+            self.sessions
+                .get(session)
+                .filter(|s| s.status != Status::Ended)
+                .ok_or_else(|| String::from("no such live session"))
+        };
+        match &ev.body {
+            Body::Invite { member, verifier } => {
+                if !board.members().iter().any(|m| &m.name == member) {
+                    return Err("invite for a member not on the roster".into());
+                }
+                refs_are(ev, &[])?;
+                if self.verifiers.contains_key(verifier) {
+                    return Err("invite verifier already in the log".into());
+                }
+            }
+            Body::SessionStart {
+                member,
+                session,
+                cert,
+            } => {
+                let (id, invite) = ev
+                    .refs
+                    .get("invite")
+                    .and_then(|id| self.invites.get(id).map(|i| (*id, i)))
+                    .ok_or("session-start names no known invite")?;
+                refs_are(ev, &[("invite", id)])?;
+                if invite.consumed {
+                    return Err("invite already consumed".into());
+                }
+                if &invite.member != member {
+                    return Err("invite is for another member".into());
+                }
+                if self.sessions.contains_key(session) {
+                    return Err("session key already enrolled".into());
+                }
+                cert_ok(cert, session, epoch, server)?;
+            }
+            Body::SessionEnd { session, .. } => {
+                let s = live(session)?;
+                refs_are(ev, &[("session", s.start)])?;
+            }
+            Body::Epoch { epoch: e } => {
+                refs_are(ev, &[])?;
+                if *e != epoch {
+                    return Err("epoch body is not the record epoch".into());
+                }
+            }
+            Body::Renewal {
+                session,
+                epoch: e,
+                cert,
+            } => {
+                let s = live(session)?;
+                refs_are(ev, &[("session", s.start)])?;
+                if *e != epoch {
+                    return Err("renewal is not for the current epoch".into());
+                }
+                if s.epoch >= epoch {
+                    return Err("session is already certified for this epoch".into());
+                }
+                cert_ok(cert, session, epoch, server)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Record an admitted server event. Call only after [`Self::check`].
+    ///
+    /// # Errors
+    /// A certificate that cannot be encoded.
+    pub fn observe(&mut self, id: ContentId, ev: &Event, epoch: u64) -> Result<(), String> {
+        match &ev.body {
+            Body::Invite { member, verifier } => {
+                self.verifiers.insert(*verifier, id);
+                self.invites.insert(
+                    id,
+                    Invite {
+                        member: member.clone(),
+                        consumed: false,
+                    },
+                );
+            }
+            Body::SessionStart {
+                member,
+                session,
+                cert,
+            } => {
+                if let Some(i) = ev.refs.get("invite").and_then(|i| self.invites.get_mut(i)) {
+                    i.consumed = true;
+                }
+                let status = if self.seen.insert(member.clone()) {
+                    Status::Active
+                } else {
+                    Status::Pending
+                };
+                let certs = BTreeSet::from([cert_cid(cert).map_err(|e| e.to_string())?]);
+                self.sessions.insert(
+                    session.clone(),
+                    Session {
+                        member: member.clone(),
+                        pubkey: cert.agent_pubkey,
+                        start: id,
+                        status,
+                        certs,
+                        epoch,
+                    },
+                );
+            }
+            Body::SessionEnd { session, .. } => {
+                if let Some(s) = self.sessions.get_mut(session) {
+                    s.status = Status::Ended;
+                }
+            }
+            Body::Renewal {
+                session,
+                epoch,
+                cert,
+            } => {
+                if let Some(s) = self.sessions.get_mut(session) {
+                    s.certs.insert(cert_cid(cert).map_err(|e| e.to_string())?);
+                    s.epoch = *epoch;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// The invite a token digest names.
+    #[must_use]
+    pub fn invite(&self, verifier: &RawContentId) -> Option<InviteInfo> {
+        let event = *self.verifiers.get(verifier)?;
+        let i = self.invites.get(&event)?;
+        Some(InviteInfo {
+            event,
+            member: i.member.clone(),
+            consumed: i.consumed,
+        })
+    }
+
+    /// One session.
+    #[must_use]
+    pub fn get(&self, session: &str) -> Option<SessionInfo> {
+        self.sessions.get(session).map(|s| SessionInfo {
+            member: s.member.clone(),
+            pubkey: s.pubkey,
+            start: s.start,
+            status: s.status,
+            epoch: s.epoch,
+        })
+    }
+
+    /// Whether `cert` is one the log recorded for `session`.
+    #[must_use]
+    pub fn issued(&self, session: &str, cert: &ContentId) -> bool {
+        self.sessions
+            .get(session)
+            .is_some_and(|s| s.certs.contains(cert))
+    }
+
+    /// Every session that has not ended: fingerprint, public key and the
+    /// epoch of its latest certificate.
+    pub fn live(&self) -> impl Iterator<Item = (&str, [u8; 32], u64)> {
+        self.sessions
+            .iter()
+            .filter(|(_, s)| s.status != Status::Ended)
+            .map(|(k, s)| (k.as_str(), s.pubkey, s.epoch))
+    }
+}

@@ -1,7 +1,7 @@
 //! `amesh flock init`: mints the server key and genesis, once.
 #![cfg(unix)]
 
-use agent_mesh_flock_server::{Server, ServerOnly};
+use agent_mesh_flock_server::Server;
 use assert_cmd::Command;
 use predicates::str::contains;
 use std::os::unix::fs::PermissionsExt;
@@ -36,7 +36,7 @@ fn init_mints_a_0600_key_and_a_genesis_the_server_reopens() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o600);
-    let server = Server::open(&dir, Box::new(ServerOnly)).unwrap();
+    let server = Server::open(&dir).unwrap();
     assert!(String::from_utf8(out)
         .unwrap()
         .contains(&server.flock().to_string()));

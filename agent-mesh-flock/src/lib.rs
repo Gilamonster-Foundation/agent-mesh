@@ -13,5 +13,5 @@ mod signer;
 
 pub use admission::{admit, ConflictKind, Refusal, Verdict};
 pub use board::{AttemptState, AttemptView, Board, Entry, LaneView, LogEntry};
-pub use event::{Body, Event, FileRef, Genesis, Kind, Member, Outcome, Role};
+pub use event::{Body, EndReason, Event, FileRef, Genesis, Kind, Member, Outcome, Role};
 pub use signer::{Signer, SignerClass};

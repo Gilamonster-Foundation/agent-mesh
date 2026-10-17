@@ -1,7 +1,8 @@
 //! Golden ids: each kind's node id is pinned, like content-addressable's
 //! vectors. A change here is a change to the wire identity of the flock.
 
-use agent_mesh_flock::{Body, Event, FileRef, Kind, Outcome};
+use agent_mesh_flock::{Body, EndReason, Event, FileRef, Kind, Outcome};
+use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, UserKey};
 use content_addressable::{ContentAddressable, ContentId, MerkleNode, RawContentId};
 use std::collections::BTreeMap;
 
@@ -136,29 +137,28 @@ fn vectors() -> Vec<(&'static str, MerkleNode<Event>)> {
             "nudged",
             event(Kind::Nudged, Body::Nudged { target: s("h1") }, &[]),
         ),
-        (
-            "epoch",
-            event(Kind::Epoch, Body::Server { note: s("1") }, &[]),
-        ),
-        (
-            "renewal",
-            event(Kind::Renewal, Body::Server { note: s("1") }, &[]),
-        ),
-        (
-            "session-start",
-            event(Kind::SessionStart, Body::Server { note: s("h1") }, &[]),
-        ),
+        ("epoch", event(Kind::Epoch, Body::Epoch { epoch: 1 }, &[])),
         (
             "session-end",
-            event(Kind::SessionEnd, Body::Server { note: s("h1") }, &[]),
-        ),
-        (
-            "handoff",
-            event(Kind::Handoff, Body::Server { note: s("h1") }, &[]),
+            event(
+                Kind::SessionEnd,
+                Body::SessionEnd {
+                    session: s("bb"),
+                    reason: EndReason::Lost,
+                },
+                &[("session", "start")],
+            ),
         ),
         (
             "invite",
-            event(Kind::Invite, Body::Server { note: s("h1") }, &[]),
+            event(
+                Kind::Invite,
+                Body::Invite {
+                    member: s("h1"),
+                    verifier: RawContentId::from_content(b"token"),
+                },
+                &[],
+            ),
         ),
     ]
 }
@@ -218,27 +218,15 @@ const GOLDEN: &[(&str, &str)] = &[
     ),
     (
         "epoch",
-        "bafyr4icnupwrdyk33dypkeymaytqvkykxpt5gspegqdrfsyo7drjc2yib4",
-    ),
-    (
-        "renewal",
-        "bafyr4igazvtvs4jnhzx53d3shb4iumhr3g7a7o3qpxlnn6uaww75ycbgje",
-    ),
-    (
-        "session-start",
-        "bafyr4ibi5grrrg6z47gczbkjflrpdjjr57n4dqxi5csdb7vtmxu5yuhmre",
+        "bafyr4iapi4lxjb44425yr3blpzgmwxtfcpdusv7izooi7iknjppllkskta",
     ),
     (
         "session-end",
-        "bafyr4ievv7abhebosq7irznmmsi4nkhnjm3lgoxodagc65u6xosist5gae",
-    ),
-    (
-        "handoff",
-        "bafyr4ihvomhnpo2xavrtrpbafrmq6d65uyalrd7afv3mxuiopgwym4gl74",
+        "bafyr4ifj6aarj76aigbro5eq2xapkxq7ofzkeom7ihlhezzrvjfg6mf2am",
     ),
     (
         "invite",
-        "bafyr4ickt72krfsi5mhepnizqny7mp5bdnkifzfqhjdqh5pcwwqsob37si",
+        "bafyr4igvh2rrluj5m7ljyen74vu3vo4rhatc2jbh7cqqeafhy27ppds4ue",
     ),
 ];
 
@@ -266,4 +254,53 @@ fn two_signers_of_an_identical_body_get_different_ids() {
     let b = a.clone();
     a.payload.author = "bb".repeat(32);
     assert_ne!(a.content_id().unwrap(), b.content_id().unwrap());
+}
+
+/// Bodies that carry a certificate cannot be pinned (keys are generated at
+/// runtime); pin what can be: the id follows the certificate, and the kind.
+#[test]
+fn certificate_bearing_bodies_bind_the_certificate() {
+    let user = UserKey::generate();
+    let meta = |r: &str| AgentMetadata {
+        role: r.into(),
+        host: "h".into(),
+        capabilities: vec![],
+        issued_at: "2026-10-15T00:00:00Z".into(),
+        expires_at: None,
+        caveats: Caveats::top(),
+    };
+    let (a, b) = (
+        AgentKey::issue(&user, meta("a")),
+        AgentKey::issue(&user, meta("b")),
+    );
+    let start = |k: &AgentKey| {
+        event(
+            Kind::SessionStart,
+            Body::SessionStart {
+                member: "h1".into(),
+                session: "bb".into(),
+                cert: k.cert().clone(),
+            },
+            &[("invite", "invite")],
+        )
+        .content_id()
+        .unwrap()
+    };
+    assert_eq!(start(&a), start(&a));
+    assert_ne!(start(&a), start(&b));
+    let renew = |k: &AgentKey, epoch| {
+        event(
+            Kind::Renewal,
+            Body::Renewal {
+                session: "bb".into(),
+                epoch,
+                cert: k.cert().clone(),
+            },
+            &[("session", "start")],
+        )
+        .content_id()
+        .unwrap()
+    };
+    assert_ne!(renew(&a, 1), renew(&a, 2));
+    assert_ne!(renew(&a, 1), renew(&b, 1));
 }
