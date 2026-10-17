@@ -1,0 +1,200 @@
+//! The published log, the cursor, the follower and who may open a stream.
+#![cfg(unix)]
+mod support;
+
+use agent_mesh_flock::EndReason;
+use agent_mesh_flock_server::wire::StreamChallenge;
+use agent_mesh_flock_server::{CrashPlan, FollowError, Follower, Head, Resume, Server};
+use agent_mesh_protocol::{AgentKey, Assertion};
+use content_addressable::ContentAddressable;
+use support::{enroll, operator, Env};
+
+/// Admit one more brief from `key`; returns the new admission count.
+fn brief(env: &mut Env, server: &mut Server, key: &AgentKey, lane: &str) -> u64 {
+    let prev = server.board().head_of(&key.fingerprint().hex());
+    let (node, sig) = env.brief(key, prev, lane);
+    server.admit(node, sig).unwrap();
+    server.admitted()
+}
+
+/// Every published frame, oldest first.
+fn frames(server: &Server) -> Vec<std::sync::Arc<Vec<agent_mesh_flock_server::Sealed>>> {
+    let j = server.journal();
+    let mut c = j.cursor_from(None).unwrap();
+    let mut out = vec![];
+    while c.delivered() < j.len() {
+        out.push(c.next_frame().unwrap());
+    }
+    out
+}
+
+#[test]
+fn an_event_appended_mid_replay_is_delivered_exactly_once() {
+    let mut env = Env::new();
+    let mut server = env.open();
+    let shep = enroll(&mut server, "shep");
+    for i in 0..3 {
+        brief(&mut env, &mut server, &shep.key, &format!("a{i}"));
+    }
+    let j = server.journal();
+    let mut cursor = j.cursor_from(None).unwrap();
+    let mut seen = vec![];
+    // two frames of the replay, then an append lands mid-replay
+    for _ in 0..2 {
+        seen.extend(
+            cursor
+                .next_frame()
+                .unwrap()
+                .iter()
+                .map(|s| s.record.payload.index),
+        );
+    }
+    brief(&mut env, &mut server, &shep.key, "mid");
+    while cursor.delivered() < server.admitted() {
+        seen.extend(
+            cursor
+                .next_frame()
+                .unwrap()
+                .iter()
+                .map(|s| s.record.payload.index),
+        );
+    }
+    let want: Vec<u64> = (1..=server.admitted()).collect();
+    assert_eq!(seen, want, "every index once, in order");
+}
+
+#[test]
+fn a_cursor_resumes_after_a_signed_head_and_refuses_what_it_cannot_extend() {
+    let mut env = Env::new();
+    let mut server = env.open();
+    let shep = enroll(&mut server, "shep");
+    for i in 0..3 {
+        brief(&mut env, &mut server, &shep.key, &format!("a{i}"));
+    }
+    let all = frames(&server);
+    let head = Head::of(all[2].last().unwrap());
+    let mut c = server.journal().cursor_from(Some(&head)).unwrap();
+    let next = c.next_frame().unwrap();
+    assert_eq!(next[0].record.payload.index, head.index() + 1);
+    // a head from beyond this history: the server is behind
+    let mut ahead = head.clone();
+    ahead.record.payload.index = 99;
+    assert!(matches!(
+        server.journal().cursor_from(Some(&ahead)),
+        Err(Resume::Behind { .. })
+    ));
+    // a head at this index with another record: diverged
+    let mut other = head.clone();
+    other.record.payload.epoch += 7;
+    assert_eq!(
+        server.journal().cursor_from(Some(&other)).err(),
+        Some(Resume::Diverged)
+    );
+    // a head in the middle of a frame is not a resume point
+    let two_event = all.iter().find(|f| f.len() > 1);
+    if let Some(f) = two_event {
+        let mid = Head::of(&f[0]);
+        assert_eq!(
+            server.journal().cursor_from(Some(&mid)).err(),
+            Some(Resume::NotABoundary)
+        );
+    }
+}
+
+#[test]
+fn an_append_that_dies_before_its_fsync_is_never_published() {
+    let mut env = Env::new();
+    let mut server = env.open();
+    let shep = enroll(&mut server, "shep");
+    let before = server.journal().len();
+    server.plan_crash(Some(CrashPlan::BeforeSync));
+    let prev = server.board().head_of(&shep.key.fingerprint().hex());
+    let (node, sig) = env.brief(&shep.key, prev, "lost");
+    assert!(server.admit(node, sig).is_err());
+    assert_eq!(server.journal().len(), before);
+}
+
+#[test]
+fn a_follower_rebuilds_the_flock_and_refuses_a_frame_that_does_not_extend() {
+    let mut env = Env::new();
+    let mut server = env.open();
+    let shep = enroll(&mut server, "shep");
+    for i in 0..3 {
+        brief(&mut env, &mut server, &shep.key, &format!("a{i}"));
+    }
+    let all = frames(&server);
+    let genesis = agent_mesh_flock_server::load_genesis(env.tmp.path())
+        .unwrap()
+        .node;
+    let mut f = Follower::new(&genesis).unwrap();
+    for fr in &all {
+        f.apply(fr).unwrap();
+    }
+    assert_eq!(f.admitted(), server.admitted());
+    assert_eq!(f.board().flock(), server.flock());
+    assert_eq!(
+        f.head(),
+        Some(&Head::of(all.last().unwrap().last().unwrap()))
+    );
+    // a gap (skip a frame) does not extend the head
+    let mut g = Follower::new(&genesis).unwrap();
+    g.apply(&all[0]).unwrap();
+    assert!(matches!(
+        g.apply(&all[2]),
+        Err(FollowError::DoesNotExtend(_))
+    ));
+    // a repeated frame does not extend it either
+    assert!(matches!(
+        f.apply(&all[0]),
+        Err(FollowError::DoesNotExtend(_))
+    ));
+}
+
+fn proof(
+    key: &AgentKey,
+    server: &Server,
+    nonce: u8,
+) -> (
+    Assertion,
+    agent_mesh_flock_server::wire::StreamChallenge,
+    content_addressable::ContentId,
+) {
+    let ch = StreamChallenge {
+        flock: server.flock(),
+        nonce: [nonce; 32],
+    };
+    let id = ch.id().unwrap();
+    (Assertion::sign(key, &id), ch, id)
+}
+
+#[test]
+fn only_an_active_session_of_a_current_member_opens_a_stream() {
+    let env = Env::new();
+    let mut server = env.open();
+    let shep = enroll(&mut server, "shep");
+    let pending = enroll(&mut server, "shep");
+    assert!(pending.pending);
+    let (sig, _, id) = proof(&shep.key, &server, 1);
+    assert_eq!(server.authorize_stream(&sig, &id).unwrap(), shep.session);
+    // a signature over another challenge is no proof for this one
+    let (_, _, other_id) = proof(&shep.key, &server, 2);
+    assert!(server.authorize_stream(&sig, &other_id).is_err());
+    // pending replacement
+    let (sig, _, id) = proof(&pending.key, &server, 3);
+    assert!(server.authorize_stream(&sig, &id).is_err());
+    // certified by the user key, but no session in the log
+    let stranger = operator(&env);
+    let (sig, _, id) = proof(&stranger, &server, 4);
+    assert!(server.authorize_stream(&sig, &id).is_err());
+    // a copied certificate: another key presenting the session's cert chain
+    let thief = AgentKey::from_seed_and_cert(&[9u8; 32], shep.key.cert().clone());
+    assert!(
+        thief.is_err(),
+        "a cert cannot be paired with a foreign seed"
+    );
+    // an ended session
+    let h1 = enroll(&mut server, "h1");
+    server.end_session(&h1.session, EndReason::Closed).unwrap();
+    let (sig, _, id) = proof(&h1.key, &server, 5);
+    assert!(server.authorize_stream(&sig, &id).is_err());
+}

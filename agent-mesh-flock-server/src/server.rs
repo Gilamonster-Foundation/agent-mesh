@@ -4,16 +4,18 @@ use crate::chain::Chain;
 use crate::entry::Held;
 use crate::frame::{Frame, Sealed};
 use crate::init::{load_genesis, KEY_FILE, LOG_FILE, REFUSALS_FILE};
+use crate::journal::Journal;
 use crate::log::Log;
 use crate::refusal::{Reason, RefusalEntry, RefusalRecord};
 use crate::sessions::Sessions;
 use crate::state::{check_frame_shape, Spec, State};
 use crate::{load_server_key, CrashPlan, ServerError};
-use agent_mesh_flock::{Board, ConflictKind, Event, Kind, Refusal};
+use agent_mesh_flock::{Board, ConflictKind, Event, Kind, Refusal, SignerClass};
 use agent_mesh_protocol::{AgentKey, Assertion};
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 /// What an admission returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +40,7 @@ pub struct Server {
     /// design: a restart forgets them and the holder asks again.
     pub(crate) challenges: BTreeMap<[u8; 32], Held>,
     poisoned: bool,
+    journal: Arc<Journal>,
 }
 
 fn enc(e: content_addressable::ContentError) -> ServerError {
@@ -90,6 +93,7 @@ impl Server {
         // only then cut a torn tail.
         let (mut log, frames) = Log::open::<Frame>(&dir.join(LOG_FILE))?;
         let (mut refusal_log, entries) = Log::open::<RefusalEntry>(&dir.join(REFUSALS_FILE))?;
+        let published = frames.iter().map(|(_, f)| f.sealed.clone()).collect();
         let st = rebuild(&genesis.node, server_pub, frames)?;
         let mut refusal_prev = st.board.flock();
         let mut last = 0;
@@ -119,7 +123,48 @@ impl Server {
             refusal_prev,
             challenges: BTreeMap::new(),
             poisoned: false,
+            journal: Journal::new(published),
         })
+    }
+
+    /// The published log, readable without this server's lock.
+    #[must_use]
+    pub fn journal(&self) -> Arc<Journal> {
+        self.journal.clone()
+    }
+
+    /// Whether `proof` is an active session of a current member signing
+    /// `challenge`: what opens a stream. Returns the session's fingerprint.
+    ///
+    /// # Errors
+    /// A signature that does not resolve to a live, certified session; a
+    /// pending or ended session; a member the roster no longer lists.
+    pub fn authorize_stream(
+        &self,
+        proof: &Assertion,
+        challenge: &ContentId,
+    ) -> Result<String, ServerError> {
+        let signer = self
+            .st
+            .sessions
+            .resolve(
+                proof,
+                challenge,
+                &self.st.chain.server_pub,
+                self.st.chain.epoch,
+            )
+            .map_err(ServerError::Signer)?;
+        match signer.class {
+            SignerClass::Session {
+                member,
+                pending: false,
+            } if self.st.board.members().iter().any(|m| m.name == member) => {
+                Ok(signer.fingerprint.hex())
+            }
+            _ => Err(ServerError::Session(
+                "a stream needs an active session of a current member".into(),
+            )),
+        }
     }
 
     /// The flock id.
@@ -216,6 +261,7 @@ impl Server {
         };
         self.append(vec![prepared.sealed.clone()])?;
         self.st.commit(&prepared)?;
+        self.journal.publish(vec![prepared.sealed.clone()]);
         Ok(Receipt {
             index: prepared.sealed.record.payload.index,
             duplicate: false,
@@ -239,8 +285,9 @@ impl Server {
             ids.push(p.id);
             sealed.push(p.sealed);
         }
-        self.append(sealed)?;
+        self.append(sealed.clone())?;
         self.st = next;
+        self.journal.publish(sealed);
         Ok(ids)
     }
 
