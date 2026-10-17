@@ -311,7 +311,11 @@ impl Sessions {
     ) -> Result<(), String> {
         if matches!(sig.author().issuer, Issuer::User(_)) {
             let fp = sig.author().agent_fingerprint();
-            if !board.members().iter().any(|m| m.devices.contains(&fp)) {
+            if !board
+                .members()
+                .iter()
+                .any(|m| m.role == Role::Operator && m.devices.contains(&fp))
+            {
                 return Err(
                     "key is certified by the flock's user but is not a listed operator device"
                         .into(),

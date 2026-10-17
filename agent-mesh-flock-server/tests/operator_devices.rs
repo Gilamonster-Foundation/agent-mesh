@@ -4,8 +4,12 @@
 mod support;
 
 use agent_mesh_flock::{Body, Kind, Member, Refusal, Role};
+use agent_mesh_flock_server::{load_genesis, SignedGenesis, Snapshot, GENESIS_FILE};
 use agent_mesh_flock_server::{Server, ServerError, Status};
+use agent_mesh_protocol::Assertion;
 use agent_mesh_protocol::{AgentKey, Fingerprint, UserKey};
+use content_addressable::canonical::to_canonical_dagcbor;
+use content_addressable::ContentAddressable;
 use support::{approval, enroll, operator, sign_approval, Enrolment, Env};
 
 fn why<T: std::fmt::Debug>(r: Result<T, ServerError>) -> String {
@@ -189,4 +193,97 @@ fn devices_belong_to_operator_members_only() {
         f.server.replace_roster(roster),
         Err(ServerError::Refused(Refusal::DevicesOnNonOperator))
     ));
+}
+
+#[test]
+fn a_signed_genesis_listing_a_device_under_a_helper_is_refused_by_both_readers() {
+    let env = Env::new();
+    let dev = operator(&env);
+    // re-sign the genesis with a device under the helper, as a hostile or
+    // buggy `init` could have written it
+    let mut g = load_genesis(&env.dir()).unwrap();
+    for m in &mut g.node.payload.roster {
+        if m.role == Role::Helper {
+            m.devices = vec![dev.fingerprint()];
+        }
+    }
+    let node = g.node.payload.clone().node();
+    let sig = Assertion::sign(&env.server_key(), &node.content_id().unwrap());
+    let bytes = to_canonical_dagcbor(&SignedGenesis { node, sig }).unwrap();
+    std::fs::write(env.dir().join(GENESIS_FILE), bytes).unwrap();
+    assert!(Server::open(&env.dir()).is_err(), "Server::open");
+    assert!(Snapshot::read(&env.dir()).is_err(), "Snapshot::read");
+}
+
+#[test]
+fn a_shepherd_roster_that_only_reorders_is_admitted_and_reassigning_is_not() {
+    let mut f = flock();
+    let (d1, d2) = (operator(&f.env), operator(&f.env));
+    // two operators, each with a device
+    let mut roster = f.server.board().members().to_vec();
+    roster.push(Member {
+        name: "op2".into(),
+        role: Role::Operator,
+        devices: vec![d2.fingerprint()],
+    });
+    for m in &mut roster {
+        if m.name == "op" {
+            m.devices = vec![d1.fingerprint()];
+        }
+    }
+    f.server.replace_roster(roster).unwrap();
+    let send = |f: &mut Flock, members: Vec<Member>| {
+        let replaces = f.server.board().roster_id();
+        let (n, s) = f.env.event(
+            &f.shep.key,
+            Kind::Roster,
+            None,
+            &[("replaces", replaces)],
+            Body::Roster { members },
+        );
+        f.server.admit(n, s)
+    };
+    // reordered members: admitted
+    let mut reordered = f.server.board().members().to_vec();
+    reordered.reverse();
+    send(&mut f, reordered).unwrap();
+    // swapping which operator holds which device, adding or removing one: locked
+    let swap = |mut ms: Vec<Member>| {
+        let (a, b) = (
+            ms.iter().position(|m| m.name == "op").unwrap(),
+            ms.iter().position(|m| m.name == "op2").unwrap(),
+        );
+        let (da, db) = (ms[a].devices.clone(), ms[b].devices.clone());
+        ms[a].devices = db;
+        ms[b].devices = da;
+        ms
+    };
+    let cur = f.server.board().members().to_vec();
+    let mut removed = cur.clone();
+    removed
+        .iter_mut()
+        .find(|m| m.name == "op2")
+        .unwrap()
+        .devices
+        .clear();
+    let mut added = cur.clone();
+    added
+        .iter_mut()
+        .find(|m| m.name == "op")
+        .unwrap()
+        .devices
+        .push(d2.fingerprint());
+    for (what, ms) in [
+        ("reassigned", swap(cur.clone())),
+        ("removed", removed),
+        ("added", added),
+    ] {
+        assert!(
+            matches!(
+                send(&mut f, ms),
+                Err(ServerError::Refused(Refusal::DevicesLocked))
+            ),
+            "{what}"
+        );
+    }
 }

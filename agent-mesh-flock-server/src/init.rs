@@ -54,11 +54,7 @@ pub fn init(dir: &Path, user: &UserKey, spec: InitSpec) -> Result<ContentId, Ser
             return Err(ServerError::AlreadyInitialised(name.into()));
         }
     }
-    if spec
-        .roster
-        .iter()
-        .any(|m| m.role != agent_mesh_flock::Role::Operator && !m.devices.is_empty())
-    {
+    if !agent_mesh_flock::devices_well_formed(&spec.roster) {
         return Err(ServerError::Session(
             "devices belong to operator members only".into(),
         ));
@@ -124,6 +120,11 @@ pub fn load_genesis(dir: &Path) -> Result<SignedGenesis, ServerError> {
     if g.sig.author() != cert {
         return Err(bad(
             "signed by a key that is not the server certificate".into()
+        ));
+    }
+    if !agent_mesh_flock::devices_well_formed(&g.node.payload.roster) {
+        return Err(bad(
+            "devices listed under a member that is not an operator".into()
         ));
     }
     let flock = g.node.content_id().map_err(enc)?;

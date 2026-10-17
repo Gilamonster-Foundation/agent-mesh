@@ -7,8 +7,8 @@
 use crate::board::Board;
 use crate::event::{Body, Event, Kind, Member, Role};
 use crate::signer::{Signer, SignerClass};
-use agent_mesh_protocol::Fingerprint;
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
+use std::collections::BTreeMap;
 
 /// Why an event is refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,22 +121,35 @@ fn decide(board: &Board, node: &MerkleNode<Event>, signer: &Signer) -> Result<Ve
     })
 }
 
-/// Operator `devices`: only on operator members, and changed only by the
-/// server (a shepherd's roster must carry the list the roster has now).
-fn check_devices(board: &Board, new: &[Member], signer: &Signer) -> Result<(), Refusal> {
-    if new
+/// Devices belong to operator members only. Every reader of a roster (the
+/// genesis loader, the roster check) uses this one rule.
+#[must_use]
+pub fn devices_well_formed(members: &[Member]) -> bool {
+    members
         .iter()
-        .any(|m| m.role != Role::Operator && !m.devices.is_empty())
-    {
+        .all(|m| m.role == Role::Operator || m.devices.is_empty())
+}
+
+/// Device bindings by member name, each list sorted: roster order and device
+/// order are not part of the binding.
+fn bindings(ms: &[Member]) -> BTreeMap<&str, Vec<[u8; 32]>> {
+    ms.iter()
+        .filter(|m| !m.devices.is_empty())
+        .map(|m| {
+            let mut d: Vec<_> = m.devices.iter().map(|f| f.0).collect();
+            d.sort_unstable();
+            (m.name.as_str(), d)
+        })
+        .collect()
+}
+
+/// Operator `devices`: only on operator members, and changed only by the
+/// server (a shepherd's roster must carry the bindings the roster has now).
+fn check_devices(board: &Board, new: &[Member], signer: &Signer) -> Result<(), Refusal> {
+    if !devices_well_formed(new) {
         return Err(Refusal::DevicesOnNonOperator);
     }
-    let listed = |ms: &[Member]| -> Vec<(String, Vec<Fingerprint>)> {
-        ms.iter()
-            .filter(|m| !m.devices.is_empty())
-            .map(|m| (m.name.clone(), m.devices.clone()))
-            .collect()
-    };
-    if signer.class != SignerClass::Server && listed(new) != listed(board.members()) {
+    if signer.class != SignerClass::Server && bindings(new) != bindings(board.members()) {
         return Err(Refusal::DevicesLocked);
     }
     Ok(())
