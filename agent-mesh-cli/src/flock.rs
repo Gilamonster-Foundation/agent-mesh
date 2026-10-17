@@ -220,11 +220,12 @@ fn addressed_to(snap: &Snapshot, attempt: &AttemptView, member: &str) -> bool {
         .is_some_and(|e| matches!(&e.event.body, Body::Brief { to, .. } if to == member))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))] // flock init is unix-only
 mod tests {
     use super::*;
     use agent_mesh_flock::EndReason;
     use agent_mesh_flock_server::Server;
+    use agent_mesh_protocol::Fingerprint;
     use ed25519_dalek::{Signer as _, SigningKey};
     use rand::rngs::OsRng;
     use tempfile::TempDir;
@@ -246,10 +247,13 @@ mod tests {
         (dir, server)
     }
 
-    /// Enroll a fresh key for `member`; returns its session id.
-    fn enroll(server: &mut Server, member: &str) -> String {
+    fn session_id(sk: &SigningKey) -> String {
+        Fingerprint::of_bytes(&sk.verifying_key().to_bytes()).hex()
+    }
+
+    /// Enroll `sk` for `member`; returns its session id.
+    fn enroll(server: &mut Server, member: &str, sk: &SigningKey) -> String {
         let invite = server.invite(member).unwrap();
-        let sk = SigningKey::generate(&mut OsRng);
         let ch = server
             .enroll_begin(&invite.token, member, sk.verifying_key().to_bytes())
             .unwrap();
@@ -267,30 +271,31 @@ mod tests {
     }
 
     /// PR #126: sessions iterate by fingerprint, so a pending replacement
-    /// that sorts before the active holder used to hide it. Retry fresh
-    /// flocks until the adverse order (active id > pending id) comes up; each
-    /// attempt is decided by the ids it got, not by time.
+    /// that sorts before the active holder used to hide it. Two keys are
+    /// chosen up front and the larger id enrolls first (active), the smaller
+    /// second (pending): the adverse order, every run.
     #[test]
     fn a_pending_replacement_that_sorts_first_does_not_hide_the_active_holder() {
-        for _ in 0..64 {
-            let (dir, mut server) = flock();
-            let active = enroll(&mut server, "h1");
-            let pending = enroll(&mut server, "h1");
-            if active > pending {
-                let row = row(&dir, "h1");
-                assert!(row.contains("session active (+1 pending)"), "{row}");
-                return;
-            }
-        }
-        panic!("no adverse fingerprint ordering in 64 tries");
+        let mut keys = [
+            SigningKey::generate(&mut OsRng),
+            SigningKey::generate(&mut OsRng),
+        ];
+        keys.sort_by_key(session_id);
+        let [small, large] = keys;
+        let (dir, mut server) = flock();
+        let active = enroll(&mut server, "h1", &large);
+        let pending = enroll(&mut server, "h1", &small);
+        assert!(active > pending, "fixture: the adverse order");
+        let row = row(&dir, "h1");
+        assert!(row.contains("session active (+1 pending)"), "{row}");
     }
 
     #[test]
     fn a_member_with_only_a_pending_session_shows_pending() {
         let (dir, mut server) = flock();
-        let first = enroll(&mut server, "h1");
+        let first = enroll(&mut server, "h1", &SigningKey::generate(&mut OsRng));
         server.end_session(&first, EndReason::Closed).unwrap();
-        enroll(&mut server, "h1"); // any session after the first starts pending
+        enroll(&mut server, "h1", &SigningKey::generate(&mut OsRng)); // any session after the first starts pending
         let row = row(&dir, "h1");
         assert!(row.contains("session pending"), "{row}");
         assert!(!row.contains("active"), "{row}");
