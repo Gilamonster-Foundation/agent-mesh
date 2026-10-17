@@ -44,7 +44,7 @@ session starts pending and can sign nothing until a hand-off activates it.
 
 ## Built vs planned
 
-Built (plan steps 1–4):
+Built (plan steps 1–4 and the read-only herdr view, 4c):
 - the detached author `Assertion` (`agent-mesh-protocol`);
 - the `agent-mesh-flock` model crate: schema, admission table, board fold, and
   real `invite`, `session-start`, `session-end`, `epoch` and `renewal` bodies;
@@ -72,14 +72,22 @@ Built (plan steps 1–4):
   the `epoch` bump. The new session's first event must have `prev = handoff`;
   only a member's current holder can be handed off, so competing hand-offs
   yield one winner.
+- **`Snapshot`** (`agent-mesh-flock-server`): reads and replays the log with no
+  lock and no repair, stopping at a torn tail, so it runs beside a live server;
+- **`amesh flock panes --name <flock> [--tab <id>] [--map member=pane]`**:
+  read-only. Joins the roster to `herdr pane list` (a member is the pane whose
+  label is its name, within `--tab`; `--map` overrides) and prints herdr's
+  claims next to the verified flock state. It only ever lists; it never
+  prompts, sends keys or renames. Off-roster panes are never shown.
 
 **Planned, not built:** the epoch bump when a member is removed from the
 roster; operator device keys listed per device in the roster, and with them operator
 approval of a shepherd or delegate hand-off (refused today), plus
 operator-signed events; `amesh flock session` (the session process); `watch`; the rest of
-the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; `init`
-is still the only subcommand); `amesh-tui`; attaching from another host; the
-`amesh-herdr` adapter; native newt receive. Until they land, lanes run on files
+the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; only `init`
+and `panes` exist); `amesh-tui`; attaching from another host; the
+`amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native
+newt receive. Until they land, lanes run on files
 as the herdr-flock skill describes. Status: epic #109.
 
 ## Keep this current
