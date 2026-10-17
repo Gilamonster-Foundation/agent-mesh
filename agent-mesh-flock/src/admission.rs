@@ -5,8 +5,9 @@
 //! references, then who may sign what.
 
 use crate::board::Board;
-use crate::event::{Body, Event, Kind, Role};
+use crate::event::{Body, Event, Kind, Member, Role};
 use crate::signer::{Signer, SignerClass};
+use agent_mesh_protocol::Fingerprint;
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
 
 /// Why an event is refused.
@@ -51,6 +52,10 @@ pub enum Refusal {
     HeadMismatch,
     /// `replaces` is not the current roster.
     StaleRoster,
+    /// Only a server-signed roster changes operator devices.
+    DevicesLocked,
+    /// `devices` on a member that is not an operator.
+    DevicesOnNonOperator,
 }
 
 /// An event admitted but flagged: it never replaces the first.
@@ -104,6 +109,9 @@ fn decide(board: &Board, node: &MerkleNode<Event>, signer: &Signer) -> Result<Ve
         return Err(Refusal::BodyKindMismatch);
     }
     let member = signer_member(board, ev.kind, signer)?;
+    if let Body::Roster { members } = &ev.body {
+        check_devices(board, members, signer)?;
+    }
     writer_chain(board, ev, signer)?;
     let target = check_refs(board, ev)?;
     let closes = apply_table(board, ev, member, target)?;
@@ -111,6 +119,27 @@ fn decide(board: &Board, node: &MerkleNode<Event>, signer: &Signer) -> Result<Ve
         Some(first) => Verdict::Conflict(ConflictKind::SecondCloser { first }),
         None => Verdict::Admit,
     })
+}
+
+/// Operator `devices`: only on operator members, and changed only by the
+/// server (a shepherd's roster must carry the list the roster has now).
+fn check_devices(board: &Board, new: &[Member], signer: &Signer) -> Result<(), Refusal> {
+    if new
+        .iter()
+        .any(|m| m.role != Role::Operator && !m.devices.is_empty())
+    {
+        return Err(Refusal::DevicesOnNonOperator);
+    }
+    let listed = |ms: &[Member]| -> Vec<(String, Vec<Fingerprint>)> {
+        ms.iter()
+            .filter(|m| !m.devices.is_empty())
+            .map(|m| (m.name.clone(), m.devices.clone()))
+            .collect()
+    };
+    if signer.class != SignerClass::Server && listed(new) != listed(board.members()) {
+        return Err(Refusal::DevicesLocked);
+    }
+    Ok(())
 }
 
 /// The signing member (name, role) for session signers, after the class gate.

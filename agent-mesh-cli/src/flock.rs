@@ -122,6 +122,7 @@ fn parse_member(spec: &str) -> Result<Member> {
     Ok(Member {
         name: name.into(),
         role,
+        devices: vec![],
     })
 }
 

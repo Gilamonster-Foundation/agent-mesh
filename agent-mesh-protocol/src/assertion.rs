@@ -12,6 +12,7 @@ use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 
 use crate::agent_key::{AgentKey, CertChain, Issuer, SerdeSig};
+use crate::UserPublic;
 use crate::{MeshError, Result};
 
 /// Domain tag: a signature minted here can't be replayed as any other signature.
@@ -63,6 +64,29 @@ impl Assertion {
             return Err(MeshError::InvalidCertChain(
                 "author chain is not rooted at the trust root".into(),
             ));
+        }
+        VerifyingKey::from_bytes(&self.author.agent_pubkey)
+            .and_then(|vk| vk.verify_strict(&message(cid), &self.sig.0))
+            .map_err(|_| MeshError::BadSignature)
+    }
+
+    /// Check that the author signed `cid` with a key the user `user` certified
+    /// directly (a device key: the chain is one link, issued by that user) at
+    /// epoch `generation`. Which devices count is the caller's to decide.
+    ///
+    /// # Errors
+    /// [`MeshError::InvalidCertChain`] if the chain is not issued directly by
+    /// `user` or fails verification; [`MeshError::BadSignature`] if the
+    /// signature does not match `cid`.
+    pub fn verify_user(&self, cid: &ContentId, user: &UserPublic, generation: u64) -> Result<()> {
+        self.author.verify_at(generation)?;
+        match &self.author.issuer {
+            Issuer::User(u) if u == user => {}
+            _ => {
+                return Err(MeshError::InvalidCertChain(
+                    "author is not certified directly by this user".into(),
+                ))
+            }
         }
         VerifyingKey::from_bytes(&self.author.agent_pubkey)
             .and_then(|vk| vk.verify_strict(&message(cid), &self.sig.0))
@@ -189,5 +213,21 @@ mod tests {
         a.verify(&cid(1), &server.public_bytes(), 5).unwrap();
         assert!(a.verify(&cid(1), &server.public_bytes(), 6).is_err());
         assert!(a.verify(&cid(1), &server.public_bytes(), 4).is_err());
+    }
+
+    #[test]
+    fn verify_user_accepts_a_device_of_that_user_only() {
+        let user = UserKey::generate();
+        let dev = AgentKey::issue(&user, meta("operator"));
+        let c = cid(7);
+        let a = Assertion::sign(&dev, &c);
+        a.verify_user(&c, &user.public(), 0).unwrap();
+        // another user, another cid, and a delegated (two-link) key all fail
+        assert!(a.verify_user(&c, &UserKey::generate().public(), 0).is_err());
+        assert!(a.verify_user(&cid(8), &user.public(), 0).is_err());
+        let child = dev.delegate(meta("x")).unwrap();
+        assert!(Assertion::sign(&child, &c)
+            .verify_user(&c, &user.public(), 0)
+            .is_err());
     }
 }

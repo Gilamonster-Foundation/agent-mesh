@@ -54,6 +54,15 @@ pub fn init(dir: &Path, user: &UserKey, spec: InitSpec) -> Result<ContentId, Ser
             return Err(ServerError::AlreadyInitialised(name.into()));
         }
     }
+    if spec
+        .roster
+        .iter()
+        .any(|m| m.role != agent_mesh_flock::Role::Operator && !m.devices.is_empty())
+    {
+        return Err(ServerError::Session(
+            "devices belong to operator members only".into(),
+        ));
+    }
     std::fs::create_dir_all(dir)?;
     let server = AgentKey::issue(
         user,

@@ -204,6 +204,7 @@ mod tests {
             .map(|(n, role)| Member {
                 name: n.into(),
                 role,
+                devices: vec![],
             })
             .collect()
     }

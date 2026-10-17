@@ -29,10 +29,12 @@ fn rig() -> Rig {
             Member {
                 name: "shep".into(),
                 role: Role::Shepherd,
+                devices: vec![],
             },
             Member {
                 name: "h1".into(),
                 role: Role::Helper,
+                devices: vec![],
             },
         ],
         salt: "00".into(),
