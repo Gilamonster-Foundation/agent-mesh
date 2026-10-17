@@ -282,3 +282,16 @@ fn a_lost_session_that_cannot_be_recorded_stops_the_server() {
     assert_eq!(server.sessions().get(&id).unwrap().status, Status::Active);
     assert_eq!(server.epoch(), 0);
 }
+
+#[test]
+fn serving_a_log_already_at_a_later_epoch_waits_for_nothing() {
+    let mut r = rig();
+    r.session("shep").end().unwrap(); // a goodbye bumps the epoch: now 1
+    assert!(r.serving.as_ref().unwrap().wait_epoch(1));
+    let server = r.restart();
+    assert_eq!(server.epoch(), 1);
+    let serving = serve(server, bind_private(&r.sock).unwrap()).unwrap();
+    // no request has been served yet: the predicate must start from the log
+    assert!(serving.wait_epoch(1));
+    r.serving = Some(serving);
+}
