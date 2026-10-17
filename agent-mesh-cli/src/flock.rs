@@ -337,7 +337,10 @@ fn announced(snap: &Snapshot, live: &[Pane], tab: Option<&str>) -> BTreeMap<Stri
         .filter_map(|(author, (_, pane))| {
             let s = sessions
                 .get(author)
-                .filter(|s| s.status == Status::Active)?;
+                .filter(|s| s.status == Status::Active)
+                // a roster change can drop a member whose session is still
+                // Active in the table: its claim is not about anyone now
+                .filter(|s| snap.board().members().iter().any(|m| m.name == s.member))?;
             let p = live.iter().find(|p| p.pane_id == pane)?;
             (tab.is_none() || tab == Some(p.tab_id.as_str())).then(|| (s.member, pane.to_owned()))
         })
@@ -605,5 +608,50 @@ mod tests {
         let out = view(&dir, &[herdr_pane("w1:p1", "w1:t1", None)], &[], None);
         assert!(line(&out, "h1").contains("ambiguous (2)"));
         assert!(line(&out, "shep").contains("ambiguous (2)"));
+    }
+
+    /// PR #131: a member dropped by a roster event keeps an Active session
+    /// until removal-driven epoch bumps exist; its old claim used to reach
+    /// `join` as an off-roster `--map` and blank the whole view.
+    #[test]
+    fn a_claim_by_a_member_the_roster_dropped_does_not_break_the_view() {
+        let (dir, mut server) = flock();
+        let (shep, h1) = (
+            enroll_key(&mut server, "shep"),
+            enroll_key(&mut server, "h1"),
+        );
+        claim(&mut server, &h1, "w1:p1", "w1:t1");
+        claim(&mut server, &shep, "w1:p2", "w1:t1");
+        // the shepherd signs a roster that keeps only the shepherd
+        let author = shep.fingerprint().hex();
+        let node = agent_mesh_flock::Event {
+            flock: server.flock(),
+            kind: agent_mesh_flock::Kind::Roster,
+            prev: server.board().head_of(&author),
+            author,
+            refs: BTreeMap::from([("replaces".to_owned(), server.board().roster_id())]),
+            files: vec![],
+            at: 0,
+            body: Body::Roster {
+                members: vec![agent_mesh_flock::Member {
+                    name: "shep".into(),
+                    role: agent_mesh_flock::Role::Shepherd,
+                }],
+            },
+        }
+        .node();
+        let sig = agent_mesh_protocol::Assertion::sign(&shep, &node.content_id().unwrap());
+        server.admit(node, sig).unwrap();
+        let live = [
+            herdr_pane("w1:p1", "w1:t1", None),
+            herdr_pane("w1:p2", "w1:t1", None),
+        ];
+        let out = view(&dir, &live, &[], None);
+        assert!(line(&out, "shep").contains("w1:p2"), "{out}");
+        assert!(!out.contains("h1"), "{out}");
+        // an explicit --map for someone off the roster is still an error
+        let snap = Snapshot::read(dir.path()).unwrap();
+        let bad = BTreeMap::from([("h1".to_owned(), "w1:p1".to_owned())]);
+        assert!(render(&snap, &live, &bad, None).is_err());
     }
 }

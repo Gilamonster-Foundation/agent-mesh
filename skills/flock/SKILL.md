@@ -98,7 +98,9 @@ Built (plan steps 1–4 and the read-only herdr view, 4c):
   trusts only the active session's latest claim, only if herdr still lists
   that pane (in `--tab`, if given), ranks it below `--map` and above a label,
   and a pane two members claim is `ambiguous`. A replacement session is
-  pending and announces after its hand-off.
+  pending; announcing after a hand-off is **deferred** (its first event must
+  have `prev = handoff`, which the session cannot yet supply: step 7). The
+  server's first-link check is unchanged.
 
 **Planned, not built:** the epoch bump when a member is removed from the
 roster; operator device keys listed per device in the roster, and with them operator
