@@ -3,6 +3,11 @@ name: CI
 # HOOK PARITY: This workflow is mirrored by .githooks/pre-push and the
 # `check` / `cov-ci` recipes in justfile. When editing this file, audit
 # the hook + justfile in the same PR.
+#
+# CRAFT-14: this pipeline is the authoritative full gate. The pre-push hook
+# pre-flights only the changed scope (fmt, clippy, tests for the owning
+# crates and their dependents). The coverage floor and the macOS job below
+# are CI-only; the hook does not run them.
 
 on:
   push:
