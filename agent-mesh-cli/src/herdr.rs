@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 /// One pane as `herdr pane list` reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Pane {
-    /// `w4:p6F`.
+    /// `w1:p2A`.
     pub pane_id: String,
     /// The tab it sits in; labels are only unique within one.
     pub tab_id: String,
