@@ -6,7 +6,9 @@
 #
 # Quick reference:
 #   just                — list available recipes (default)
-#   just check          — full local gate (fmt + clippy + test)
+#   just check          — full local gate (fmt + clippy + test); the pre-push
+#                         hook runs only the changed scope of this
+#   just test-hook      — scope tests for .githooks/pre-push
 #   just cov            — local coverage with HTML report
 #   just cov-ci         — coverage with 75% gate, lcov output (CI mode)
 #   just install-hooks  — wire .githooks/ as the repo's hooks path
@@ -56,6 +58,7 @@ cov:
 
 # CI-mode coverage: emit lcov + enforce the current floor.
 # PIPELINE PARITY: must match the coverage job in .github/workflows/ci.yml.
+# CI-only: the pre-push hook no longer runs this (CRAFT-14).
 #
 # Floor: 75% workspace-wide. Ratchet UP only, never down. Each PR that
 # adds tests should bump this threshold higher; each PR that adds
@@ -73,6 +76,10 @@ cov-ci:
         --fail-under-lines 75
 
 # --- Hook installation ---
+
+# Scope tests for the pre-push hook (plan-only; no cargo runs).
+test-hook:
+    .githooks/test-pre-push.sh
 
 # Point this repo at .githooks/ for pre-push gating.
 # Idempotent — safe to re-run.
