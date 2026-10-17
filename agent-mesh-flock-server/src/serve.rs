@@ -327,9 +327,8 @@ fn stream(shared: &Shared, conn: &mut UnixStream, session: &str, from: Option<&H
             let _ = write_msg(conn, &Resp::Behind { have });
             return;
         }
-        Err(e) => {
-            let why = format!("history does not extend your head: {e:?}");
-            let _ = write_msg(conn, &Resp::Err(why));
+        Err(_) => {
+            let _ = write_msg(conn, &Resp::Diverged);
             return;
         }
     };

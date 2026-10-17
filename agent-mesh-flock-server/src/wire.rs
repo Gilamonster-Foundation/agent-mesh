@@ -164,6 +164,9 @@ pub enum Resp {
         /// How many events the server has.
         have: u64,
     },
+    /// The resume token is not on this server's history: another record at
+    /// that index, or not the end of a frame.
+    Diverged,
     /// The stream is over.
     Closed {
         /// Why.

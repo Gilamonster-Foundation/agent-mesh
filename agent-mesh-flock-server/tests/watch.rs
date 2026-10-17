@@ -198,3 +198,94 @@ fn only_an_active_session_of_a_current_member_opens_a_stream() {
     let (sig, _, id) = proof(&h1.key, &server, 5);
     assert!(server.authorize_stream(&sig, &id).is_err());
 }
+
+/// Copy the flock's files, so a second server can diverge from the first.
+fn copy_flock(env: &Env, to: &std::path::Path) {
+    for e in std::fs::read_dir(env.tmp.path()).unwrap() {
+        let e = e.unwrap();
+        if e.file_type().unwrap().is_file() {
+            std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+        }
+    }
+}
+
+#[test]
+fn an_altered_prefix_with_an_unchanged_last_event_does_not_extend_the_head() {
+    use agent_mesh_flock::{Body, Kind};
+    let mut env = Env::new();
+    let mut a = env.open();
+    let shep = enroll(&mut a, "shep");
+    let h1 = enroll(&mut a, "h1");
+    let alt = tempfile::TempDir::new().unwrap();
+    copy_flock(&env, alt.path());
+    let mut b = Server::open(alt.path()).unwrap();
+
+    // `shep` writes X on A and X' on B; `h1` then writes the very same Y on
+    // both (its chain does not pass through X), then each writes one more.
+    let mut write = |env: &mut Env, s: &mut Server, who: &AgentKey, kind, body: Body, at: u64| {
+        env.at = at;
+        let prev = s.board().head_of(&who.fingerprint().hex());
+        let (node, sig) = env.event(who, kind, prev, &[], body);
+        let id = node.content_id().unwrap();
+        s.admit(node, sig).unwrap();
+        id
+    };
+    let brief = |lane: &str| Body::Brief {
+        to: "h1".into(),
+        lane: lane.into(),
+    };
+    let job = Body::Job {
+        lane: "j".into(),
+        label: "same".into(),
+    };
+    write(&mut env, &mut a, &shep.key, Kind::Brief, brief("x"), 100);
+    write(
+        &mut env,
+        &mut b,
+        &shep.key,
+        Kind::Brief,
+        brief("x-altered"),
+        100,
+    );
+    let ya = write(&mut env, &mut a, &h1.key, Kind::Job, job.clone(), 101);
+    let yb = write(&mut env, &mut b, &h1.key, Kind::Job, job, 101);
+    assert_eq!(ya, yb, "fixture: the last event is the same event");
+    write(&mut env, &mut a, &shep.key, Kind::Brief, brief("z"), 102);
+    write(&mut env, &mut b, &shep.key, Kind::Brief, brief("z"), 102);
+
+    let (fa, fb) = (frames(&a), frames(&b));
+    let at_y = fa
+        .iter()
+        .position(|f| f.last().unwrap().record.payload.index == a.admitted() - 1)
+        .unwrap();
+    let head_y = Head::of(fa[at_y].last().unwrap());
+    let theirs = Head::of(fb[at_y].last().unwrap());
+    assert_eq!(
+        fa[at_y].last().unwrap().event.content_id().unwrap(),
+        fb[at_y].last().unwrap().event.content_id().unwrap()
+    );
+    assert_ne!(
+        head_y.id().unwrap(),
+        theirs.id().unwrap(),
+        "the prefix changed the record"
+    );
+
+    // the server refuses to resume from A's head on B's history ...
+    assert_eq!(
+        b.journal().cursor_from(Some(&head_y)).err(),
+        Some(Resume::Diverged)
+    );
+    // ... and a follower at A's head refuses B's next frame by itself
+    let genesis = agent_mesh_flock_server::load_genesis(env.tmp.path())
+        .unwrap()
+        .node;
+    let mut f = Follower::new(&genesis).unwrap();
+    for fr in &fa[..=at_y] {
+        f.apply(fr).unwrap();
+    }
+    assert!(matches!(
+        f.apply(&fb[at_y + 1]),
+        Err(FollowError::DoesNotExtend(_))
+    ));
+    f.apply(&fa[at_y + 1]).unwrap();
+}
