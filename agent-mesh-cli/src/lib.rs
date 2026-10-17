@@ -11,6 +11,7 @@ use std::path::PathBuf;
 mod announce;
 mod bind;
 mod flock;
+mod herdr;
 mod keygen;
 mod listen;
 mod mcp;

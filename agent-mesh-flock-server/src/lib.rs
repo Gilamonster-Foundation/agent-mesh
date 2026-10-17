@@ -20,6 +20,7 @@ mod lock;
 mod log;
 #[cfg(unix)]
 mod private;
+mod read;
 mod refusal;
 #[cfg(unix)]
 mod serve;
@@ -39,6 +40,7 @@ pub use keyfile::{load_server_key, store_server_key};
 pub use log::CrashPlan;
 #[cfg(unix)]
 pub use private::{bind_private, peer_ok, private_dir, uid_allowed};
+pub use read::Snapshot;
 pub use refusal::{Reason, RefusalEntry, RefusalRecord};
 #[cfg(unix)]
 pub use serve::{serve, Serving};
