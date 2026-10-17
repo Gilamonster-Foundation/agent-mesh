@@ -168,8 +168,10 @@ mod unix {
         // The log lock is ours, so any socket file left behind is stale.
         let listener = bind_private(&sock(dir))?;
         println!("serving {}", sock(dir).display());
-        serve_log(server, listener)?.wait();
-        Ok(())
+        match serve_log(server, listener)?.wait() {
+            Some(why) => Err(anyhow!("stopped: could not persist: {why}")),
+            None => Ok(()),
+        }
     }
 
     pub fn invite(dir: &Path, member: &str) -> Result<()> {

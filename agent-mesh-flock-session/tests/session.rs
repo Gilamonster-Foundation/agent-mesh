@@ -3,7 +3,9 @@
 
 use agent_mesh_flock::{Body, EndReason, Kind, Member, Role};
 use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp};
-use agent_mesh_flock_server::{bind_private, init, serve, InitSpec, Server, Serving};
+use agent_mesh_flock_server::{
+    bind_private, init, serve, CrashPlan, InitSpec, Server, ServerError, Serving, Snapshot, Status,
+};
 use agent_mesh_flock_session::{Locked, Policy, Session};
 use agent_mesh_protocol::{AgentKey, Assertion, UserKey};
 use content_addressable::ContentAddressable;
@@ -14,7 +16,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 struct Rig {
-    _tmp: TempDir,
+    tmp: TempDir,
     sock: PathBuf,
     serving: Option<Serving>,
 }
@@ -42,13 +44,37 @@ fn rig() -> Rig {
     let sock = tmp.path().join("run").join("serve.sock");
     let serving = serve(server, bind_private(&sock).unwrap()).unwrap();
     Rig {
-        _tmp: tmp,
+        tmp,
         sock,
         serving: Some(serving),
     }
 }
 
 impl Rig {
+    /// Stop serving and reopen the log: what a restart would see.
+    fn restart(&mut self) -> Server {
+        self.serving.take().unwrap().stop();
+        for _ in 0..100_000 {
+            match Server::open(self.tmp.path()) {
+                Err(ServerError::Locked) => std::thread::yield_now(),
+                other => return other.unwrap(),
+            }
+        }
+        panic!("the log stayed locked");
+    }
+    fn status(&self, session: &str) -> Status {
+        let snap = Snapshot::read(self.tmp.path()).unwrap();
+        snap.sessions().get(session).unwrap().status
+    }
+    fn wait_failure(&self) -> String {
+        for _ in 0..100_000 {
+            if let Some(f) = self.serving.as_ref().unwrap().failure() {
+                return f;
+            }
+            std::thread::yield_now();
+        }
+        panic!("the server never reported the failure");
+    }
     fn rpc(&self, c: &mut UnixStream, req: &Req) -> Resp {
         write_msg(c, req).unwrap();
         read_msg(c).unwrap().unwrap()
@@ -206,4 +232,62 @@ fn locked_memory_reports_whether_it_is_locked() {
         Ok(l) => assert!(l.is_locked()),
         Err(e) => assert!(e.to_string().contains("mlock")),
     }
+}
+
+#[test]
+fn a_second_enrollment_on_one_connection_is_refused_and_the_first_session_still_ends() {
+    let r = rig();
+    let (mut conn, _key, first) = enrol_by_hand(&r, "shep");
+    // a second valid token and key, same connection
+    let sk = SigningKey::generate(&mut OsRng);
+    let again = r.rpc(
+        &mut conn,
+        &Req::EnrollBegin {
+            token: r.invite("h1"),
+            member: "h1".into(),
+            pubkey: sk.verifying_key().to_bytes(),
+        },
+    );
+    assert!(matches!(again, Resp::Err(_)), "{again:?}");
+    drop(conn);
+    r.wait_epoch(1);
+    // verified replay: the connection's end ended the session it carried
+    assert_eq!(r.status(&first), Status::Ended);
+    assert!(Snapshot::read(r.tmp.path())
+        .unwrap()
+        .sessions()
+        .live()
+        .next()
+        .is_none());
+}
+
+#[test]
+fn a_goodbye_that_cannot_be_recorded_is_not_acknowledged() {
+    let mut r = rig();
+    let shep = r.session("shep");
+    let id = shep.id().to_owned();
+    r.serving
+        .as_ref()
+        .unwrap()
+        .plan_crash(Some(CrashPlan::AfterBytes(0)));
+    assert!(shep.end().is_err(), "told the end was recorded; it was not");
+    r.wait_failure();
+    let server = r.restart();
+    assert_eq!(server.sessions().get(&id).unwrap().status, Status::Active);
+    assert_eq!(server.epoch(), 0);
+}
+
+#[test]
+fn a_lost_session_that_cannot_be_recorded_stops_the_server() {
+    let mut r = rig();
+    let (conn, _key, id) = enrol_by_hand(&r, "shep");
+    r.serving
+        .as_ref()
+        .unwrap()
+        .plan_crash(Some(CrashPlan::AfterBytes(0)));
+    drop(conn);
+    r.wait_failure();
+    let server = r.restart();
+    assert_eq!(server.sessions().get(&id).unwrap().status, Status::Active);
+    assert_eq!(server.epoch(), 0);
 }

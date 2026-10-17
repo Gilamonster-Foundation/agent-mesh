@@ -1,6 +1,7 @@
 //! A value pinned in RAM: `mlock`ed from the moment it is boxed.
 
 use crate::{Policy, SessionError};
+
 /// Boxed `T`, locked in memory. `T`'s own `Drop` scrubs it (the signing key
 /// zeroizes). Pages stay locked after the drop: `munlock` does not nest, so
 /// unlocking could release a page another `Locked` still shares.
@@ -10,6 +11,23 @@ pub struct Locked<T> {
 }
 
 impl<T> Locked<T> {
+    /// Lock an empty (`Default`) `T` first, so the secret can be written
+    /// straight into locked memory and never exists anywhere else.
+    ///
+    /// # Errors
+    /// `mlock` failed and the policy is [`Policy::Locked`].
+    pub fn empty(policy: Policy) -> Result<Self, SessionError>
+    where
+        T: Default,
+    {
+        Self::new(T::default(), policy)
+    }
+
+    /// Fill the locked value in place.
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
     /// Box and lock `value`.
     ///
     /// # Errors
