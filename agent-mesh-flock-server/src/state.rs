@@ -37,18 +37,19 @@ fn enc(e: content_addressable::ContentError) -> ServerError {
     ServerError::Encoding(e.to_string())
 }
 
-/// A `session-end` authority shrink and its `epoch` bump are one
-/// transaction: every `session-end` in a frame is followed at once by the
-/// `epoch` event.
+/// A `session-end` or `handoff` and its `epoch` bump are one transaction:
+/// each in a frame is followed at once by the `epoch` event.
 ///
 /// # Errors
 /// Which position breaks the rule.
 pub fn check_frame_shape(sealed: &[Sealed]) -> Result<(), String> {
     for (i, s) in sealed.iter().enumerate() {
-        if s.event.payload.kind == Kind::SessionEnd
+        if matches!(s.event.payload.kind, Kind::SessionEnd | Kind::Handoff)
             && sealed.get(i + 1).map(|n| n.event.payload.kind) != Some(Kind::Epoch)
         {
-            return Err("session-end is not followed by its epoch bump in the same frame".into());
+            return Err(
+                "session-end or handoff is not followed by its epoch bump in the same frame".into(),
+            );
         }
     }
     Ok(())
@@ -76,7 +77,10 @@ impl State {
             Verdict::Refuse(r) => return Err(ServerError::Refused(r)),
         };
         self.sessions
-            .check(&self.board, &node.payload, epoch, server)
+            .check(&self.board, &node.payload, epoch, &self.chain)
+            .map_err(ServerError::Session)?;
+        self.sessions
+            .first_link(&self.board, &node.payload)
             .map_err(ServerError::Session)?;
         Ok((signer, conflict))
     }

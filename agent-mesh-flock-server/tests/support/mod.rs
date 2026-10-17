@@ -16,10 +16,12 @@ pub const ROSTER: &[(&str, Role)] = &[
     ("shep", Role::Shepherd),
     ("h1", Role::Helper),
     ("herdr", Role::Adapter),
+    ("op", Role::Operator),
 ];
 
 pub struct Env {
     pub tmp: TempDir,
+    pub user: UserKey,
     pub flock: ContentId,
     pub at: u64,
 }
@@ -90,10 +92,26 @@ pub fn enroll(server: &mut Server, member: &str) -> Enrolment {
 
 impl Env {
     pub fn new() -> Self {
+        Self::with_spec(spec())
+    }
+
+    /// A flock whose roster lists no operator.
+    pub fn without_operator() -> Self {
+        let mut spec = spec();
+        spec.roster.retain(|m| m.role != Role::Operator);
+        Self::with_spec(spec)
+    }
+
+    fn with_spec(spec: InitSpec) -> Self {
         let tmp = TempDir::new().unwrap();
         let user = UserKey::generate();
-        let flock = init(tmp.path(), &user, spec()).unwrap();
-        Self { tmp, flock, at: 0 }
+        let flock = init(tmp.path(), &user, spec).unwrap();
+        Self {
+            tmp,
+            user,
+            flock,
+            at: 0,
+        }
     }
 
     pub fn dir(&self) -> PathBuf {
@@ -205,6 +223,51 @@ pub fn bump_and_renew(server: &mut Server, ended: &Enrolment, others: &mut [&mut
         .unwrap();
     for (session, ch) in server.renewal_challenges() {
         if let Some(e) = others.iter_mut().find(|e| e.session == session) {
+            let cert = server.renew_finish(&ch, &e.prove(&ch)).unwrap();
+            e.recertify(cert);
+        }
+    }
+}
+
+/// The approval for moving `member`'s role from `from` to `to`, resuming at
+/// `from`'s last head.
+pub fn approval(
+    env: &Env,
+    server: &Server,
+    member: &str,
+    from: &Enrolment,
+    to: &Enrolment,
+) -> MerkleNode<agent_mesh_flock::HandoffApproval> {
+    let resume = server
+        .board()
+        .head_of(&from.session)
+        .unwrap_or_else(|| server.sessions().get(&from.session).unwrap().start);
+    MerkleNode::genesis(agent_mesh_flock::HandoffApproval {
+        flock: env.flock,
+        member: member.into(),
+        from: from.session.clone(),
+        to: to.session.clone(),
+        resume,
+        context: None,
+    })
+}
+
+pub fn sign_approval(
+    key: &AgentKey,
+    ap: &MerkleNode<agent_mesh_flock::HandoffApproval>,
+) -> Assertion {
+    Assertion::sign(key, &ap.content_id().unwrap())
+}
+
+/// An operator device key: certified by the flock's user key itself.
+pub fn operator(env: &Env) -> AgentKey {
+    AgentKey::issue(&env.user, meta("operator"))
+}
+
+/// Answer every renewal challenge the way connected sessions would.
+pub fn renew_all(server: &mut Server, live: &mut [&mut Enrolment]) {
+    for (session, ch) in server.renewal_challenges() {
+        if let Some(e) = live.iter_mut().find(|e| e.session == session) {
             let cert = server.renew_finish(&ch, &e.prove(&ch)).unwrap();
             e.recertify(cert);
         }

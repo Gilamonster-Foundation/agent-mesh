@@ -6,10 +6,11 @@ use crate::server::Server;
 use crate::sessions::{session_caveats, token_digest, InviteInfo, SessionInfo, Status};
 use crate::state::Spec;
 use crate::ServerError;
-use agent_mesh_flock::{Body, EndReason, Kind};
+use agent_mesh_flock::{Body, EndReason, HandoffApproval, Kind};
 use agent_mesh_protocol::agent_key::PossessionChallenge;
+use agent_mesh_protocol::Assertion;
 use agent_mesh_protocol::{AgentMetadata, CertChain, Fingerprint};
-use content_addressable::ContentId;
+use content_addressable::{ContentId, MerkleNode};
 use ed25519_dalek::Signature;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -250,6 +251,44 @@ impl Server {
             },
         }])?;
         Ok(cert)
+    }
+
+    /// Move a member's role from one session to another, on the roster
+    /// authority's single-use approval: `handoff` then `epoch`, one frame.
+    ///
+    /// # Errors
+    /// An approval that is not valid for this flock's current state, or I/O.
+    pub fn handoff(
+        &mut self,
+        approval: MerkleNode<HandoffApproval>,
+        sig: Assertion,
+    ) -> Result<ContentId, ServerError> {
+        let a = approval.payload.clone();
+        let (Some(from), Some(to)) = (self.st.sessions.get(&a.from), self.st.sessions.get(&a.to))
+        else {
+            return refuse("handoff names an unknown session");
+        };
+        let next = self.st.chain.epoch + 1;
+        let ids = self.transact(vec![
+            Spec {
+                kind: Kind::Handoff,
+                refs: vec![("from", from.start), ("resume", a.resume), ("to", to.start)],
+                body: Body::Handoff {
+                    from: a.from,
+                    to: a.to,
+                    resume: a.resume,
+                    context: a.context,
+                    approval: Box::new(approval),
+                    approval_sig: Box::new(sig),
+                },
+            },
+            Spec {
+                kind: Kind::Epoch,
+                refs: vec![],
+                body: Body::Epoch { epoch: next },
+            },
+        ])?;
+        Ok(ids[0])
     }
 
     fn live(&self, session: &str) -> Option<SessionInfo> {

@@ -1,7 +1,7 @@
 //! Golden ids: each kind's node id is pinned, like content-addressable's
 //! vectors. A change here is a change to the wire identity of the flock.
 
-use agent_mesh_flock::{Body, EndReason, Event, FileRef, Kind, Outcome};
+use agent_mesh_flock::{Body, EndReason, Event, FileRef, HandoffApproval, Kind, Outcome};
 use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, UserKey};
 use content_addressable::{ContentAddressable, ContentId, MerkleNode, RawContentId};
 use std::collections::BTreeMap;
@@ -303,4 +303,69 @@ fn certificate_bearing_bodies_bind_the_certificate() {
     };
     assert_ne!(renew(&a, 1), renew(&a, 2));
     assert_ne!(renew(&a, 1), renew(&b, 1));
+}
+
+fn approval() -> MerkleNode<HandoffApproval> {
+    MerkleNode::genesis(HandoffApproval {
+        flock: cid("flock"),
+        member: "h1".into(),
+        from: "aa".repeat(32),
+        to: "bb".repeat(32),
+        resume: cid("resume"),
+        context: Some(FileRef {
+            root: "lane".into(),
+            path: "HANDOFF.md".into(),
+            id: RawContentId::from_content(b"handoff bytes"),
+        }),
+    })
+}
+
+/// What the approver signs is key-independent, so it is pinned.
+#[test]
+fn the_handoff_approval_has_its_pinned_id() {
+    assert_eq!(
+        approval().content_id().unwrap().to_string(),
+        "bafyr4ig26nyfneq4catmnr5zzzpuj2hbwafzyfzmb7hfzledzgc4maiv2e"
+    );
+}
+
+/// The `handoff` event carries an assertion (a certificate), so like
+/// session-start it is pinned by what it binds: the approval and every field.
+#[test]
+fn a_handoff_binds_its_approval_and_fields() {
+    let user = UserKey::generate();
+    let key = AgentKey::issue(
+        &user,
+        AgentMetadata {
+            role: "op".into(),
+            host: "h".into(),
+            capabilities: vec![],
+            issued_at: "2026-10-15T00:00:00Z".into(),
+            expires_at: None,
+            caveats: Caveats::top(),
+        },
+    );
+    let handoff = |ap: MerkleNode<HandoffApproval>, to: &str| {
+        let sig = agent_mesh_protocol::Assertion::sign(&key, &ap.content_id().unwrap());
+        event(
+            Kind::Handoff,
+            Body::Handoff {
+                from: "aa".repeat(32),
+                to: to.into(),
+                resume: cid("resume"),
+                context: None,
+                approval: Box::new(ap),
+                approval_sig: Box::new(sig),
+            },
+            &[("from", "f"), ("to", "t"), ("resume", "resume")],
+        )
+        .content_id()
+        .unwrap()
+    };
+    let base = handoff(approval(), "bb");
+    assert_eq!(base, handoff(approval(), "bb"));
+    assert_ne!(base, handoff(approval(), "cc"));
+    let mut other = approval();
+    other.payload.member = "h2".into();
+    assert_ne!(base, handoff(other, "bb"));
 }

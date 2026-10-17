@@ -67,7 +67,11 @@ impl Server {
         let (mut refusal_log, entries) = Log::open::<RefusalEntry>(&dir.join(REFUSALS_FILE))?;
         let board = Board::new(&genesis.node).map_err(enc)?;
         let mut st = State {
-            chain: Chain::new(board.flock(), server_pub),
+            chain: Chain::new(
+                board.flock(),
+                server_pub,
+                genesis.node.payload.server_cert.user_fingerprint(),
+            ),
             board,
             sessions: Sessions::default(),
         };
@@ -191,9 +195,9 @@ impl Server {
                 conflict: None,
             });
         }
-        if node.payload.kind == Kind::SessionEnd {
+        if matches!(node.payload.kind, Kind::SessionEnd | Kind::Handoff) {
             return Err(ServerError::Session(
-                "session-end is admitted only with its epoch bump (end_session)".into(),
+                "session-end and handoff are admitted only with their epoch bump".into(),
             ));
         }
         let prepared = match self.st.prepare(&self.key, &node, sig) {
