@@ -57,6 +57,8 @@ pub enum Reason {
     DevicesLocked,
     /// `devices` on a member that is not an operator.
     DevicesOnNonOperator,
+    /// Two roster members share a name.
+    DuplicateMember,
 }
 
 impl From<&Refusal> for Reason {
@@ -83,6 +85,7 @@ impl From<&Refusal> for Reason {
             Refusal::StaleRoster => Self::StaleRoster,
             Refusal::DevicesLocked => Self::DevicesLocked,
             Refusal::DevicesOnNonOperator => Self::DevicesOnNonOperator,
+            Refusal::DuplicateMember => Self::DuplicateMember,
         }
     }
 }

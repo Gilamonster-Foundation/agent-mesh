@@ -8,7 +8,7 @@ use crate::board::Board;
 use crate::event::{Body, Event, Kind, Member, Role};
 use crate::signer::{Signer, SignerClass};
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Why an event is refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +56,8 @@ pub enum Refusal {
     DevicesLocked,
     /// `devices` on a member that is not an operator.
     DevicesOnNonOperator,
+    /// Two roster members share a name.
+    DuplicateMember,
 }
 
 /// An event admitted but flagged: it never replaces the first.
@@ -121,13 +123,15 @@ fn decide(board: &Board, node: &MerkleNode<Event>, signer: &Signer) -> Result<Ve
     })
 }
 
-/// Devices belong to operator members only. Every reader of a roster (the
-/// genesis loader, the roster check) uses this one rule.
+/// A roster is well formed when member names are unique (bindings are by
+/// name) and devices belong to operator members only. Every reader of a
+/// roster (init, the genesis loader, roster admission) uses this one rule.
 #[must_use]
-pub fn devices_well_formed(members: &[Member]) -> bool {
-    members
-        .iter()
-        .all(|m| m.role == Role::Operator || m.devices.is_empty())
+pub fn roster_well_formed(members: &[Member]) -> bool {
+    let mut names = std::collections::BTreeSet::new();
+    members.iter().all(|m| {
+        names.insert(m.name.as_str()) && (m.role == Role::Operator || m.devices.is_empty())
+    })
 }
 
 /// Device bindings by member name, each list sorted: roster order and device
@@ -146,7 +150,11 @@ fn bindings(ms: &[Member]) -> BTreeMap<&str, Vec<[u8; 32]>> {
 /// Operator `devices`: only on operator members, and changed only by the
 /// server (a shepherd's roster must carry the bindings the roster has now).
 fn check_devices(board: &Board, new: &[Member], signer: &Signer) -> Result<(), Refusal> {
-    if !devices_well_formed(new) {
+    let mut names = BTreeSet::new();
+    if !new.iter().all(|m| names.insert(m.name.as_str())) {
+        return Err(Refusal::DuplicateMember);
+    }
+    if !roster_well_formed(new) {
         return Err(Refusal::DevicesOnNonOperator);
     }
     if signer.class != SignerClass::Server && bindings(new) != bindings(board.members()) {

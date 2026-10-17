@@ -54,9 +54,9 @@ pub fn init(dir: &Path, user: &UserKey, spec: InitSpec) -> Result<ContentId, Ser
             return Err(ServerError::AlreadyInitialised(name.into()));
         }
     }
-    if !agent_mesh_flock::devices_well_formed(&spec.roster) {
+    if !agent_mesh_flock::roster_well_formed(&spec.roster) {
         return Err(ServerError::Session(
-            "devices belong to operator members only".into(),
+            "duplicate member names, or devices under a member that is not an operator".into(),
         ));
     }
     std::fs::create_dir_all(dir)?;
@@ -122,9 +122,9 @@ pub fn load_genesis(dir: &Path) -> Result<SignedGenesis, ServerError> {
             "signed by a key that is not the server certificate".into()
         ));
     }
-    if !agent_mesh_flock::devices_well_formed(&g.node.payload.roster) {
+    if !agent_mesh_flock::roster_well_formed(&g.node.payload.roster) {
         return Err(bad(
-            "devices listed under a member that is not an operator".into()
+            "duplicate member names, or devices under a member that is not an operator".into(),
         ));
     }
     let flock = g.node.content_id().map_err(enc)?;
