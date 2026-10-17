@@ -95,3 +95,9 @@ it as the crate's front page, and `cargo package` fails if a declared
 
 Treat a version bump without a README review as an incomplete change, the
 same way a bug fix without a regression test is incomplete.
+
+## Flock skill
+
+Working on the flock crates or `amesh flock`? Read
+[`skills/flock/SKILL.md`](skills/flock/SKILL.md) (what exists vs planned) and
+update it in the same PR as any flock behaviour change.
