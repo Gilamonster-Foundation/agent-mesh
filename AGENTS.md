@@ -30,9 +30,12 @@ just cov-ci          # cargo llvm-cov --fail-under-lines 75
 Coverage floor is **75% workspace-wide**, ratcheted up over time.
 Never lower it; if a PR drops coverage, add tests until it clears.
 
-`just check && just cov-ci` is what the pre-push hook runs. Do NOT
-bypass the hook with `--no-verify`. If a check fails, fix the
-underlying issue.
+`just check && just cov-ci` is the full gate (CI runs it). The pre-push
+hook is a fast pre-flight of what you push: fmt, clippy and tests for the
+crates that own the changed Rust files and their dependents, run on the
+pushed commit; tags, deletions and docs-only pushes skip it, and coverage
+is CI-only (CRAFT-14). Do NOT bypass the hook with `--no-verify`. If a
+check fails, fix the underlying issue.
 
 ## PR shape
 
