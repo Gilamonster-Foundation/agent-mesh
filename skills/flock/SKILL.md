@@ -89,6 +89,13 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   Devices change only in a server-signed `roster` event (`replace_roster`) or
   genesis; a shepherd's roster must leave them as they are. Operator members
   only. Rosters without devices encode as before;
+- **byte strings**: keys, signatures, fingerprints and nonces are CBOR byte
+  strings in the canonical encoding and on the session wire (they were arrays of
+  one integer per byte: about 22% larger frames, and a size that varied with the
+  key's bytes). JSON paths are unchanged. This changed every record id, so a
+  flock created before it cannot be opened: re-run `amesh flock init`. Release
+  note for agent-mesh-protocol: the Rust API is unchanged, its CBOR encoding is
+  not (minor bump);
 - **MCP tools** (`amesh mcp --flock-session <sock>` or `AMESH_FLOCK_SESSION`,
   Unix): `flock_whoami`, `flock_inbox`, `flock_status` and `flock_emit{kind,
   refs, body}` join the `mesh_*` tools, only when a session is given. The
