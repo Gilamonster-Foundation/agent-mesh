@@ -2,7 +2,7 @@
 //! readers (`Server::open` replaying the log, and a `Follower`), exactly as an
 //! honest frame is accepted. A sealed event is verified against a certificate
 //! the log recorded for its author; nothing else may stand in for it.
-#![cfg(unix)]
+#![cfg(all(unix, feature = "serve"))]
 mod support;
 
 use agent_mesh_flock::{Body, Kind};

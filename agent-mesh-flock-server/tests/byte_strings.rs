@@ -1,6 +1,6 @@
 //! The session wire and the frames carry keys, nonces and signatures as CBOR
 //! byte strings, so their size does not depend on the bytes' values.
-#![cfg(unix)]
+#![cfg(all(unix, feature = "serve"))]
 mod support;
 
 use agent_mesh_flock_server::wire::{Req, StreamChallenge};

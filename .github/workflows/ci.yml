@@ -37,8 +37,12 @@ jobs:
       # writer features (`serve`, `emit`) off, as the watch-only TUI uses
       # them. The workspace build always has them on, so only this step
       # sees that configuration. CI-only; see .githooks/pre-push.
+      # One package per command: building them together unifies features,
+      # and the session crate's dev-dependency turns `serve` back on.
       - name: clippy (flock read side, writer features off)
-        run: cargo clippy -p agent-mesh-flock-server -p agent-mesh-flock-session --no-default-features --all-targets -- -D warnings
+        run: |
+          cargo clippy -p agent-mesh-flock-server --no-default-features --all-targets -- -D warnings
+          cargo clippy -p agent-mesh-flock-session --no-default-features --all-targets -- -D warnings
 
   test:
     name: Rust tests
