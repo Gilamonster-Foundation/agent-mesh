@@ -44,12 +44,15 @@ struct World {
 
 fn world() -> World {
     let evil_member = format!("ev{HOSTILE}il");
+    // the sender is hostile too, so `inbox` (which shows who a brief is from)
+    // has something to escape
+    let shep_member = format!("sh{HOSTILE}ep");
     let f = flock_with(&[
-        "shep:shepherd",
+        &format!("{shep_member}:shepherd"),
         &format!("{evil_member}:helper"),
         "herdr:adapter",
     ]);
-    let shep = f.session("shep");
+    let shep = f.session(&shep_member);
     let evil = f.session(&evil_member);
     let adapter = f.session("herdr");
     // a brief into the hostile lane, for the hostile member
