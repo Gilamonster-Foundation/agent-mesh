@@ -22,11 +22,20 @@ pub fn emit(home: &Path, w: &Where, kind: Kind, refs: &[(&str, &str)], body: Bod
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
     let (socket, _) = w.session(home)?;
-    match call(&socket, &CtlReq::Emit { kind, refs, body })? {
-        CtlResp::Admitted { event, index } => {
-            println!("admitted {event} at {index}");
-            Ok(())
-        }
+    let (event, index) = send(&socket, kind, refs, body)?;
+    println!("admitted {event} at {index}");
+    Ok(())
+}
+
+/// One `Emit` to a session; the event id and index the server admitted.
+pub fn send(
+    socket: &Path,
+    kind: Kind,
+    refs: BTreeMap<String, ContentId>,
+    body: Body,
+) -> Result<(ContentId, u64)> {
+    match call(socket, &CtlReq::Emit { kind, refs, body })? {
+        CtlResp::Admitted { event, index } => Ok((event, index)),
         _ => bail!("the session answered something else"),
     }
 }

@@ -108,8 +108,8 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   head?" is the hand-off until its first event, so it can announce and emit.
   A session's first event is checked the same way live and on replay: an activated replacement writes exactly the hand-off that activated it as `prev`; any other session writes no `prev` (it cannot chain onto a hand-off that was not its own).
 
-- **`watch --from (index, signed head)`** (library and `serve`; the `amesh flock
-  watch` command is step 7b). One stream carries the replay, a `Caught` marker,
+- **`watch --from (index, signed head)`** (library, `serve` and the `amesh flock
+  watch` command). One stream carries the replay, a `Caught` marker,
   then live frames, each exactly once: the server publishes a frame to a
   journal only after its fsync, and readers read the journal without the
   writer's lock. The resume token is the last signed admission record. The
@@ -144,11 +144,25 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   live `run/session-*.sock` in `--dir`/`--name` (dead sockets skipped; none or
   several is an error that names them). When a flock is named, the session must belong to it (any selector; a session of another flock is refused before anything is sent); with none named the session alone decides. Reads replay the log without its lock
   (as `panes` does) and do not check for rollback; only `watch` does.
+- **`run` and `watch` (step 7b)**, Unix only. `run --lane L [--label T] --
+  <cmd>` emits a `job`, runs the command with inherited stdio, emits a `job-end`
+  and exits like a shell (128 + signal). A `job-end` carries exactly one of
+  `code` (it exited) and `signal` (a signal ended it): explicit fields, each
+  skipped when absent so the exit-code form keeps its pinned id; admission
+  refuses neither or both (`BadExit`). A command that cannot start is recorded
+  as exit 127. If the `run` process itself is killed, no `job-end` is written
+  and the job stays open. `watch [--from N] [--once]` follows the log through a
+  `Reader` kept in `<flock>/watch/<member>/`: each frame is verified against
+  the saved head, saved, and only then printed, so a run shows only what is new
+  to that reader (`--from` also replays saved events from an index; `--once`
+  stops at the `-- caught up --` marker). The stream challenge is signed by the
+  session (`CtlReq::ProveStream`, only for its own flock), so the CLI holds no
+  key. A closed stream is an error exit with the server's reason.
 
 **Planned, not built:** operator approval of a **delegate**
 hand-off (#127's other half; waits on the delegate designation, step 13); device changes
 signed by a listed device (server-signed only today); operator-signed events (`answer`); the rest of
-the CLI (`run`, `watch`, `answer`) and the MCP tools (steps 7b, 7c); `amesh-tui`; attaching from another host; the
+the CLI's `answer` and the MCP tools (step 7c); `amesh-tui`; attaching from another host; the
 `amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native
 newt receive. Until they land, lanes run on files
 as the herdr-flock skill describes. Status: epic #109.
