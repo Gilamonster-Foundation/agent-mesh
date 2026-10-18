@@ -97,7 +97,8 @@ impl FlockTools {
         let kind: Kind = serde_json::from_value(args.get("kind").cloned().unwrap_or(Value::Null))
             .context("`kind` is not an event kind")?;
         let refs: BTreeMap<String, ContentId> = match args.get("refs") {
-            None | Some(Value::Null) => BTreeMap::new(),
+            // optional means absent (or {}): the schema says object, so null is not "none"
+            None => BTreeMap::new(),
             Some(r) => serde_json::from_value(r.clone()).context("`refs` is not role -> cid")?,
         };
         let body: Body = serde_json::from_value(args.get("body").cloned().unwrap_or(Value::Null))
