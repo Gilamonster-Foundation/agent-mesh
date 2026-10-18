@@ -14,10 +14,10 @@ mod locked;
 mod reader;
 mod session;
 
-pub use ctl::{call, CtlReq, CtlResp};
+pub use ctl::{call, session_prover, CtlReq, CtlResp};
 pub use error::{ReaderError, SessionError};
 pub use fs::{save_atomic, Fs, RealFs};
 pub use harden::{harden, Hardening, Policy};
 pub use locked::Locked;
-pub use reader::{Reader, Watch, WatchEvent};
+pub use reader::{key_prover, Prover, Reader, Seen, Watch, WatchEvent};
 pub use session::{run, Session};

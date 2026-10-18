@@ -7,7 +7,7 @@ use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp};
 use agent_mesh_flock_server::{
     bind_private, init, load_genesis, serve, InitSpec, Sealed, Server, Serving, LOG_FILE,
 };
-use agent_mesh_flock_session::{Fs, Reader, ReaderError, RealFs, Watch, WatchEvent};
+use agent_mesh_flock_session::{key_prover, Fs, Reader, ReaderError, RealFs, Watch, WatchEvent};
 use agent_mesh_protocol::{AgentKey, AgentMetadata, Assertion, Caveats, UserKey};
 use content_addressable::{ContentAddressable, MerkleNode};
 use ed25519_dalek::{Signer, SigningKey};
@@ -244,7 +244,7 @@ fn an_event_appended_mid_replay_arrives_once_and_the_replay_boundary_is_marked()
         r.brief(&mut shep, &format!("a{i}"));
     }
     let n = 5; // invite + start + 3 briefs
-    let mut w = Watch::open(&r.sock, &shep.key, None).unwrap();
+    let mut w = Watch::open(&r.sock, &key_prover(&shep.key), None).unwrap();
     let mut seen = indexes(&next_frame(&mut w)); // one frame of the replay
     let mid = r.brief(&mut shep, "mid"); // lands while the replay is going
     assert_eq!(mid, n + 1);
@@ -273,17 +273,17 @@ fn a_reconnect_resumes_from_the_saved_head_and_delivers_only_what_is_new() {
     r.brief(&mut shep, "a0");
     let dir = TempDir::new().unwrap();
     let mut reader = Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
-    reader.sync(&r.sock, &shep.key).unwrap();
+    reader.sync(&r.sock, &key_prover(&shep.key)).unwrap();
     let h1 = reader.follower().head().cloned().unwrap();
     r.brief(&mut shep, "a1");
     r.brief(&mut shep, "a2");
-    let mut w = Watch::open(&r.sock, &shep.key, Some(h1.clone())).unwrap();
+    let mut w = Watch::open(&r.sock, &key_prover(&shep.key), Some(h1.clone())).unwrap();
     let first = indexes(&next_frame(&mut w));
     assert_eq!(first, vec![h1.index() + 1]);
     // a fresh reader process picks the saved state up and catches up
     drop(reader); // one writer per state directory
     let mut again = Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
-    again.sync(&r.sock, &shep.key).unwrap();
+    again.sync(&r.sock, &key_prover(&shep.key)).unwrap();
     let now = r.serving().failure();
     assert!(now.is_none());
     assert_eq!(again.follower().admitted(), h1.index() + 2);
@@ -298,7 +298,7 @@ fn a_reader_killed_anywhere_resumes_with_no_duplicate_and_no_gap() {
     }
     // the whole log, as the stream delivers it
     let mut all = vec![];
-    let mut w = Watch::open(&r.sock, &shep.key, None).unwrap();
+    let mut w = Watch::open(&r.sock, &key_prover(&shep.key), None).unwrap();
     loop {
         match w.next_event().unwrap() {
             WatchEvent::Frame(f) => all.push(f),
@@ -322,7 +322,7 @@ fn a_reader_killed_anywhere_resumes_with_no_duplicate_and_no_gap() {
             let mut rd = Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
             let saved = rd.follower().admitted();
             assert!(saved <= total);
-            rd.sync(&r.sock, &shep.key).unwrap();
+            rd.sync(&r.sock, &key_prover(&shep.key)).unwrap();
             assert_eq!(rd.follower().admitted(), total, "no gap");
             drop(rd);
             // the reopened reader verifies a contiguous chain from genesis:
@@ -351,7 +351,7 @@ fn a_certified_non_member_a_pending_or_ended_session_and_a_replayed_proof_open_n
         },
     );
     let refused = |key: &AgentKey, r: &Rig| {
-        let mut w = Watch::open(&r.sock, key, None).unwrap();
+        let mut w = Watch::open(&r.sock, &key_prover(key), None).unwrap();
         matches!(w.next_event(), Err(ReaderError::Stream(_)))
     };
     assert!(refused(&stranger, &r));
@@ -359,7 +359,7 @@ fn a_certified_non_member_a_pending_or_ended_session_and_a_replayed_proof_open_n
     let pending = r.enrol("shep");
     assert!(refused(&pending.key, &r));
     // and the legitimate member still gets in
-    let mut ok = Watch::open(&r.sock, &shep.key, None).unwrap();
+    let mut ok = Watch::open(&r.sock, &key_prover(&shep.key), None).unwrap();
     assert!(matches!(ok.next_event().unwrap(), WatchEvent::Frame(_)));
     // a proof signed for one connection's challenge, presented on another
     let mut a = r.conn();
@@ -387,7 +387,7 @@ fn a_watch_closes_right_after_the_epoch_bump_that_ends_its_session() {
     let mut r = rig();
     let mut shep = r.enrol("shep");
     r.brief(&mut shep, "a0");
-    let mut w = Watch::open(&r.sock, &shep.key, None).unwrap();
+    let mut w = Watch::open(&r.sock, &key_prover(&shep.key), None).unwrap();
     // drain the replay
     loop {
         if let WatchEvent::Caught(_) = w.next_event().unwrap() {
@@ -430,7 +430,7 @@ fn an_older_backup_and_a_rolled_back_then_extended_history_are_refused_as_rollba
     fresh("a2", &mut r, &mut shep);
     let dir = TempDir::new().unwrap();
     let mut reader = Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
-    reader.sync(&r.sock, &shep.key).unwrap();
+    reader.sync(&r.sock, &key_prover(&shep.key)).unwrap();
     let witnessed = reader.follower().admitted();
     // restore the older backup in place of the log
     r.serving.take().unwrap().stop();
@@ -438,7 +438,7 @@ fn an_older_backup_and_a_rolled_back_then_extended_history_are_refused_as_rollba
     let (sock, serving) = start(r.tmp.path());
     r.serving = Some(serving);
     r.sock = sock;
-    let err = reader.sync(&r.sock, &shep.key).unwrap_err();
+    let err = reader.sync(&r.sock, &key_prover(&shep.key)).unwrap_err();
     assert!(matches!(err, ReaderError::Rollback(_)), "{err}");
     // the rolled-back server now writes different events until it is longer
     // than what the reader witnessed: same length or more, other records
@@ -446,7 +446,7 @@ fn an_older_backup_and_a_rolled_back_then_extended_history_are_refused_as_rollba
     for lane in ["b1", "b2", "b3"] {
         r.brief(&mut shep, lane);
     }
-    let err = reader.sync(&r.sock, &shep.key).unwrap_err();
+    let err = reader.sync(&r.sock, &key_prover(&shep.key)).unwrap_err();
     assert!(matches!(err, ReaderError::Rollback(_)), "{err}");
     drop(reader);
     let again = Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
@@ -580,7 +580,7 @@ fn power_loss_at_any_step_of_a_save_never_loses_a_witnessed_head() {
     r.brief(&mut shep, "a1");
     // the stream's frames
     let mut all = vec![];
-    let mut w = Watch::open(&r.sock, &shep.key, None).unwrap();
+    let mut w = Watch::open(&r.sock, &key_prover(&shep.key), None).unwrap();
     loop {
         match w.next_event().unwrap() {
             WatchEvent::Frame(f) => all.push(f),
@@ -639,7 +639,7 @@ fn a_watch_also_closes_right_after_a_hand_off_away_from_its_session() {
     let shep = r.enrol("shep");
     let old = r.enrol("h1");
     let new = r.enrol("h1"); // pending replacement
-    let mut w = Watch::open(&r.sock, &old.key, None).unwrap();
+    let mut w = Watch::open(&r.sock, &key_prover(&old.key), None).unwrap();
     loop {
         if let WatchEvent::Caught(_) = w.next_event().unwrap() {
             break;
@@ -692,7 +692,7 @@ fn an_off_roster_watch_closes_at_the_next_epoch_bump_and_never_sees_what_follows
     let mut r = rig();
     let mut shep = r.enrol("shep");
     let h1 = r.enrol("h1");
-    let mut w = Watch::open(&r.sock, &h1.key, None).unwrap();
+    let mut w = Watch::open(&r.sock, &key_prover(&h1.key), None).unwrap();
     let (_, caught) = kinds_until_closed_or_caught(&mut w);
     assert!(caught.is_none(), "open after the replay");
     r.drop_everyone_but_shep(&mut shep);
@@ -716,7 +716,7 @@ fn a_roster_event_that_drops_the_member_closes_its_watch_right_after_its_bump() 
     let mut r = rig();
     let mut shep = r.enrol("shep");
     let h1 = r.enrol("h1");
-    let mut w = Watch::open(&r.sock, &h1.key, None).unwrap();
+    let mut w = Watch::open(&r.sock, &key_prover(&h1.key), None).unwrap();
     let _ = kinds_until_closed_or_caught(&mut w);
     r.drop_everyone_but_shep(&mut shep);
     // one frame, roster then its epoch bump, then the close
@@ -736,7 +736,7 @@ fn a_session_is_not_closed_by_an_epoch_bump_from_before_it_existed() {
     let mut early = r.enrol("h1");
     assert!(matches!(rpc(&mut early.conn, &Req::End), Resp::Ok)); // bump #1
     let shep = r.enrol("shep"); // enrolled after it, at the new epoch
-    let mut w = Watch::open(&r.sock, &shep.key, None).unwrap();
+    let mut w = Watch::open(&r.sock, &key_prover(&shep.key), None).unwrap();
     let (kinds, closed) = kinds_until_closed_or_caught(&mut w);
     assert!(
         closed.is_none(),
@@ -767,7 +767,7 @@ fn a_catch_up_marker_that_disagrees_with_the_verified_head_is_an_error() {
     }
     let dir = TempDir::new().unwrap();
     let mut reader = Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
-    reader.sync(&r.sock, &shep.key).unwrap();
+    reader.sync(&r.sock, &key_prover(&shep.key)).unwrap();
     assert!(reader.follower().admitted() > 1);
     // a scripted peer claims "caught up at 0" to a reader at a later head
     let fake = dir.path().join("fake.sock");
@@ -793,7 +793,7 @@ fn a_catch_up_marker_that_disagrees_with_the_verified_head_is_an_error() {
         ));
         write_msg(&mut c, &Resp::Caught { index: 0 }).unwrap();
     });
-    let err = reader.sync(&fake, &shep.key).unwrap_err();
+    let err = reader.sync(&fake, &key_prover(&shep.key)).unwrap_err();
     peer.join().unwrap();
     assert!(matches!(err, ReaderError::Invalid(_)), "{err}");
 }
@@ -809,7 +809,7 @@ fn a_request_whose_frame_could_not_be_delivered_is_refused_and_one_that_just_fit
                                  // is the same size from 64 KiB up, so the frame grows one byte per byte)
     let probe = 100_000;
     r.brief(&mut shep, &"x".repeat(probe));
-    let mut w = Watch::open(&r.sock, &shep.key, None).unwrap();
+    let mut w = Watch::open(&r.sock, &key_prover(&shep.key), None).unwrap();
     let mut last = vec![];
     loop {
         match w.next_event().unwrap() {
@@ -836,7 +836,8 @@ fn a_request_whose_frame_could_not_be_delivered_is_refused_and_one_that_just_fit
     assert_eq!(r.serving().with_server(|s| s.admitted()), before);
     // just under the limit: committed, and the stream can carry it
     let index = r.brief(&mut shep, &"x".repeat(fits - SLACK));
-    let (kinds, _) =
-        kinds_until_closed_or_caught(&mut Watch::open(&r.sock, &shep.key, None).unwrap());
+    let (kinds, _) = kinds_until_closed_or_caught(
+        &mut Watch::open(&r.sock, &key_prover(&shep.key), None).unwrap(),
+    );
     assert!(kinds.len() as u64 >= index);
 }

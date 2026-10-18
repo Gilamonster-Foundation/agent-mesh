@@ -8,8 +8,8 @@
 
 use crate::fs::{save_atomic, Fs};
 use crate::ReaderError;
-use agent_mesh_flock::Genesis;
-use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp};
+use agent_mesh_flock::{Board, Genesis};
+use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp, StreamChallenge};
 use agent_mesh_flock_server::{FollowError, Follower, Head, Sealed};
 use agent_mesh_protocol::{AgentKey, Assertion};
 use content_addressable::canonical::{from_canonical_dagcbor_checked, to_canonical_dagcbor};
@@ -19,6 +19,17 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
 const FILE: &str = "reader.state";
+
+/// Signs a stream challenge: the session process in production (the key never
+/// leaves it), a held key in tests.
+pub type Prover<'a> = &'a dyn Fn(&StreamChallenge) -> Result<Assertion, ReaderError>;
+
+/// A prover over a key held in this process.
+pub fn key_prover(
+    key: &AgentKey,
+) -> impl Fn(&StreamChallenge) -> Result<Assertion, ReaderError> + '_ {
+    move |ch| Ok(Assertion::sign(key, &ch.id()?))
+}
 
 #[derive(Serialize, Deserialize)]
 struct Checkpoint {
@@ -123,29 +134,58 @@ impl<F: Fs> Reader<F> {
     ///
     /// # Errors
     /// Refused stream, rollback, an invalid frame, I/O.
-    pub fn sync(&mut self, serve: &Path, key: &AgentKey) -> Result<(), ReaderError> {
-        let mut w = Watch::open(serve, key, self.follower.head().cloned())?;
+    pub fn sync(&mut self, serve: &Path, prove: Prover<'_>) -> Result<(), ReaderError> {
+        self.follow(serve, prove, true, &mut |_| {}).map(|_| ())
+    }
+
+    /// Like [`Self::sync`], but with `once` false keep going: every frame is
+    /// verified, saved, then handed to `seen`, until the server closes the
+    /// stream (its reason is returned). `seen` runs only after the save, so
+    /// anything shown is already witnessed.
+    ///
+    /// # Errors
+    /// Refused stream, rollback, an invalid frame, I/O.
+    pub fn follow(
+        &mut self,
+        serve: &Path,
+        prove: Prover<'_>,
+        once: bool,
+        seen: &mut dyn FnMut(Seen<'_>),
+    ) -> Result<String, ReaderError> {
+        let mut w = Watch::open(serve, prove, self.follower.head().cloned())?;
         loop {
             match w.next_event()? {
                 WatchEvent::Frame(f) => {
-                    self.apply(f)?;
+                    self.apply(f.clone())?;
                     self.save()?;
+                    seen(Seen::Frame(&f, self.follower.board()));
                 }
                 WatchEvent::Caught(i) => {
                     // the marker must agree with what this reader verified
-                    return if i == self.follower.admitted() {
-                        Ok(())
-                    } else {
-                        Err(ReaderError::Invalid(format!(
+                    if i != self.follower.admitted() {
+                        return Err(ReaderError::Invalid(format!(
                             "the server says caught up at {i}; this reader verified {}",
                             self.follower.admitted()
-                        )))
-                    };
+                        )));
+                    }
+                    seen(Seen::Caught(i));
+                    if once {
+                        return Ok("caught up".into());
+                    }
                 }
-                WatchEvent::Closed(why) => return Err(ReaderError::Stream(why)),
+                WatchEvent::Closed(why) if once => return Err(ReaderError::Stream(why)),
+                WatchEvent::Closed(why) => return Ok(why),
             }
         }
     }
+}
+
+/// What [`Reader::follow`] reports, after it is saved.
+pub enum Seen<'a> {
+    /// A verified, saved frame and the board it produced.
+    Frame(&'a [Sealed], &'a Board),
+    /// The replay is over.
+    Caught(u64),
 }
 
 /// What a stream delivers.
@@ -164,19 +204,19 @@ pub struct Watch {
 }
 
 impl Watch {
-    /// Ask for a challenge, sign it with the session key, and open the
-    /// stream after `from`.
+    /// Ask for a challenge, have `prove` sign it, and open the stream after
+    /// `from`.
     ///
     /// # Errors
     /// Refused, or [`ReaderError::Rollback`] when the server is behind
     /// `from`.
-    pub fn open(serve: &Path, key: &AgentKey, from: Option<Head>) -> Result<Self, ReaderError> {
+    pub fn open(serve: &Path, prove: Prover<'_>, from: Option<Head>) -> Result<Self, ReaderError> {
         let mut conn = UnixStream::connect(serve)?;
         write_msg(&mut conn, &Req::WatchBegin)?;
         let Some(Resp::StreamChallenge(ch)) = read_msg::<Resp>(&mut conn)? else {
             return Err(ReaderError::Stream("no challenge".into()));
         };
-        let proof = Box::new(Assertion::sign(key, &ch.id()?));
+        let proof = Box::new(prove(&ch)?);
         write_msg(&mut conn, &Req::Watch { from, proof })?;
         Ok(Self { conn })
     }
