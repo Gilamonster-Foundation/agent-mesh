@@ -3,6 +3,7 @@
 //! nothing the server's admission decides.
 
 use super::discover::{Where, Who};
+use agent_mesh_flock::text::{inert, inert_lines};
 use agent_mesh_flock::{Body, Kind, Outcome};
 use agent_mesh_flock_server::{Snapshot, Status};
 use agent_mesh_flock_session::{call, CtlReq, CtlResp};
@@ -56,7 +57,7 @@ pub fn send_via(
 /// `join`: who is this session, and optionally tell the log its pane.
 pub fn join(home: &Path, w: &Where, announce: bool) -> Result<()> {
     let (socket, text) = whoami(home, w)?;
-    print!("{text}");
+    print!("{}", inert_lines(&text));
     if announce {
         match call(&socket, &CtlReq::Announce)? {
             CtlResp::Admitted { event, index } => println!("announced {event} at {index}"),
@@ -96,8 +97,8 @@ fn describe(me: &Who, snap: Option<&Snapshot>) -> String {
     format!(
         "flock:   {}\nmember:  {}\nsession: {}\nenrolled: {} (at enrollment; a hand-off may have changed it)\nstate:   {state}\n",
         me.flock,
-        me.member,
-        me.session,
+        inert(&me.member),
+        inert(&me.session),
         if me.pending { "pending" } else { "active" },
     )
 }

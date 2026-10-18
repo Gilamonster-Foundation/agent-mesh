@@ -1,0 +1,125 @@
+//! A valid signature says who spoke, not that their words are harmless. A really
+//! admitted flock carries terminal-control text in a status, a member name, a
+//! lane and a job label; no command may hand it to the operator's terminal.
+#![cfg(unix)]
+mod harness;
+
+use agent_mesh_flock::{Body, Kind};
+use agent_mesh_flock_session::{call, CtlReq};
+use harness::{amesh, flock_with, Sess};
+use std::collections::BTreeMap;
+use std::process::Output;
+
+/// OSC 52 (set the clipboard), BEL, a one-character CSI, a bidi override.
+/// No colon (member specs split on it) and no newline (it is an argument).
+const HOSTILE: &str = "\u{1b}]52;c;aGk=\u{7}\u{9b}31m\u{202e}rtl";
+
+/// What a terminal could act on: ESC, BEL, any C1 control, bidi/zero-width.
+fn dangerous(bytes: &[u8]) -> Option<String> {
+    let s = String::from_utf8_lossy(bytes);
+    s.chars()
+        .find(|c| {
+            c.is_control() && !matches!(c, '\n' | '\t')
+                || matches!(c, '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}')
+        })
+        .map(|c| format!("{c:?} in {s:?}"))
+}
+
+fn safe(o: &Output, what: &str) {
+    for (name, b) in [("stdout", &o.stdout), ("stderr", &o.stderr)] {
+        assert!(dangerous(b).is_none(), "{what} {name}: {:?}", dangerous(b));
+    }
+}
+
+struct World {
+    f: harness::Flock,
+    shep: Sess,
+    evil: Sess,
+    _adapter: Sess,
+}
+
+fn world() -> World {
+    let evil_member = format!("ev{HOSTILE}il");
+    let f = flock_with(&[
+        "shep:shepherd",
+        &format!("{evil_member}:helper"),
+        "herdr:adapter",
+    ]);
+    let shep = f.session("shep");
+    let evil = f.session(&evil_member);
+    let adapter = f.session("herdr");
+    // a brief into the hostile lane, for the hostile member
+    f.emit(&shep, &["brief", "--to", &evil_member, "--lane", HOSTILE]);
+    // a status carrying the payload, and a job with a hostile label
+    let refs = BTreeMap::new();
+    call(
+        &adapter.sock,
+        &CtlReq::Emit {
+            kind: Kind::Status,
+            refs,
+            body: Body::Status {
+                text: format!("all fine{HOSTILE}"),
+            },
+        },
+    )
+    .unwrap();
+    let o = f.run(
+        Some(&evil),
+        &["run", "--lane", HOSTILE, "--label", HOSTILE, "--", "true"],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    World {
+        f,
+        shep,
+        evil,
+        _adapter: adapter,
+    }
+}
+
+#[test]
+fn no_command_hands_member_authored_text_to_the_terminal() {
+    let w = world();
+    let run = |s: &Sess, args: &[&str]| {
+        let o = w.f.run(Some(s), args);
+        assert!(
+            o.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        safe(&o, &args.join(" "));
+        String::from_utf8(o.stdout).unwrap()
+    };
+    // `watch --once` first: it prints each event once, as it verifies it
+    let watch = run(&w.shep, &["watch", "--once"]);
+    let log = run(&w.shep, &["log"]);
+    let status = run(&w.shep, &["status"]);
+    let inbox = run(&w.evil, &["inbox"]);
+    let join = run(&w.evil, &["join"]);
+    // the payload really is in the log, and the escaped forms are what is shown
+    let want = "\\x1b]52;c;aGk=\\x07\\x9b31m\\u{202e}rtl";
+    assert!(log.contains(want), "{log}");
+    assert!(watch.contains(want), "{watch}");
+    assert!(status.contains("\\x1b"), "{status}");
+    assert!(inbox.contains("\\x1b"), "{inbox}");
+    assert!(join.contains("ev\\x1b"), "{join}");
+}
+
+#[test]
+fn an_error_that_names_hostile_text_is_inert_too() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join(format!("no{HOSTILE}pe"));
+    let o = amesh(home.path())
+        .args(["flock", "join", "--dir"])
+        .arg(&dir)
+        .arg("--session")
+        .arg(home.path().join("nosock"))
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+    safe(&o, "error");
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("\\x1b"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
