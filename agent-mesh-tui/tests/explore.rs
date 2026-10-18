@@ -222,6 +222,10 @@ fn event(i: usize, kind: &str, member: &str, lane: Option<&str>, parents: &[usiz
     EventRow {
         index: i as u64 + 1,
         id: format!("bafy{i}"),
+        cid: content_addressable::ContentAddressable::content_id(
+            &content_addressable::MerkleNode::genesis(format!("e{i}")),
+        )
+        .unwrap(),
         kind: kind.into(),
         member: member.into(),
         lane: lane.map(str::to_owned),

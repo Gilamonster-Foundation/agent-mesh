@@ -68,7 +68,10 @@ mod run {
         print!("{}", render::to_text(&app, 110, height));
         match outcome {
             Outcome::Done => Ok(()),
-            Outcome::Down(why) | Outcome::Failed(why) | Outcome::Unsaved(why) => bail!("{why}"),
+            Outcome::Down(why) | Outcome::Failed(why) | Outcome::Unsaved(why) => {
+                // the reason can come from the server: print it inert
+                bail!("{}", agent_mesh_tui::ui::inert::inert(&why))
+            }
         }
     }
 

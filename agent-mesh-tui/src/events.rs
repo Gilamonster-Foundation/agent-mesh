@@ -3,8 +3,8 @@
 //! wire or checked again; an event is only ever in the board because the
 //! follower verified it.
 
-use agent_mesh_flock::{Board, Body, Entry, Kind, Role};
-use std::collections::BTreeMap;
+use agent_mesh_flock::{Board, Body, Entry, Kind};
+use content_addressable::ContentId;
 
 /// One thing an event points at: its `prev`, or a named reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +25,9 @@ pub struct EventRow {
     pub index: u64,
     /// Content id.
     pub id: String,
+    /// The same, as the id itself (cheap to compare, and what a cached row is
+    /// checked against).
+    pub cid: ContentId,
     /// Kind, kebab-case (`job-end`).
     pub kind: String,
     /// The roster member whose session signed it, or `server`.
@@ -35,7 +38,9 @@ pub struct EventRow {
     pub summary: String,
     /// Admitted as a conflict (a second closer).
     pub conflict: bool,
-    /// Signer: the member and the session fingerprint.
+    /// Signer: the member and the session fingerprint. No role: the log only
+    /// knows the roster as it is now, and a role as of today beside an old
+    /// signature would be a claim about the past.
     pub signer: String,
     /// The author's claim of when (order is the admission index, not this).
     pub at: u64,
@@ -80,6 +85,7 @@ fn summary(body: &Body) -> String {
     }
 }
 
+/// The lane a body names itself, if it names one.
 fn own_lane(body: &Body) -> Option<String> {
     match body {
         Body::Brief { lane, .. } | Body::Review { lane, .. } | Body::Job { lane, .. } => {
@@ -90,7 +96,22 @@ fn own_lane(body: &Body) -> Option<String> {
     }
 }
 
-fn row_of(e: &Entry, roles: &BTreeMap<&str, Role>, rows: &[EventRow]) -> EventRow {
+/// The reference that says which lane an event answers, by kind. Only these:
+/// an event's own earlier work (`prev`) says nothing about the lane of the
+/// thing it is answering.
+fn lane_ref(kind: Kind) -> Option<&'static str> {
+    match kind {
+        Kind::Ack => Some("of"),
+        Kind::Result => Some("brief"),
+        Kind::Verdict => Some("review"),
+        Kind::JobEnd => Some("job"),
+        Kind::Ask => Some("about"),
+        Kind::Answer | Kind::RelayedAnswer => Some("ask"),
+        _ => None,
+    }
+}
+
+fn row_of(e: &Entry, rows: &[EventRow]) -> EventRow {
     let member = e.member.clone().unwrap_or_else(|| "server".to_owned());
     let parent = |role: &str, id: String| {
         let row = rows.iter().position(|r| r.id == id);
@@ -107,15 +128,14 @@ fn row_of(e: &Entry, roles: &BTreeMap<&str, Role>, rows: &[EventRow]) -> EventRo
     for (role, id) in &e.event.refs {
         parents.push(parent(role, id.to_string()));
     }
-    // the lane it names, else the lane of what it answers
+    // its own lane, else the lane of the event its kind answers; never prev
     let lane = own_lane(&e.event.body).or_else(|| {
+        let role = lane_ref(e.event.kind)?;
         parents
             .iter()
-            .filter_map(|p| p.row)
-            .find_map(|i| rows[i].lane.clone())
-    });
-    let role = roles.get(member.as_str()).map_or(String::new(), |r| {
-        format!(", {}", format!("{r:?}").to_lowercase())
+            .find(|p| p.role == role)
+            .and_then(|p| p.row)
+            .and_then(|i| rows[i].lane.clone())
     });
     let body = serde_json::to_string_pretty(&e.event.body)
         .unwrap_or_default()
@@ -125,8 +145,9 @@ fn row_of(e: &Entry, roles: &BTreeMap<&str, Role>, rows: &[EventRow]) -> EventRo
     EventRow {
         index: e.index,
         id: e.id.to_string(),
+        cid: e.id,
         kind: kind_name(e.event.kind),
-        signer: format!("{member}{role}; session {}", e.event.author),
+        signer: format!("{member}; session {}", e.event.author),
         member,
         lane,
         summary: summary(&e.event.body),
@@ -158,24 +179,20 @@ fn row_of(e: &Entry, roles: &BTreeMap<&str, Role>, rows: &[EventRow]) -> EventRo
 /// fold only the new ones.
 #[must_use]
 pub fn fold_events(board: &Board, prev: Option<&[EventRow]>) -> Vec<EventRow> {
-    let roles: BTreeMap<&str, Role> = board
-        .members()
-        .iter()
-        .map(|m| (m.name.as_str(), m.role))
-        .collect();
     let entries: Vec<&Entry> = board.entries().collect();
+    // A cached row is only as good as the history it was built in: reuse the
+    // rows only if every one of them is the event this log has at that
+    // position (the last one alone says nothing about the ones before it).
     let mut rows: Vec<EventRow> = match prev {
         Some(p)
-            if p.len() <= entries.len()
-                && p.last()
-                    .is_none_or(|l| entries[p.len() - 1].id.to_string() == l.id) =>
+            if p.len() <= entries.len() && p.iter().zip(&entries).all(|(r, e)| r.cid == e.id) =>
         {
             p.to_vec()
         }
         _ => vec![],
     };
     for e in entries.iter().skip(rows.len()) {
-        let row = row_of(e, &roles, &rows);
+        let row = row_of(e, &rows);
         rows.push(row);
     }
     rows

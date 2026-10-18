@@ -3,7 +3,7 @@ log ✓ 24 · epoch 1 · live
  Board  [Stream]
 event #11  <cid>
 ✓ signature, session certificate and admission checked; admitted at #11
-kind brief · signed by shep, shepherd; session <session>
+kind brief · signed by shep; session <session>
 lane l1 · at 1
 parents:
   (none)

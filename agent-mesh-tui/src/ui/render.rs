@@ -2,6 +2,7 @@
 //! The selection is a `▸` marker, not only a colour, so a text snapshot shows it.
 
 use super::app::{open_text, quiet_text};
+use super::inert::inert;
 use super::{App, Tab};
 use crate::model::{Header, Link};
 use newtui::Component;
@@ -186,6 +187,20 @@ fn stream_footer(app: &App, visible: usize, total: usize, offset: usize) -> [Str
     ]
 }
 
+/// A line of text on the screen: the only way text reaches a widget, so the
+/// escaping in [`inert`] cannot be skipped.
+fn text_line(s: &str) -> Line<'static> {
+    Line::from(inert(s).into_owned())
+}
+
+/// A line drawn in reverse video (the selection).
+fn selected_line(s: &str) -> Line<'static> {
+    Line::styled(
+        inert(s).into_owned(),
+        Style::default().add_modifier(Modifier::REVERSED),
+    )
+}
+
 /// Draw the whole screen: the header, the tab bar and the footer stay put;
 /// the rows scroll to keep the selection in view.
 pub fn draw(f: &mut Frame<'_>, app: &App) {
@@ -200,11 +215,7 @@ pub fn draw(f: &mut Frame<'_>, app: &App) {
     let mut head: Vec<String> = header_lines(&app.model().header).to_vec();
     head.push(tab_line(app));
     f.render_widget(
-        Paragraph::new(
-            head.iter()
-                .map(|l| Line::from(l.as_str()))
-                .collect::<Vec<_>>(),
-        ),
+        Paragraph::new(head.iter().map(|l| text_line(l)).collect::<Vec<_>>()),
         rows[0],
     );
     // one line of the body area is the column header
@@ -222,9 +233,9 @@ pub fn draw(f: &mut Frame<'_>, app: &App) {
                 .map(|(i, l)| {
                     // line 0 is the column header; member offset + i - 1 follows
                     if i > 0 && selected == Some(offset + i - 1) {
-                        Line::styled(l, Style::default().add_modifier(Modifier::REVERSED))
+                        selected_line(&l)
                     } else {
-                        Line::from(l)
+                        text_line(&l)
                     }
                 })
                 .collect();
@@ -242,7 +253,7 @@ pub fn draw(f: &mut Frame<'_>, app: &App) {
                 lines.truncate(height.saturating_sub(1));
                 lines.push("  … (clipped to the screen)".to_owned());
             }
-            body = lines.into_iter().map(Line::from).collect();
+            body = lines.iter().map(|l| text_line(l)).collect();
             footer = vec![String::new(), app.view().footer];
         }
         Tab::Stream => {
@@ -258,9 +269,9 @@ pub fn draw(f: &mut Frame<'_>, app: &App) {
                         .checked_sub(1)
                         .and_then(|n| rows_shown.get(offset + n).copied());
                     if row.is_some() && row == selected {
-                        Line::styled(l, Style::default().add_modifier(Modifier::REVERSED))
+                        selected_line(&l)
                     } else {
-                        Line::from(l)
+                        text_line(&l)
                     }
                 })
                 .collect();
@@ -269,12 +280,7 @@ pub fn draw(f: &mut Frame<'_>, app: &App) {
     }
     f.render_widget(Paragraph::new(body), rows[1]);
     f.render_widget(
-        Paragraph::new(
-            footer
-                .iter()
-                .map(|l| Line::from(l.as_str()))
-                .collect::<Vec<_>>(),
-        ),
+        Paragraph::new(footer.iter().map(|l| text_line(l)).collect::<Vec<_>>()),
         rows[2],
     );
 }

@@ -33,6 +33,12 @@ fn member(name: &str, role: Role) -> Member {
 impl Fixture {
     /// A flock named `fx` with shep, h1, h2, rev, herdr and a spare `watcher`.
     pub fn new() -> Self {
+        Self::with_members(&[])
+    }
+
+    /// [`new`](Self::new) plus helpers with these names (names are the
+    /// roster's, so they are as untrusted as any other text in a flock).
+    pub fn with_members(extra: &[&str]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let spec = InitSpec {
             name: "fx".into(),
@@ -44,7 +50,10 @@ impl Fixture {
                 member("herdr", Role::Adapter),
                 member("watcher", Role::Reviewer),
                 member("spare", Role::Helper),
-            ],
+            ]
+            .into_iter()
+            .chain(extra.iter().map(|n| member(n, Role::Adapter)))
+            .collect(),
             salt: "00".into(),
             host: "h".into(),
             issued_at: "t".into(),
@@ -82,6 +91,17 @@ impl Fixture {
         refs: &[(&str, ContentId)],
         body: Body,
     ) -> ContentId {
+        self.emit_files(who, kind, refs, body, vec![])
+    }
+
+    pub fn emit_files(
+        &mut self,
+        who: &Who,
+        kind: Kind,
+        refs: &[(&str, ContentId)],
+        body: Body,
+        files: Vec<agent_mesh_flock::FileRef>,
+    ) -> ContentId {
         self.at += 1;
         let node = Event {
             flock: self.server.flock(),
@@ -92,7 +112,7 @@ impl Fixture {
                 .iter()
                 .map(|(r, c)| ((*r).to_owned(), *c))
                 .collect::<BTreeMap<_, _>>(),
-            files: vec![],
+            files,
             at: self.at,
             body,
         }

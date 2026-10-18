@@ -152,7 +152,7 @@ fn the_raw_panel_shows_the_verified_event_and_its_parents_can_be_followed() {
     let ack = app.raw().expect("panel open").clone();
     let text = render::raw_lines(&app).join("\n");
     assert!(text.contains(&ack.id) && text.contains("✓"), "{text}");
-    assert!(text.contains("signed by h1, helper; session "), "{text}");
+    assert!(text.contains("signed by h1; session "), "{text}");
     // h1's first event has no prev: its only parent is what it answers
     assert!(text.contains("1 of "), "the reference is listed:\n{text}");
     assert!(text.contains("→ #"), "{text}");
@@ -235,10 +235,31 @@ fn a_newer_fold_reuses_the_rows_it_already_has_and_rebuilds_when_they_are_not_it
     );
 
     // rows that are not this log's (the last one differs): rebuilt, not trusted
+    let other_cid = |i: usize| {
+        content_addressable::ContentAddressable::content_id(
+            &content_addressable::MerkleNode::genesis(format!("other{i}")),
+        )
+        .unwrap()
+    };
     let mut other = want.clone();
-    Arc::make_mut(&mut other.events)[4].id = "bafyother".into();
+    Arc::make_mut(&mut other.events)[4].cid = other_cid(4);
     Arc::make_mut(&mut other.events).truncate(5);
     assert_eq!(fold_onto(Some(&other), &src, Link::Live), want);
+
+    // the same length and the same LAST event, but another history before it:
+    // an event id commits to its own author's chain, not to everything the
+    // flock admitted earlier, so matching the last id proves nothing
+    let mut forked = want.clone();
+    let n = forked.events.len();
+    {
+        let rows = Arc::make_mut(&mut forked.events);
+        rows[2].cid = other_cid(2);
+        rows[2].summary = "another history".into();
+    }
+    assert_eq!(forked.events.len(), n);
+    assert_eq!(forked.events.last(), want.events.last());
+    let healed = fold_onto(Some(&forked), &src, Link::Live);
+    assert_eq!(healed, want, "the forked rows were kept");
 }
 
 #[test]
@@ -297,4 +318,112 @@ fn the_stream_keeps_the_selection_on_screen_through_a_resize_with_the_header_fix
             .starts_with(&format!("{newest} "))),
         "{top}"
     );
+}
+
+fn fold_disk(f: &support::Fixture, prev: Option<&Model>) -> Model {
+    let snap = agent_mesh_flock_server::Snapshot::read(f.path()).unwrap();
+    let genesis = agent_mesh_flock_server::load_genesis(f.path())
+        .unwrap()
+        .node;
+    let id = content_addressable::ContentAddressable::content_id(&genesis).unwrap();
+    let src = agent_mesh_tui::model::Source::of_snapshot("fx", id, &snap);
+    fold_onto(prev, &src, Link::Live)
+}
+
+#[test]
+fn a_lane_comes_from_the_event_answered_never_from_the_authors_previous_event() {
+    use agent_mesh_flock::{Body, Kind};
+    let mut f = support::Fixture::new();
+    let (shep, h1, herdr) = (f.enroll("shep"), f.enroll("h1"), f.enroll("herdr"));
+    // h1 works in alpha, is then briefed in beta and acknowledges the brief:
+    // the ack's prev is the alpha job, what it answers is the beta brief
+    f.emit(
+        &h1,
+        Kind::Job,
+        &[],
+        Body::Job {
+            lane: "alpha".into(),
+            label: "j".into(),
+        },
+    );
+    let brief = f.emit(
+        &shep,
+        Kind::Brief,
+        &[],
+        Body::Brief {
+            to: "h1".into(),
+            lane: "beta".into(),
+        },
+    );
+    f.emit(&h1, Kind::Ack, &[("of", brief)], Body::Ack);
+    // a status after a job names no lane and answers nothing
+    f.emit(
+        &herdr,
+        Kind::Job,
+        &[],
+        Body::Job {
+            lane: "gamma".into(),
+            label: "k".into(),
+        },
+    );
+    f.emit(
+        &herdr,
+        Kind::Status,
+        &[],
+        Body::Status {
+            text: "idle".into(),
+        },
+    );
+    let m = fold_disk(&f, None);
+    let lane = |kind: &str, who: &str| {
+        m.events
+            .iter()
+            .find(|e| e.kind == kind && e.member == who)
+            .unwrap()
+            .lane
+            .clone()
+    };
+    assert_eq!(lane("ack", "h1").as_deref(), Some("beta"));
+    assert_eq!(
+        lane("status", "herdr"),
+        None,
+        "no lane is invented from prev"
+    );
+    // and filtering by beta finds the ack
+    let mut app = App::new(m);
+    app.handle(Key::Char('2'));
+    while app.filters().lane.as_deref() != Some("beta") {
+        app.handle(Key::Char('l'));
+    }
+    assert!(shown(&app).iter().any(|e| e.kind == "ack"));
+}
+
+#[test]
+fn the_signer_label_does_not_rewrite_a_role_after_a_roster_change() {
+    use agent_mesh_flock::{Body, Kind, Role};
+    let mut f = support::Fixture::new();
+    let herdr = f.enroll("herdr");
+    f.emit(
+        &herdr,
+        Kind::Status,
+        &[],
+        Body::Status {
+            text: "idle".into(),
+        },
+    );
+    let before = fold_disk(&f, None);
+    // the roster now makes herdr a helper; the old status was signed as an adapter
+    let mut roster = f.server.board().members().to_vec();
+    roster.iter_mut().find(|m| m.name == "herdr").unwrap().role = Role::Helper;
+    f.server.replace_roster(roster).unwrap();
+    let fresh = fold_disk(&f, None);
+    let grown = fold_disk(&f, Some(&before));
+    assert_eq!(fresh, grown, "fresh and incremental folds agree");
+    let status = fresh.events.iter().find(|e| e.kind == "status").unwrap();
+    assert!(
+        !status.signer.contains("helper") && !status.signer.contains("adapter"),
+        "a role as of today is not the role the event was signed under: {}",
+        status.signer
+    );
+    assert!(status.signer.starts_with("herdr"), "{}", status.signer);
 }

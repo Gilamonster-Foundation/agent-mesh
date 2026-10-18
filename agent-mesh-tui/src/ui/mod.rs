@@ -2,6 +2,7 @@
 
 mod app;
 mod board;
+pub mod inert;
 pub mod render;
 mod stream;
 
