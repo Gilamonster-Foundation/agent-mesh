@@ -110,6 +110,37 @@ pub struct Serving {
     joins: Vec<JoinHandle<()>>,
 }
 
+/// What the attach socket answers to a request it does not offer.
+pub(crate) const NOT_OFFERED: &str = "not offered on the attach socket";
+
+/// Whether `class` may make `req`. Written as one arm per request and no
+/// wildcard on the remote side, so a request added to the protocol will not
+/// compile until someone decides whether a remote host may make it.
+///
+/// A remote host's bridge may: say hello, fetch genesis, enroll with an invite
+/// token, renew with a possession proof, ask for a session's head, admit events
+/// a session signed, open a stream with a signed challenge, and say goodbye. It
+/// may not mint invites: that is the owner's alone.
+fn offered(class: Class, req: &Req) -> bool {
+    if class == Class::Owner {
+        return true;
+    }
+    match req {
+        Req::Hello => true,
+        Req::Genesis => true,
+        Req::EnrollBegin { .. } => true,
+        Req::EnrollFinish { .. } => true,
+        Req::Renew { .. } => true,
+        Req::RenewFinish { .. } => true,
+        Req::Head { .. } => true,
+        Req::Admit { .. } => true,
+        Req::End => true,
+        Req::WatchBegin => true,
+        Req::Watch { .. } => true,
+        Req::Invite { .. } => false,
+    }
+}
+
 /// Which surface a connection came in on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Class {
@@ -303,6 +334,12 @@ fn connection(shared: &Shared, mut conn: UnixStream, class: Class) {
     let mut bound: Option<String> = None;
     let mut challenge: Option<StreamChallenge> = None;
     while let Ok(Some(req)) = read_msg::<Req>(&mut conn) {
+        if !offered(class, &req) {
+            if write_msg(&mut conn, &Resp::Err(NOT_OFFERED.into())).is_err() {
+                break;
+            }
+            continue;
+        }
         match req {
             Req::WatchBegin => {
                 let mut nonce = [0u8; 32];
@@ -436,16 +473,15 @@ fn handle(
     server: &mut Server,
     req: Req,
     bound: &mut Option<String>,
-    class: Class,
+    _class: Class,
 ) -> Result<Resp, ServerError> {
-    let _ = class;
     let taken = || ServerError::Session("this connection already carries a session".into());
     Ok(match req {
         Req::Hello => Resp::Hello {
             flock: server.flock(),
             epoch: server.epoch(),
         },
-        Req::Genesis => return Err(ServerError::Session("todo".into())),
+        Req::Genesis => Resp::Genesis(server.genesis().clone()),
         Req::Invite { member } => Resp::Invited {
             token: server.invite(&member)?.token,
         },
