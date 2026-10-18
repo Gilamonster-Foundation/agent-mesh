@@ -57,7 +57,9 @@ jobs:
   # `#[cfg(target_os = "macos")]` tests (e.g. APFS filename behavior or the
   # real system ssh/sshd round trip), so their green is not evidence for
   # macOS. Narrow to the crates carrying platform-gated tests to keep CI cost
-  # low. This is NOT a new check command — a macOS developer's `just check` /
+  # low. The flock server and session crates are here for their Unix-only
+  # code: the flock(2) directory lock, key-file modes and the local sockets.
+  # This is NOT a new check command — a macOS developer's `just check` /
   # pre-push already runs these — so it needs no justfile/pre-push parity
   # mirror.
   test-macos:
@@ -67,8 +69,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: cargo test (macOS-gated protocol + OpenSSH tests)
-        run: cargo test -p agent-mesh-protocol -p agent-mesh-transport-ssh --locked
+      - name: cargo test (macOS-gated protocol + OpenSSH tests, flock Unix code)
+        run: cargo test -p agent-mesh-protocol -p agent-mesh-transport-ssh -p agent-mesh-flock-server -p agent-mesh-flock-session --locked
 
   coverage:
     name: Workspace coverage (cargo-llvm-cov)
