@@ -6,9 +6,21 @@ fn main() {
     std::process::exit(1);
 }
 
+/// The whole failure report is printed through `inert`: it can carry a reason
+/// a session or server supplied, or a path the operator was handed, and the
+/// default `main() -> Result` formatter would hand those to the terminal raw.
 #[cfg(unix)]
-fn main() -> anyhow::Result<()> {
-    run::main()
+fn main() -> std::process::ExitCode {
+    match run::main() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!(
+                "Error: {}",
+                agent_mesh_tui::ui::inert::inert(&format!("{e:#}"))
+            );
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -68,10 +80,7 @@ mod run {
         print!("{}", render::to_text(&app, 110, height));
         match outcome {
             Outcome::Done => Ok(()),
-            Outcome::Down(why) | Outcome::Failed(why) | Outcome::Unsaved(why) => {
-                // the reason can come from the server: print it inert
-                bail!("{}", agent_mesh_tui::ui::inert::inert(&why))
-            }
+            Outcome::Down(why) | Outcome::Failed(why) | Outcome::Unsaved(why) => bail!("{why}"),
         }
     }
 
