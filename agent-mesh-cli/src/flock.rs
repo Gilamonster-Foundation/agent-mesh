@@ -329,7 +329,7 @@ fn announced(snap: &Snapshot, live: &[Pane], tab: Option<&str>) -> BTreeMap<Stri
             continue;
         };
         let author = e.event.author.as_str();
-        if latest.get(author).map_or(true, |(i, _)| e.index > *i) {
+        if latest.get(author).is_none_or(|(i, _)| e.index > *i) {
             latest.insert(author, (e.index, pane));
         }
     }
