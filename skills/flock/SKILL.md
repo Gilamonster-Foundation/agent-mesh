@@ -171,6 +171,20 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   session (`CtlReq::ProveStream`, only for its own flock, after renewing its
   certificate to the current epoch), so the CLI holds no key. A closed stream is an error exit with the server's reason.
 
+- **read-side features (step 8a)**: `agent-mesh-flock-server` has a `serve`
+  feature (the `Server`, entry/enrollment, sockets, key file, log writer and
+  journal) and `agent-mesh-flock-session` an `emit` feature (the session
+  process, its locked key, `CtlReq::Emit`/`Announce`). Both are on by default
+  and nothing else changes. Without them the crates still verify and follow a
+  log: `Snapshot`, `Follower`, `Reader`/`Watch`, `session_prover` (the
+  `ProveStream` client) and the types. The workspace entries are
+  `default-features = false`, so a member that writes asks for the writer
+  (the CLI does); a read-only member (the TUI, step 8b) takes them as they
+  stand. `agent-mesh-flock-session/tests/read_side.rs` enforces it from
+  `cargo tree -p … --format "{p}|{f}"` (per-package resolution; `cargo
+  metadata` unifies features across the workspace and would always see the
+  CLI's).
+
 **Planned, not built:** operator approval of a **delegate**
 hand-off (#127's other half; waits on the delegate designation, step 13); device changes
 signed by a listed device (server-signed only today); operator-signed events (`answer`); the rest of
