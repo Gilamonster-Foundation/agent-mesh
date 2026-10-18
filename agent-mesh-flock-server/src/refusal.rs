@@ -63,6 +63,8 @@ pub enum Reason {
     DuplicateMember,
     /// A pane or tab claim that is empty, too long or not printable.
     BadClaim,
+    /// A `job-end` that does not say exactly one of an exit code and a signal.
+    BadExit,
 }
 
 impl From<&Refusal> for Reason {
@@ -92,6 +94,7 @@ impl From<&Refusal> for Reason {
             Refusal::DevicesOnNonOperator => Self::DevicesOnNonOperator,
             Refusal::DuplicateMember => Self::DuplicateMember,
             Refusal::BadClaim => Self::BadClaim,
+            Refusal::BadExit => Self::BadExit,
         }
     }
 }

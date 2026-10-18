@@ -62,6 +62,8 @@ pub enum Refusal {
     DuplicateMember,
     /// A claim (pane, tab) that is empty, too long or not printable.
     BadClaim,
+    /// A `job-end` that does not say exactly one of an exit code and a signal.
+    BadExit,
 }
 
 /// An event admitted but flagged: it never replaces the first.
@@ -390,7 +392,11 @@ fn apply_table(
                 _ => Err(Refusal::HeadMismatch),
             }
         }
-        (_, Kind::JobEnd) => {
+        (body, Kind::JobEnd) => {
+            if !matches!(body, Body::JobEnd { code, signal } if code.is_some() != signal.is_some())
+            {
+                return Err(Refusal::BadExit);
+            }
             let (name, _) = member.ok_or(Refusal::NotAllowed)?;
             let entry = target_entry.ok_or(Refusal::MissingRef("job"))?;
             if entry.member.as_deref() != Some(name) {

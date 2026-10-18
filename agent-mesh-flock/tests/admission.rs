@@ -151,7 +151,10 @@ fn verdict_head_must_equal_the_reviews() {
 fn job_end_is_the_job_authors() {
     let mut fx = Fx::new();
     let j = fx.emit("h1", Kind::Job, job("a"), &[]);
-    let end = Body::JobEnd { code: 0 };
+    let end = Body::JobEnd {
+        code: Some(0),
+        signal: None,
+    };
     assert_eq!(
         fx.judge("h2", Kind::JobEnd, end.clone(), &[("job", j)]),
         Verdict::Refuse(Refusal::NotAddressee)
@@ -161,6 +164,22 @@ fn job_end_is_the_job_authors() {
         fx.judge("h1", Kind::JobEnd, end, &[("job", j)]),
         Verdict::Conflict(ConflictKind::SecondCloser { first })
     );
+}
+
+#[test]
+fn a_job_end_says_exactly_one_of_an_exit_code_and_a_signal() {
+    let mut fx = Fx::new();
+    let j = fx.emit("h1", Kind::Job, job("a"), &[]);
+    let end = |code, signal| Body::JobEnd { code, signal };
+    for (code, signal) in [(None, None), (Some(1), Some(9))] {
+        assert_eq!(
+            fx.judge("h1", Kind::JobEnd, end(code, signal), &[("job", j)]),
+            Verdict::Refuse(Refusal::BadExit),
+            "{code:?} {signal:?}"
+        );
+    }
+    // killed by a signal: admitted, and it closes the job
+    fx.emit("h1", Kind::JobEnd, end(None, Some(9)), &[("job", j)]);
 }
 
 #[test]

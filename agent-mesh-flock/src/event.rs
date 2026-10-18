@@ -182,9 +182,17 @@ pub enum Body {
         label: String,
     },
     /// A job ended.
+    ///
+    /// Exactly one of `code` (it exited) and `signal` (a signal ended it)
+    /// is set; admission refuses anything else. An absent field is not
+    /// serialized, so the exit-code form keeps its original identity.
     JobEnd {
-        /// Exit code.
-        code: i64,
+        /// Exit code, when the process exited.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<i64>,
+        /// The signal that ended it, when one did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signal: Option<i32>,
     },
     /// A question; `lane` is set when it concerns a lane.
     Ask {

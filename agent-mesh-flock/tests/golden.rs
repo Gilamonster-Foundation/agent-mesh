@@ -100,7 +100,25 @@ fn vectors() -> Vec<(&'static str, MerkleNode<Event>)> {
         ),
         (
             "job-end",
-            event(Kind::JobEnd, Body::JobEnd { code: 0 }, &[("job", "job")]),
+            event(
+                Kind::JobEnd,
+                Body::JobEnd {
+                    code: Some(0),
+                    signal: None,
+                },
+                &[("job", "job")],
+            ),
+        ),
+        (
+            "job-end-signal",
+            event(
+                Kind::JobEnd,
+                Body::JobEnd {
+                    code: None,
+                    signal: Some(9),
+                },
+                &[("job", "job")],
+            ),
         ),
         (
             "ask",
@@ -206,6 +224,10 @@ const GOLDEN: &[(&str, &str)] = &[
     (
         "job-end",
         "bafyr4iaklrse2apiz4rm5o4lwzlkbx6vybt73vuejchwdnsvqrm2p63u7e",
+    ),
+    (
+        "job-end-signal",
+        "bafyr4ig5jdajgo5anbhqymngwvmmzplcotvhvx6a46tf7jmvokulqmkibe",
     ),
     (
         "ask",

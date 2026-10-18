@@ -29,7 +29,11 @@ fn detail(e: &Entry) -> String {
             format!("{} {head}", if *approved { "approved" } else { "rejected" })
         }
         Body::Job { lane, label } => format!("lane {lane} {label}"),
-        Body::JobEnd { code } => format!("code {code}"),
+        Body::JobEnd { code, signal } => match (code, signal) {
+            (Some(c), None) => format!("exit {c}"),
+            (None, Some(s)) => format!("signal {s}"),
+            _ => "unreadable exit".to_owned(),
+        },
         Body::Ask { text, .. } | Body::Status { text } => text.clone(),
         _ => String::new(),
     }
