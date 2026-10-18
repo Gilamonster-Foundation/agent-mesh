@@ -35,8 +35,20 @@ pub fn send(
     body: Body,
 ) -> Result<String> {
     let (socket, _) = w.session(home)?;
-    match call(&socket, &CtlReq::Emit { kind, refs, body })? {
-        CtlResp::Admitted { event, index } => Ok(format!("admitted {event} at {index}")),
+    let (event, index) = send_via(&socket, kind, refs, body)?;
+    Ok(format!("admitted {event} at {index}"))
+}
+
+/// One `Emit` to a session already chosen; the event id and index the server
+/// admitted. `run` uses it twice so both events go to the same session.
+pub fn send_via(
+    socket: &Path,
+    kind: Kind,
+    refs: BTreeMap<String, ContentId>,
+    body: Body,
+) -> Result<(ContentId, u64)> {
+    match call(socket, &CtlReq::Emit { kind, refs, body })? {
+        CtlResp::Admitted { event, index } => Ok((event, index)),
         _ => bail!("the session answered something else"),
     }
 }

@@ -3,7 +3,8 @@
 
 use crate::SessionError;
 use agent_mesh_flock::{Body, Kind};
-use agent_mesh_flock_server::wire::{read_msg, write_msg};
+use agent_mesh_flock_server::wire::{read_msg, write_msg, StreamChallenge};
+use agent_mesh_protocol::Assertion;
 use content_addressable::ContentId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -28,6 +29,12 @@ pub enum CtlReq {
     /// Tell the log which herdr pane this session was started in. The claim
     /// comes from the session's own environment, never from the caller.
     Announce,
+    /// Sign a server's stream challenge, so the CLI can open a `watch`
+    /// without holding a key. Only a challenge for this session's own flock.
+    ProveStream {
+        /// What the server asked to have signed.
+        challenge: StreamChallenge,
+    },
     /// Say goodbye and exit.
     End,
 }
@@ -53,6 +60,8 @@ pub enum CtlResp {
         /// Its admission index.
         index: u64,
     },
+    /// Answer to `ProveStream`.
+    Proof(Box<Assertion>),
     /// The session is closing.
     Ended,
     /// Refused or failed.
@@ -70,5 +79,23 @@ pub fn call(socket: &Path, req: &CtlReq) -> Result<CtlResp, SessionError> {
         Some(CtlResp::Err(why)) => Err(SessionError::Refused(why)),
         Some(r) => Ok(r),
         None => Err(SessionError::Unexpected),
+    }
+}
+
+/// A [`crate::Prover`] that asks the session at `socket` to sign.
+pub fn session_prover(
+    socket: &Path,
+) -> impl Fn(&StreamChallenge) -> Result<Assertion, crate::ReaderError> + '_ {
+    move |challenge| match call(
+        socket,
+        &CtlReq::ProveStream {
+            challenge: challenge.clone(),
+        },
+    ) {
+        Ok(CtlResp::Proof(p)) => Ok(*p),
+        Ok(_) => Err(crate::ReaderError::Stream(
+            "the session answered something else".into(),
+        )),
+        Err(e) => Err(crate::ReaderError::Stream(e.to_string())),
     }
 }

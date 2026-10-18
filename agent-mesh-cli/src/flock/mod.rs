@@ -20,6 +20,10 @@ pub(crate) mod mcp;
 mod panes;
 #[cfg(unix)]
 mod read;
+#[cfg(unix)]
+mod run;
+#[cfg(unix)]
+mod watch;
 
 #[cfg(unix)]
 use discover::Where;
@@ -170,6 +174,35 @@ pub enum FlockCommand {
         #[arg(long)]
         reject: bool,
     },
+    /// Run a command as a job: a `job` event, the command, then a `job-end`
+    /// with its exit code or the signal that ended it. Exits as the command did.
+    #[cfg(unix)]
+    Run {
+        #[command(flatten)]
+        at: Where,
+        /// The lane the job belongs to.
+        #[arg(long)]
+        lane: String,
+        /// A short label (default: the command's name).
+        #[arg(long)]
+        label: Option<String>,
+        /// The command and its arguments, after `--`.
+        #[arg(last = true, required = true)]
+        cmd: Vec<String>,
+    },
+    /// Follow the log: every frame is verified against the reader's saved
+    /// state, saved, then printed. Stops when the server closes the stream.
+    #[cfg(unix)]
+    Watch {
+        #[command(flatten)]
+        at: Where,
+        /// First show saved events from this admission index on.
+        #[arg(long)]
+        from: Option<u64>,
+        /// Stop once caught up instead of following.
+        #[arg(long)]
+        once: bool,
+    },
     /// Show the roster next to the herdr panes that carry its members.
     /// Read-only: reads the log without its lock and asks herdr only to list.
     Panes {
@@ -262,6 +295,21 @@ pub fn run(home: PathBuf, cmd: FlockCommand) -> Result<()> {
                 },
             )
         }
+        #[cfg(unix)]
+        FlockCommand::Run {
+            at,
+            lane,
+            label,
+            cmd,
+        } => {
+            let code = run::run(&home, &at, lane, label, &cmd)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
+        #[cfg(unix)]
+        FlockCommand::Watch { at, from, once } => watch::watch(&home, &at, from, once),
         FlockCommand::Panes {
             name,
             dir,

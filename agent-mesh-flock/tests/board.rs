@@ -120,7 +120,10 @@ fn a_result_with_an_open_job_shows_completed_job_open() {
     fx.emit(
         "h1",
         Kind::JobEnd,
-        Body::JobEnd { code: 0 },
+        Body::JobEnd {
+            code: Some(0),
+            signal: None,
+        },
         &[("job", job)],
     );
     assert_eq!(fx.board.attempt(&a).unwrap().label(), "completed");

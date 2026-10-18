@@ -4,7 +4,7 @@
 use crate::ctl::{CtlReq, CtlResp};
 use crate::{harden, Locked, Policy, SessionError};
 use agent_mesh_flock::{Body, Event, Kind};
-use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp};
+use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp, StreamChallenge};
 use agent_mesh_protocol::{AgentKey, Assertion};
 use content_addressable::{ContentAddressable, ContentId};
 use ed25519_dalek::{Signer, SigningKey};
@@ -177,6 +177,25 @@ impl Session {
         self.emit(Kind::Pane, BTreeMap::new(), Body::Pane { pane, tab })
     }
 
+    /// Sign a stream challenge, if it is for this session's own flock, with a
+    /// certificate renewed to the current epoch.
+    ///
+    /// # Errors
+    /// The challenge names another flock, renewal failed, or it cannot be
+    /// encoded.
+    pub fn prove_stream(&mut self, ch: &StreamChallenge) -> Result<Assertion, SessionError> {
+        if ch.flock != self.flock {
+            return Err(SessionError::Refused(
+                "that stream challenge is for another flock".into(),
+            ));
+        }
+        // a reader need never emit, so nothing else would bring the
+        // certificate up to the epoch the server checks the proof at
+        self.renew()?;
+        let id = ch.id()?;
+        Ok(Assertion::sign(self.key.get(), &id))
+    }
+
     /// A clean goodbye: the server records `closed`, not `lost`.
     ///
     /// # Errors
@@ -290,6 +309,13 @@ fn handle(s: &mut Session, mut conn: UnixStream) -> bool {
             s.announce().map_or_else(
                 |e| CtlResp::Err(e.to_string()),
                 |(event, index)| CtlResp::Admitted { event, index },
+            ),
+            false,
+        ),
+        CtlReq::ProveStream { challenge } => (
+            s.prove_stream(&challenge).map_or_else(
+                |e| CtlResp::Err(e.to_string()),
+                |p| CtlResp::Proof(Box::new(p)),
             ),
             false,
         ),

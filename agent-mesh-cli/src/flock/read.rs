@@ -29,10 +29,31 @@ fn detail(e: &Entry) -> String {
             format!("{} {head}", if *approved { "approved" } else { "rejected" })
         }
         Body::Job { lane, label } => format!("lane {lane} {label}"),
-        Body::JobEnd { code } => format!("code {code}"),
+        Body::JobEnd { code, signal } => match (code, signal) {
+            (Some(c), None) => format!("exit {c}"),
+            (None, Some(s)) => format!("signal {s}"),
+            _ => "unreadable exit".to_owned(),
+        },
         Body::Ask { text, .. } | Body::Status { text } => text.clone(),
         _ => String::new(),
     }
+}
+
+/// One event as `log` and `watch` print it.
+pub(super) fn line(e: &Entry) -> String {
+    format!(
+        "{:>4} {} {:<13} {:<8} {}{}",
+        e.index,
+        e.id,
+        kind_name(e.event.kind),
+        e.member.as_deref().unwrap_or("server"),
+        detail(e),
+        if e.conflict.is_some() {
+            " [conflict]"
+        } else {
+            ""
+        }
+    )
 }
 
 /// The admitted events from index `from`, in admission order.
@@ -40,20 +61,7 @@ pub fn log(home: &Path, w: &Where, from: u64) -> Result<()> {
     let snap = snapshot(home, w)?;
     let mut out = String::new();
     for e in snap.board().entries().filter(|e| e.index >= from) {
-        let _ = writeln!(
-            out,
-            "{:>4} {} {:<13} {:<8} {}{}",
-            e.index,
-            e.id,
-            kind_name(e.event.kind),
-            e.member.as_deref().unwrap_or("server"),
-            detail(e),
-            if e.conflict.is_some() {
-                " [conflict]"
-            } else {
-                ""
-            }
-        );
+        let _ = writeln!(out, "{}", line(e));
     }
     print!("{out}");
     Ok(())
