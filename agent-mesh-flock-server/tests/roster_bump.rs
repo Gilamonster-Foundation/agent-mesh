@@ -166,3 +166,19 @@ fn a_follower_replays_the_bumped_frame_to_the_same_head() {
     assert_eq!(fol.epoch(), server.epoch());
     assert!(fol.board().members().iter().all(|m| m.name != "h1"));
 }
+
+#[test]
+fn swapping_one_member_for_another_still_drops_a_name_and_bumps() {
+    let env = Env::new();
+    let mut server = env.open();
+    let _shep = enroll(&mut server, "shep");
+    let mut roster = without(&server, "h1");
+    roster.push(agent_mesh_flock::Member {
+        name: "h2".into(),
+        role: agent_mesh_flock::Role::Helper,
+        devices: vec![],
+    });
+    server.replace_roster(roster).unwrap();
+    let all = frames(&server);
+    assert_eq!(kinds(all.last().unwrap()), vec![Kind::Roster, Kind::Epoch]);
+}

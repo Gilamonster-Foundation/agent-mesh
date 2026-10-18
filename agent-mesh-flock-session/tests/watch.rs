@@ -696,7 +696,7 @@ fn an_off_roster_watch_closes_at_the_next_epoch_bump_and_never_sees_what_follows
     let (_, caught) = kinds_until_closed_or_caught(&mut w);
     assert!(caught.is_none(), "open after the replay");
     r.drop_everyone_but_shep(&mut shep);
-    // an existing bump (the shepherd's session ends), then an event after it
+    // the roster change carried the bump; what follows is never seen
     assert!(matches!(rpc(&mut shep.conn, &Req::End), Resp::Ok));
     r.invite("shep");
     let mut kinds = vec![];
@@ -707,29 +707,27 @@ fn an_off_roster_watch_closes_at_the_next_epoch_bump_and_never_sees_what_follows
             WatchEvent::Caught(_) => {}
         }
     };
-    assert_eq!(kinds, vec![Kind::Roster, Kind::SessionEnd, Kind::Epoch]);
+    assert_eq!(kinds, vec![Kind::Roster, Kind::Epoch]);
     assert!(reason.contains("roster"), "{reason}");
 }
 
 #[test]
-fn a_roster_event_alone_does_not_close_a_watch_yet_that_bump_is_step_6b() {
+fn a_roster_event_that_drops_the_member_closes_its_watch_right_after_its_bump() {
     let mut r = rig();
     let mut shep = r.enrol("shep");
     let h1 = r.enrol("h1");
     let mut w = Watch::open(&r.sock, &h1.key, None).unwrap();
     let _ = kinds_until_closed_or_caught(&mut w);
     r.drop_everyone_but_shep(&mut shep);
-    r.invite("shep");
-    // both frames arrive on the still-open stream; no bump, no close
-    for want in [Kind::Roster, Kind::Invite] {
-        match w.next_event().unwrap() {
-            WatchEvent::Frame(f) => assert_eq!(f[0].event.payload.kind, want),
-            other => panic!(
-                "expected a {want:?} frame, got {:?}",
-                matches!(other, WatchEvent::Closed(_))
-            ),
-        }
+    // one frame, roster then its epoch bump, then the close
+    match w.next_event().unwrap() {
+        WatchEvent::Frame(f) => assert_eq!(
+            f.iter().map(|s| s.event.payload.kind).collect::<Vec<_>>(),
+            vec![Kind::Roster, Kind::Epoch]
+        ),
+        _ => panic!("expected the roster frame"),
     }
+    assert!(matches!(w.next_event().unwrap(), WatchEvent::Closed(_)));
 }
 
 #[test]
