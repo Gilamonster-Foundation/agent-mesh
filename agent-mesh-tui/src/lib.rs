@@ -5,6 +5,7 @@
 //! model folded from it, and views that are functions of the model. Unix only.
 #![cfg(unix)]
 
+pub mod events;
 pub mod feed;
 pub mod keys;
 pub mod model;
