@@ -29,10 +29,13 @@ const POP_DOMAIN: &[u8] = b"agent-mesh/possession-challenge/v1";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PossessionChallenge {
     /// The agent that issued this challenge and will sign the resulting cert.
+    #[serde(with = "serde_bytes")]
     pub issuer_pubkey: [u8; 32],
     /// The externally-held pubkey whose possession must be proven.
+    #[serde(with = "serde_bytes")]
     pub subject_pubkey: [u8; 32],
     /// Fresh random nonce — makes each challenge single-use.
+    #[serde(with = "serde_bytes")]
     pub nonce: [u8; 32],
 }
 
@@ -329,6 +332,7 @@ pub enum Issuer {
     Agent {
         /// The parent agent's ed25519 public key. Must equal the embedded
         /// `parent.agent_pubkey`.
+        #[serde(with = "serde_bytes")]
         pubkey: [u8; 32],
         /// The parent's cert (recursively verifiable, attenuation-checked).
         parent: Box<CertChain>,
@@ -339,6 +343,7 @@ pub enum Issuer {
 /// through a chain of attenuating delegations.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CertChain {
+    #[serde(with = "serde_bytes")]
     pub agent_pubkey: [u8; 32],
     pub metadata: AgentMetadata,
     /// Who signed this cert: the root user, or a parent agent + its cert.
@@ -440,14 +445,14 @@ pub struct SerdeSig(pub Signature);
 
 impl Serialize for SerdeSig {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> std::result::Result<S::Ok, S::Error> {
-        let bytes: [u8; 64] = self.0.to_bytes();
-        bytes.serialize(ser)
+        // a byte string, not an array of 64 integers, in binary encodings
+        serde_bytes::Bytes::new(&self.0.to_bytes()).serialize(ser)
     }
 }
 
 impl<'de> Deserialize<'de> for SerdeSig {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> std::result::Result<Self, D::Error> {
-        let bytes: Vec<u8> = Vec::deserialize(de)?;
+        let bytes = serde_bytes::ByteBuf::deserialize(de)?;
         if bytes.len() != 64 {
             return Err(serde::de::Error::custom("expected 64-byte signature"));
         }

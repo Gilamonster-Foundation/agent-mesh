@@ -21,6 +21,25 @@ pub const MAX_MESSAGE: usize = 1 << 20;
 /// A session (or the operator) to the server.
 // Transient, one in flight per connection: boxing buys nothing.
 #[allow(clippy::large_enum_variant)]
+/// A signature as a byte string: dalek's own serde writes 64 integers.
+mod sig_bytes {
+    use ed25519_dalek::Signature;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(sig: &Signature, ser: S) -> Result<S::Ok, S::Error> {
+        serde_bytes::Bytes::new(&sig.to_bytes()).serialize(ser)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Signature, D::Error> {
+        let b = serde_bytes::ByteBuf::deserialize(de)?;
+        let arr: [u8; 64] = b
+            .as_slice()
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("expected a 64-byte signature"))?;
+        Ok(Signature::from_bytes(&arr))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Req {
     /// Which flock, and at which epoch.
@@ -37,6 +56,7 @@ pub enum Req {
         /// The member it is for.
         member: String,
         /// The session's public key.
+        #[serde(with = "serde_bytes")]
         pubkey: [u8; 32],
     },
     /// Enrollment step 4; binds this connection to the new session.
@@ -44,6 +64,7 @@ pub enum Req {
         /// The challenge from `EnrollBegin`.
         challenge: PossessionChallenge,
         /// The key's proof of possession.
+        #[serde(with = "sig_bytes")]
         proof: Signature,
     },
     /// Ask to renew if the certificate is behind the epoch.
@@ -56,6 +77,7 @@ pub enum Req {
         /// The challenge from `Renew`.
         challenge: PossessionChallenge,
         /// The key's proof of possession.
+        #[serde(with = "sig_bytes")]
         proof: Signature,
     },
     /// The session's last admitted event.
@@ -93,6 +115,7 @@ pub struct StreamChallenge {
     /// The flock.
     pub flock: ContentId,
     /// Fresh per connection and used once.
+    #[serde(with = "serde_bytes")]
     pub nonce: [u8; 32],
 }
 
