@@ -5,6 +5,7 @@
 
 use crate::model::{Model, Open};
 use newtui::{Component, Flow, Key, Row, View};
+use std::cell::Cell;
 
 /// Lines a PageUp / PageDown moves.
 const PAGE: usize = 10;
@@ -13,13 +14,21 @@ const PAGE: usize = 10;
 pub struct App {
     model: Model,
     selected: usize,
+    /// The first member row on screen. Kept between draws so the window only
+    /// moves when the selection leaves it; set while drawing, which is where
+    /// the height is known.
+    offset: Cell<usize>,
 }
 
 impl App {
     /// A view over `model`, first member selected.
     #[must_use]
     pub fn new(model: Model) -> Self {
-        Self { model, selected: 0 }
+        Self {
+            model,
+            selected: 0,
+            offset: Cell::new(0),
+        }
     }
 
     /// Replace the model with a newer fold of the log. The selection stays on
@@ -35,6 +44,24 @@ impl App {
     #[must_use]
     pub fn model(&self) -> &Model {
         &self.model
+    }
+
+    /// The first member row to draw when `visible` rows fit: the same as last
+    /// time unless the selection would be off screen (or the roster or screen
+    /// changed), then the smallest move that brings it in.
+    #[must_use]
+    pub fn viewport(&self, visible: usize) -> usize {
+        let len = self.model.members.len();
+        let mut offset = self.offset.get().min(len.saturating_sub(visible));
+        if visible > 0 {
+            if self.selected < offset {
+                offset = self.selected;
+            } else if self.selected >= offset + visible {
+                offset = self.selected + 1 - visible;
+            }
+        }
+        self.offset.set(offset);
+        offset
     }
 
     /// The selected row, if the roster is not empty.

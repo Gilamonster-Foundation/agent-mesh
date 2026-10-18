@@ -230,3 +230,48 @@ fn a_reader_directory_others_can_enter_is_refused() {
     };
     assert!(err.contains("only its owner"), "{err}");
 }
+
+/// The reviewer's recipe: catch up and save, then make the next checkpoint
+/// write fail (a directory where the temporary file goes), let the server
+/// admit something new, and follow again.
+#[test]
+fn a_frame_whose_save_failed_is_never_shown_and_the_failure_is() {
+    let mut l = live();
+    let mut feed = Feed::open(l.dir.path(), &l.ctl).unwrap();
+    assert_eq!(feed.run(true, &mut |_| {}), Outcome::Done);
+    let saved = feed.model(Link::Live);
+    let state = std::fs::read_dir(l.dir.path().join("tui"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let checkpoint = std::fs::read(state.join("reader.state")).unwrap();
+    std::fs::create_dir(state.join("reader.state.tmp")).unwrap();
+
+    // something new is admitted: a session starts
+    let sock = l.serve_sock.clone();
+    let _h2 = Session::enroll(&sock, &l.h2_token, "h2", Policy::AllowUnlocked).unwrap();
+    let mut shown = 0;
+    let outcome = feed.run(true, &mut |_| shown += 1);
+
+    assert_eq!(shown, 0, "nothing unsaved is handed to the view");
+    assert!(
+        matches!(outcome, Outcome::Unsaved(_)),
+        "a save failure must not look like a dropped stream: {outcome:?}"
+    );
+    // the display stays at the witnessed prefix, board and index alike
+    let after = feed.model(Link::Live);
+    assert_eq!(after.header.verified, saved.header.verified);
+    assert_eq!(after.members, saved.members);
+    assert!(after
+        .members
+        .iter()
+        .all(|m| !(m.name == "h2" && m.session == "active")));
+    assert_eq!(
+        std::fs::read(state.join("reader.state")).unwrap(),
+        checkpoint,
+        "the checkpoint is as it was"
+    );
+    l.serving.take().unwrap().stop();
+}

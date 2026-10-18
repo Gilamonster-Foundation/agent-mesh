@@ -23,6 +23,7 @@ pub enum FollowError {
 }
 
 /// A verified prefix of a flock, extended frame by frame.
+#[derive(Clone)]
 pub struct Follower {
     st: State,
     head: Option<Head>,

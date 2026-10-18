@@ -143,3 +143,70 @@ fn a_new_model_clamps_the_selection_to_the_roster() {
     app.set_model(model(0));
     assert_eq!(app.selected(), None);
 }
+
+/// A roster taller than the screen: the selected member must be on it, with
+/// the header fixed, however the selection got there and however the screen is
+/// resized afterwards.
+mod viewport {
+    use super::model;
+    use agent_mesh_tui::ui::{render, App};
+    use newtui::{Component as _, Key};
+
+    fn rows_with(text: &str, name: &str) -> usize {
+        text.lines().filter(|l| l.contains(name)).count()
+    }
+
+    #[test]
+    fn the_selected_member_is_always_on_screen_and_the_header_never_scrolls() {
+        let mut app = App::new(model(25));
+        // 24 lines: 2 header + 1 column header + 20 rows + 1 footer
+        let top = render::to_text(&app, 110, 24);
+        assert!(top.contains("m0 ") && !top.contains("m24 "), "{top}");
+
+        app.handle(Key::End);
+        let end = render::to_text(&app, 110, 24);
+        assert!(
+            end.contains("amesh-tui · flock fx"),
+            "header scrolled away:\n{end}"
+        );
+        assert!(end.contains("MEMBER"), "{end}");
+        let selected: Vec<&str> = end.lines().filter(|l| l.starts_with('▸')).collect();
+        assert_eq!(selected.len(), 1, "{end}");
+        assert!(selected[0].contains("m24"), "{end}");
+        assert!(!end.contains("m0 "), "the top scrolled off:\n{end}");
+
+        // walking back up keeps the selection visible, and does not move the
+        // window until the selection leaves it
+        for _ in 0..3 {
+            app.handle(Key::Up);
+        }
+        let up = render::to_text(&app, 110, 24);
+        assert!(
+            up.lines().any(|l| l.starts_with('▸') && l.contains("m21")),
+            "{up}"
+        );
+        assert!(
+            up.contains("m24 "),
+            "the window moved with the selection:\n{up}"
+        );
+    }
+
+    #[test]
+    fn a_resize_keeps_the_selection_visible() {
+        let mut app = App::new(model(25));
+        app.handle(Key::End);
+        for height in [24, 8, 5, 40, 12] {
+            let text = render::to_text(&app, 110, height);
+            assert!(
+                text.lines()
+                    .any(|l| l.starts_with('▸') && l.contains("m24")),
+                "height {height}:\n{text}"
+            );
+            assert!(text.contains("amesh-tui"), "height {height}");
+        }
+        // tall enough for everyone: the whole roster is back, from the top
+        let all = render::to_text(&app, 110, 40);
+        assert_eq!(rows_with(&all, "m0 "), 1);
+        assert_eq!(rows_with(&all, "m24 "), 1);
+    }
+}

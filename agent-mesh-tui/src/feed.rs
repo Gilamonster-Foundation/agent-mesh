@@ -23,6 +23,9 @@ pub enum Outcome {
     Down(String),
     /// Verification or rollback failed. Nothing after this can be trusted.
     Failed(String),
+    /// A verified frame could not be saved, so it is not shown: the view stays
+    /// at the last saved prefix.
+    Unsaved(String),
 }
 
 /// An open feed on one flock.
@@ -137,6 +140,7 @@ impl Feed {
             Err(e @ (ReaderError::Rollback(_) | ReaderError::Invalid(_))) => {
                 Outcome::Failed(e.to_string())
             }
+            Err(e @ ReaderError::Save(_)) => Outcome::Unsaved(e.to_string()),
             Err(e) => Outcome::Down(e.to_string()),
         }
     }

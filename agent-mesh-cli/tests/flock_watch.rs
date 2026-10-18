@@ -217,3 +217,40 @@ fn an_existing_reader_directory_that_others_can_enter_is_refused() {
     }
     f.ok(&h1, &["watch", "--once"]);
 }
+
+#[test]
+fn watch_never_prints_an_event_whose_checkpoint_could_not_be_saved() {
+    let f = flock();
+    let (shep, h1) = (f.session("shep"), f.session("h1"));
+    f.emit(&shep, &["brief", "--to", "h1", "--lane", "first"]);
+    f.ok(&h1, &["watch", "--once"]);
+
+    // the next checkpoint write cannot happen: a directory is where the
+    // temporary file goes
+    let state = std::fs::read_dir(f.dir.join("watch"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let blocker = state.join("reader.state.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    let second = f.emit(&shep, &["brief", "--to", "h1", "--lane", "second"]);
+    let o = f.run(Some(&h1), &["watch", "--once"]);
+    assert!(!o.status.success());
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("cannot save the checkpoint"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&o.stdout).contains(&second),
+        "an unsaved event was printed:\n{}",
+        String::from_utf8_lossy(&o.stdout)
+    );
+
+    // once it can save, it is shown, exactly once
+    std::fs::remove_dir(&blocker).unwrap();
+    let again = f.ok(&h1, &["watch", "--once"]);
+    assert_eq!(again.matches(&second).count(), 1, "{again}");
+}

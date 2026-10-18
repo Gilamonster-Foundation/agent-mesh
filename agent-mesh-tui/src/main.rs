@@ -61,13 +61,14 @@ mod run {
             Outcome::Done => Link::Live,
             Outcome::Down(_) => feed.stale(),
             Outcome::Failed(why) => Link::Failed(why.clone()),
+            Outcome::Unsaved(why) => Link::Unsaved(why.clone()),
         };
         let app = App::new(feed.model(link));
         let height = u16::try_from(app.model().members.len() + 5).unwrap_or(u16::MAX);
         print!("{}", render::to_text(&app, 110, height));
         match outcome {
             Outcome::Done => Ok(()),
-            Outcome::Down(why) | Outcome::Failed(why) => bail!("{why}"),
+            Outcome::Down(why) | Outcome::Failed(why) | Outcome::Unsaved(why) => bail!("{why}"),
         }
     }
 
@@ -81,6 +82,7 @@ mod run {
             });
             let link = match outcome {
                 Outcome::Failed(why) => Link::Failed(why),
+                Outcome::Unsaved(why) => Link::Unsaved(why),
                 _ => feed.stale(),
             };
             let _ = feed_tx.send(Msg::Model(Box::new(feed.model(link))));

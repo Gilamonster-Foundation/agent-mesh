@@ -39,6 +39,10 @@ pub enum ReaderError {
     /// Socket or file error.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// A verified frame could not be saved. The reader is back at its last
+    /// saved prefix: nothing that was not saved is kept or shown.
+    #[error("cannot save the checkpoint: {0}")]
+    Save(std::io::Error),
     /// Wire or encoding error.
     #[error("{0}")]
     Wire(#[from] agent_mesh_flock_server::ServerError),

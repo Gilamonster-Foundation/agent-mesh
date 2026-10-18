@@ -8,6 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 description = "amesh-tui: a read-only terminal view of a flock (Unix only)."
+readme = "README.md"
 publish = false
 
 [lib]

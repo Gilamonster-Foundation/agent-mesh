@@ -100,6 +100,20 @@ impl<F: Fs> Reader<F> {
         Ok(())
     }
 
+    /// Apply a frame and save, as one step: if the save fails the reader goes
+    /// back to the prefix it had, so nothing that was not saved is ever
+    /// visible through [`follower`](Self::follower).
+    fn apply_saved(&mut self, frame: Vec<Sealed>) -> Result<(), ReaderError> {
+        let before = self.follower.clone();
+        self.apply(frame)?;
+        if let Err(e) = self.save() {
+            self.frames.pop();
+            self.follower = before;
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Save atomically; returns the head now witnessed.
     ///
     /// # Errors
@@ -112,7 +126,7 @@ impl<F: Fs> Reader<F> {
             frames: self.frames.clone(),
         })
         .map_err(|e| ReaderError::Invalid(e.to_string()))?;
-        save_atomic(&self.fs, &self.dir, FILE, &bytes)?;
+        save_atomic(&self.fs, &self.dir, FILE, &bytes).map_err(ReaderError::Save)?;
         Ok(self.follower.head().cloned())
     }
 
@@ -149,8 +163,7 @@ impl<F: Fs> Reader<F> {
         loop {
             match w.next_event()? {
                 WatchEvent::Frame(f) => {
-                    self.apply(f.clone())?;
-                    self.save()?;
+                    self.apply_saved(f.clone())?;
                     seen(Seen::Frame(&f, &self.follower));
                 }
                 WatchEvent::Caught(i) => {

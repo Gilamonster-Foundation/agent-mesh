@@ -25,6 +25,7 @@ pub fn header_lines(h: &Header) -> [String; 2] {
         Link::Live => "live".to_owned(),
         Link::Stale { since } => format!("stale since #{since}"),
         Link::Failed(why) => why.clone(),
+        Link::Unsaved(why) => format!("⚠ {why}; showing the last saved state"),
     };
     let mark = if matches!(h.link, Link::Failed(_)) {
         "✗"
@@ -50,9 +51,10 @@ fn cell(s: &str, width: usize) -> String {
     }
 }
 
-/// The Board table lines (header row, then one per member) for `app`.
+/// The Board table: the column header, then the members from `offset` that
+/// fit in `visible` rows.
 #[must_use]
-pub fn board_lines(app: &App) -> Vec<String> {
+pub fn board_lines(app: &App, offset: usize, visible: usize) -> Vec<String> {
     let mut out = vec![format!(
         "  {} {} {} {} {} QUIET",
         cell("MEMBER", MEMBER),
@@ -61,7 +63,14 @@ pub fn board_lines(app: &App) -> Vec<String> {
         cell("SELF", SAYS),
         cell("OPEN", OPEN),
     )];
-    for (i, m) in app.model().members.iter().enumerate() {
+    for (i, m) in app
+        .model()
+        .members
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible)
+    {
         let marker = if app.selected() == Some(i) {
             "▸"
         } else {
@@ -80,7 +89,8 @@ pub fn board_lines(app: &App) -> Vec<String> {
     out
 }
 
-/// Draw the whole screen.
+/// Draw the whole screen: the header and footer stay put, the member rows
+/// scroll to keep the selection in view.
 pub fn draw(f: &mut Frame<'_>, app: &App) {
     let area = f.area();
     let rows = Layout::vertical([
@@ -98,13 +108,17 @@ pub fn draw(f: &mut Frame<'_>, app: &App) {
         ),
         rows[0],
     );
+    // one line of the table area is the column header
+    let visible = usize::from(rows[1].height).saturating_sub(1);
+    let offset = app.viewport(visible);
+    let total = app.model().members.len();
     let selected = app.selected();
-    let lines: Vec<Line<'_>> = board_lines(app)
+    let lines: Vec<Line<'_>> = board_lines(app, offset, visible)
         .into_iter()
         .enumerate()
         .map(|(i, l)| {
-            // line 0 is the column header; member i is line i + 1
-            if i > 0 && selected == Some(i - 1) {
+            // line 0 is the column header; member offset + i - 1 follows
+            if i > 0 && selected == Some(offset + i - 1) {
                 Line::styled(l, Style::default().add_modifier(Modifier::REVERSED))
             } else {
                 Line::from(l)
@@ -112,8 +126,13 @@ pub fn draw(f: &mut Frame<'_>, app: &App) {
         })
         .collect();
     f.render_widget(Paragraph::new(lines), rows[1]);
+    let mut footer = app.view().footer;
+    if total > visible {
+        let last = (offset + visible).min(total);
+        footer = format!("rows {}-{last} of {total} · {footer}", offset + 1);
+    }
     f.render_widget(
-        Paragraph::new(app.view().footer),
+        Paragraph::new(footer),
         Rect {
             height: 1,
             ..rows[2]

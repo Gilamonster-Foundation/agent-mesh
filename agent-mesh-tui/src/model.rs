@@ -61,6 +61,9 @@ pub enum Link {
     },
     /// Verification or rollback failed: nothing after this can be trusted.
     Failed(String),
+    /// A verified frame could not be saved. The view stays at the last saved
+    /// prefix (what is shown has been witnessed) and says why.
+    Unsaved(String),
 }
 
 /// What every view shows at the top.
