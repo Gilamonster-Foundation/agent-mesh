@@ -33,6 +33,16 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # The flock read side: the server and session crates with their
+      # writer features (`serve`, `emit`) off, as the watch-only TUI uses
+      # them. The workspace build always has them on, so only this step
+      # sees that configuration. CI-only; see .githooks/pre-push.
+      # One package per command: building them together unifies features,
+      # and the session crate's dev-dependency turns `serve` back on.
+      - name: clippy (flock read side, writer features off)
+        run: |
+          cargo clippy -p agent-mesh-flock-server --no-default-features --all-targets -- -D warnings
+          cargo clippy -p agent-mesh-flock-session --no-default-features --all-targets -- -D warnings
 
   test:
     name: Rust tests
@@ -43,6 +53,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
         run: cargo test --workspace --locked
+      - name: cargo test (flock read side, writer features off)
+        run: cargo test -p agent-mesh-flock-session --no-default-features --locked
       # CI-ONLY (no hook mirror: needs root). The flock session socket must
       # refuse another Unix user; the test binary becomes that user, so it
       # is built unprivileged and only run under sudo.
