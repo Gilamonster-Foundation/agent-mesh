@@ -70,10 +70,8 @@ impl Follower {
         }
         check_frame_shape(frame).map_err(FollowError::Invalid)?;
         let mut next = self.st.clone();
-        for s in frame {
-            next.replay(s)
-                .map_err(|e| FollowError::Invalid(e.to_string()))?;
-        }
+        next.replay_frame(frame)
+            .map_err(|e| FollowError::Invalid(e.to_string()))?;
         self.st = next;
         self.head = frame.last().map(Head::of);
         Ok(())
