@@ -159,6 +159,7 @@ dependencies = [
  "rustix",
  "serde",
  "tempfile",
+ "tests-common",
  "thiserror 2.0.18",
  "zeroize",
 ]

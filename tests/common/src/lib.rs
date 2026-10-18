@@ -4,6 +4,8 @@
 //! here. Today that's a temp-dir factory and a deterministic
 //! `AgentMetadata` fixture.
 
+pub mod readside;
+
 use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, UserKey};
 
 /// Spawn a temporary directory bounded to the caller's scope.

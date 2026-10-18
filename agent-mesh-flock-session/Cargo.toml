@@ -35,6 +35,7 @@ libc = "0.2"
 # fixtures build a log with a real server, whatever the features under test
 agent-mesh-flock-server = { workspace = true, features = ["serve"] }
 tempfile.workspace = true
+tests-common.workspace = true
 
 [lints]
 workspace = true
