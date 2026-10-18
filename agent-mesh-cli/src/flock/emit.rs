@@ -2,7 +2,7 @@
 //! key, fills `prev`, signs and sends it. The CLI signs nothing, and checks
 //! nothing the server's admission decides.
 
-use super::discover::{who, Where};
+use super::discover::Where;
 use agent_mesh_flock::{Body, Kind, Outcome};
 use agent_mesh_flock_session::{call, CtlReq, CtlResp};
 use anyhow::{anyhow, bail, Result};
@@ -20,7 +20,8 @@ pub fn emit(home: &Path, w: &Where, kind: Kind, refs: &[(&str, &str)], body: Bod
                 .map_err(|e| anyhow!("'{cid}' is not a content id: {e}"))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
-    match call(&w.socket(home)?, &CtlReq::Emit { kind, refs, body })? {
+    let (socket, _) = w.session(home)?;
+    match call(&socket, &CtlReq::Emit { kind, refs, body })? {
         CtlResp::Admitted { event, index } => {
             println!("admitted {event} at {index}");
             Ok(())
@@ -31,8 +32,7 @@ pub fn emit(home: &Path, w: &Where, kind: Kind, refs: &[(&str, &str)], body: Bod
 
 /// `join`: who is this session, and optionally tell the log its pane.
 pub fn join(home: &Path, w: &Where, announce: bool) -> Result<()> {
-    let socket = w.socket(home)?;
-    let me = who(&socket)?;
+    let (socket, me) = w.session(home)?;
     println!("flock:   {}", me.flock);
     println!("member:  {}", me.member);
     println!("session: {}", me.session);

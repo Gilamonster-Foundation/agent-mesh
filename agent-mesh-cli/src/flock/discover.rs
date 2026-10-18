@@ -5,7 +5,7 @@
 use agent_mesh_flock_session::{call, CtlReq, CtlResp};
 use anyhow::{anyhow, bail, Result};
 use clap::Args;
-use content_addressable::ContentId;
+use content_addressable::{ContentAddressable as _, ContentId};
 use std::path::{Path, PathBuf};
 
 /// Which flock, and which session of it.
@@ -41,16 +41,40 @@ impl Where {
         }
     }
 
-    /// The session socket to use.
-    pub fn socket(&self, home: &Path) -> Result<PathBuf> {
-        if let Some(s) = &self.session {
-            return Ok(s.clone());
+    /// The flock id the caller named, if they named a flock at all.
+    fn named(&self, home: &Path) -> Result<Option<ContentId>> {
+        if self.dir.is_none() && self.name.is_none() {
+            return Ok(None);
+        }
+        let dir = self.dir(home)?;
+        let g = agent_mesh_flock_server::load_genesis(&dir)
+            .map_err(|e| anyhow!("read the genesis in {}: {e}", dir.display()))?;
+        Ok(Some(g.node.content_id()?))
+    }
+
+    /// The session to use and who it says it is. When a flock is named
+    /// (`--dir`/`--name`) the session must belong to it: a session of another
+    /// flock is refused before anything is sent. With no flock named the
+    /// session alone decides. This is destination checking; whether the event
+    /// is allowed is admission's job.
+    pub fn session(&self, home: &Path) -> Result<(PathBuf, Who)> {
+        let want = self.named(home)?;
+        let belongs = |me: &Who| want.map_or(true, |w| w == me.flock);
+        if let Some(socket) = &self.session {
+            let me = who(socket)?;
+            if !belongs(&me) {
+                bail!(
+                    "{} is a session of another flock than the one named",
+                    socket.display()
+                );
+            }
+            return Ok((socket.clone(), me));
         }
         let dir = self.dir(home).map_err(|_| {
             anyhow!("say which session: --session <socket>, AMESH_FLOCK_SESSION, or --dir/--name")
         })?;
-        let mut live = vec![];
         let run = dir.join("run");
+        let mut live = vec![];
         for e in std::fs::read_dir(&run)
             .map_err(|e| anyhow!("cannot read {}: {e}", run.display()))?
             .flatten()
@@ -60,22 +84,23 @@ impl Where {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n.starts_with("session-") && n.ends_with(".sock"));
-            // a killed session leaves its socket file behind: skip what does not answer
-            if named && who(&p).is_ok() {
-                live.push(p);
+            // a killed session leaves its socket file behind: skip what does not
+            // answer, and what answers for another flock
+            if let Some(me) = named.then(|| who(&p).ok()).flatten().filter(|m| belongs(m)) {
+                live.push((p, me));
             }
         }
-        live.sort();
-        match live.as_slice() {
-            [one] => Ok(one.clone()),
-            [] => bail!(
+        live.sort_by(|a, b| a.0.cmp(&b.0));
+        match live.len() {
+            1 => Ok(live.remove(0)),
+            0 => bail!(
                 "no live session in {} (is `amesh flock session` running?)",
                 run.display()
             ),
-            many => bail!(
+            _ => bail!(
                 "several live sessions; pick one with --session:\n  {}",
-                many.iter()
-                    .map(|p| p.display().to_string())
+                live.iter()
+                    .map(|(p, _)| p.display().to_string())
                     .collect::<Vec<_>>()
                     .join("\n  ")
             ),

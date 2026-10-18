@@ -309,3 +309,69 @@ fn a_verdict_needs_exactly_one_of_approve_or_reject() {
     f.emit(&rev, &["verdict", &review, "--head", "abc", "--reject"]);
     assert!(f.log(&shep).contains("rejected abc"));
 }
+
+/// `amesh flock <args>` naming flock `named` but possibly pointing at another
+/// flock's session by flag or environment.
+fn aimed(named: &Flock, sock: Option<&Path>, env_sock: Option<&Path>, args: &[&str]) -> Output {
+    let mut c = amesh(named.home.path());
+    c.arg("flock").arg(args[0]).arg("--dir").arg(&named.dir);
+    if let Some(s) = sock {
+        c.arg("--session").arg(s);
+    }
+    c.env_remove("AMESH_FLOCK_SESSION");
+    if let Some(s) = env_sock {
+        c.env("AMESH_FLOCK_SESSION", s);
+    }
+    c.args(&args[1..]).output().unwrap()
+}
+
+#[test]
+fn naming_one_flock_never_writes_to_another_through_any_selector() {
+    let (a, b) = (flock(), flock());
+    let (a_shep, b_shep) = (a.session("shep"), b.session("shep"));
+    let (a_before, b_before) = (a.log(&a_shep), b.log(&b_shep));
+    let brief = ["brief", "--to", "h1", "--lane", "task"];
+
+    // explicit --session of A while naming B
+    let o = aimed(&b, Some(&a_shep.sock), None, &brief);
+    assert!(!o.status.success(), "explicit socket");
+    assert!(String::from_utf8_lossy(&o.stderr).contains("another flock"));
+    // AMESH_FLOCK_SESSION of A while naming B
+    let o = aimed(&b, None, Some(&a_shep.sock), &brief);
+    assert!(!o.status.success(), "environment socket");
+    // announce and join are writers too
+    assert!(
+        !aimed(&b, Some(&a_shep.sock), None, &["join", "--announce"])
+            .status
+            .success()
+    );
+    assert_eq!(a.log(&a_shep), a_before, "A untouched");
+    assert_eq!(b.log(&b_shep), b_before, "B untouched");
+
+    // a foreign socket found under B/run/: discovery must not accept it
+    let c = flock(); // a flock with no live session of its own
+    std::os::unix::fs::symlink(&a_shep.sock, c.dir.join("run").join("session-foreign.sock"))
+        .unwrap();
+    let o = aimed(&c, None, None, &brief);
+    assert!(!o.status.success(), "foreign socket under run/");
+    assert_eq!(a.log(&a_shep), a_before, "A untouched by the symlink");
+
+    // with a session of its own as well, the foreign one is ignored, not chosen
+    let c_shep = c.session("shep");
+    let o = aimed(&c, None, None, &brief);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(a.log(&a_shep), a_before, "A still untouched");
+    assert!(c.log(&c_shep).contains("brief"), "it went to C");
+}
+
+#[test]
+fn with_no_flock_named_the_session_alone_decides() {
+    let a = flock();
+    let shep = a.session("shep");
+    let mut c = amesh(a.home.path());
+    c.args(["flock", "brief", "--to", "h1", "--lane", "t", "--session"])
+        .arg(&shep.sock)
+        .env_remove("AMESH_FLOCK_SESSION");
+    assert!(c.output().unwrap().status.success());
+    assert!(a.log(&shep).contains("brief"));
+}
