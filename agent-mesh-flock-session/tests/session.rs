@@ -338,3 +338,50 @@ fn a_session_a_hand_off_activated_can_emit_because_the_server_hands_it_its_chain
     let (_, second) = new.emit(Kind::Job, Default::default(), job).unwrap();
     assert!(first > 0 && second == first + 1);
 }
+
+#[test]
+fn a_replacement_a_hand_off_activated_can_open_a_watch_with_its_session_proof() {
+    use agent_mesh_flock::{FileRef, HandoffApproval};
+    use agent_mesh_flock_session::{Watch, WatchEvent};
+    use content_addressable::{MerkleNode, RawContentId};
+    let r = rig();
+    let (_shep_conn, shep_key, _) = enrol_by_hand(&r, "shep");
+    let old = r.session("h1");
+    let new = r.session("h1"); // pending replacement, enrolled before the bump
+    let approval = r.serving.as_ref().unwrap().with_server(|s| {
+        MerkleNode::genesis(HandoffApproval {
+            flock: s.flock(),
+            member: "h1".into(),
+            from: old.id().to_owned(),
+            to: new.id().to_owned(),
+            resume: s.sessions().get(old.id()).unwrap().start,
+            context: Some(FileRef {
+                root: "r".into(),
+                path: "HANDOFF.md".into(),
+                id: RawContentId::from_content(b"h"),
+            }),
+        })
+    });
+    let sig = Assertion::sign(&shep_key, &approval.content_id().unwrap());
+    r.serving
+        .as_ref()
+        .unwrap()
+        .with_server(|s| s.handoff(approval, sig))
+        .unwrap();
+    // its enrollment certificate is behind the epoch the hand-off raised; the
+    // proof must renew first, with no emit before it
+    let new = std::cell::RefCell::new(new);
+    let prove = |ch: &agent_mesh_flock_server::wire::StreamChallenge| {
+        new.borrow_mut()
+            .prove_stream(ch)
+            .map_err(|e| agent_mesh_flock_session::ReaderError::Stream(e.to_string()))
+    };
+    let mut w = Watch::open(&r.sock, &prove, None).unwrap();
+    loop {
+        match w.next_event().unwrap() {
+            WatchEvent::Caught(_) => break,
+            WatchEvent::Frame(_) => {}
+            WatchEvent::Closed(why) => panic!("closed: {why}"),
+        }
+    }
+}

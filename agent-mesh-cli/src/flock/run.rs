@@ -44,19 +44,21 @@ pub fn run(
         Body::Job { lane, label },
     )?;
     eprintln!("job {job}");
-    let (code, signal, exit, failure) = match Command::new(prog).args(args).status() {
-        Ok(status) => {
-            let (code, signal) = ending(status);
-            let exit = signal.map_or_else(|| code.map_or(1, |c| c as i32), |s| 128 + s);
-            (code, signal, exit, None)
-        }
-        // it never started: 127, as a shell says
-        Err(e) => (
-            Some(127),
-            None,
-            127,
-            Some(format!("cannot run {prog}: {e}")),
-        ),
+    // spawn and wait are different failures: only a command that never
+    // started is exit 127. Once it started, a failed wait leaves its outcome
+    // unknown, and a signed record must not invent one.
+    let (code, signal, exit, failure) = match Command::new(prog).args(args).spawn() {
+        Err(e) => (Some(127), None, 127, Some(format!("cannot run {prog}: {e}"))),
+        Ok(mut child) => match child.wait() {
+            Ok(status) => {
+                let (code, signal) = ending(status);
+                let exit = signal.map_or_else(|| code.map_or(1, |c| c as i32), |s| 128 + s);
+                (code, signal, exit, None)
+            }
+            Err(e) => bail!(
+                "job {job} is left open: {prog} started but waiting for it failed ({e}); its outcome is unknown"
+            ),
+        },
     };
     let refs = BTreeMap::from([("job".to_owned(), job)]);
     let (end, _) = send(&socket, Kind::JobEnd, refs, Body::JobEnd { code, signal })?;

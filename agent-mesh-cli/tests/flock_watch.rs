@@ -152,3 +152,68 @@ fn watch_names_its_flock_and_refuses_another_flocks_session() {
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("another flock"));
 }
+
+#[test]
+fn a_watch_still_opens_after_an_epoch_bump_with_no_emit_in_between() {
+    let f = flock();
+    let (shep, h1, rev) = (f.session("shep"), f.session("h1"), f.session("rev"));
+    f.ok(&h1, &["watch", "--once"]);
+    // an unrelated member leaves: authority shrinks, the epoch rises
+    call(&rev.sock, &CtlReq::End).unwrap();
+    // h1 never emitted, yet its next watch must renew before it proves
+    let out = f.ok(&h1, &["watch", "--once"]);
+    assert!(out.contains("session-end"), "{out}");
+    drop(shep);
+}
+
+#[test]
+fn a_member_name_never_chooses_where_reader_state_lives() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let outside = tempfile::tempdir().unwrap();
+    let absolute = outside.path().join("abs-target");
+    let abs = absolute.to_str().unwrap().to_owned();
+    for name in ["../../escaped".to_owned(), abs] {
+        let f = flock_with(&["shep:shepherd", &format!("{name}:helper")]);
+        let s = f.session(&name);
+        f.ok(&s, &["watch", "--once"]);
+        let flocks = f.home.path().join("flocks");
+        let names: Vec<_> = std::fs::read_dir(&flocks)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["f"], "nothing beside the flock for {name}");
+        assert!(!absolute.exists(), "nothing created at {name}");
+        let ours: Vec<_> = std::fs::read_dir(f.dir.join("watch"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(ours.len(), 1, "{ours:?}");
+        let one = ours[0].to_str().unwrap();
+        assert!(!one.contains('/') && !one.contains(".."), "{one}");
+        let _ = std::fs::Permissions::from_mode(0o700);
+    }
+}
+
+#[test]
+fn an_existing_reader_directory_that_others_can_enter_is_refused() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let f = flock();
+    let h1 = f.session("h1");
+    f.ok(&h1, &["watch", "--once"]);
+    let watch = f.dir.join("watch");
+    let member = std::fs::read_dir(&watch)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    for loose in [&member, &watch] {
+        let before = std::fs::metadata(loose).unwrap().permissions();
+        std::fs::set_permissions(loose, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let o = f.run(Some(&h1), &["watch", "--once"]);
+        assert!(!o.status.success(), "{}", loose.display());
+        assert!(String::from_utf8_lossy(&o.stderr).contains("only its owner"));
+        std::fs::set_permissions(loose, before).unwrap();
+    }
+    f.ok(&h1, &["watch", "--once"]);
+}

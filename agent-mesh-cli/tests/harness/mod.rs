@@ -29,11 +29,15 @@ pub fn amesh(home: &Path) -> Command {
 }
 
 pub fn flock() -> Flock {
+    flock_with(&["shep:shepherd", "h1:helper", "h2:helper", "rev:reviewer"])
+}
+
+pub fn flock_with(members: &[&str]) -> Flock {
     let home = TempDir::new().unwrap();
     assert!(amesh(home.path()).arg("keygen").status().unwrap().success());
     let mut init = amesh(home.path());
     init.args(["flock", "init", "--name", "f"]);
-    for m in ["shep:shepherd", "h1:helper", "h2:helper", "rev:reviewer"] {
+    for m in members {
         init.args(["--member", m]);
     }
     assert!(init.stdout(Stdio::null()).status().unwrap().success());

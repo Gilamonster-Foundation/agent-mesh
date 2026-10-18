@@ -316,3 +316,41 @@ fn run_never_starts_the_command_for_a_session_of_another_flock() {
     assert!(!o.status.success());
     assert!(!marker.exists(), "the command must not have run");
 }
+
+#[test]
+fn a_wait_that_fails_after_the_command_started_leaves_the_job_open() {
+    // SIGCHLD ignored in the parent makes wait() fail with ECHILD although
+    // the command started and finished: its outcome is unknown, not 127
+    let f = flock();
+    let (shep, h1) = (f.session("shep"), f.session("h1"));
+    f.emit(&shep, &["brief", "--to", "h1", "--lane", "l1"]);
+    let marker = f.home.path().join("ran");
+    // perl is on every host these tests run on; its IGNORE survives exec
+    let o = std::process::Command::new("perl")
+        .args([
+            "-e",
+            r#"$SIG{CHLD} = "IGNORE"; exec @ARGV or die "exec: $!""#,
+        ])
+        .arg(assert_cmd::cargo::cargo_bin("amesh"))
+        .arg("--home")
+        .arg(f.home.path())
+        .args(["flock", "run", "--dir"])
+        .arg(&f.dir)
+        .arg("--session")
+        .arg(&h1.sock)
+        .args(["--lane", "l1", "--", "sh", "-c"])
+        .arg(format!("touch {}; exit 3", marker.display()))
+        .env_remove("AMESH_FLOCK_SESSION")
+        .output()
+        .unwrap();
+    assert!(marker.exists(), "the command did start");
+    assert!(!o.status.success());
+    let why = String::from_utf8_lossy(&o.stderr);
+    assert!(why.contains("outcome is unknown"), "{why}");
+    let log = f.log(&shep);
+    assert!(
+        !log.contains("job-end"),
+        "no outcome may be invented:\n{log}"
+    );
+    assert!(f.ok(&shep, &["status"]).contains("job open"));
+}

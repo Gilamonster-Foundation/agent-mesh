@@ -150,14 +150,17 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   `code` (it exited) and `signal` (a signal ended it): explicit fields, each
   skipped when absent so the exit-code form keeps its pinned id; admission
   refuses neither or both (`BadExit`). A command that cannot start is recorded
-  as exit 127. If the `run` process itself is killed, no `job-end` is written
-  and the job stays open. `watch [--from N] [--once]` follows the log through a
-  `Reader` kept in `<flock>/watch/<member>/`: each frame is verified against
+  as exit 127; but once the command has started, a failed wait writes no
+  `job-end` (its outcome is unknown) and the job stays open, as it does if the
+  `run` process itself is killed. `watch [--from N] [--once]` follows the log through a
+  `Reader` kept in `<flock>/watch/<id>/` (the content id of the member's name,
+  never the name itself as a path; both directories must be the user's own and
+  closed to others, or the watch is refused): each frame is verified against
   the saved head, saved, and only then printed, so a run shows only what is new
   to that reader (`--from` also replays saved events from an index; `--once`
   stops at the `-- caught up --` marker). The stream challenge is signed by the
-  session (`CtlReq::ProveStream`, only for its own flock), so the CLI holds no
-  key. A closed stream is an error exit with the server's reason.
+  session (`CtlReq::ProveStream`, only for its own flock, after renewing its
+  certificate to the current epoch), so the CLI holds no key. A closed stream is an error exit with the server's reason.
 
 **Planned, not built:** operator approval of a **delegate**
 hand-off (#127's other half; waits on the delegate designation, step 13); device changes

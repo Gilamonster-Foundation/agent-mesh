@@ -177,16 +177,21 @@ impl Session {
         self.emit(Kind::Pane, BTreeMap::new(), Body::Pane { pane, tab })
     }
 
-    /// Sign a stream challenge, if it is for this session's own flock.
+    /// Sign a stream challenge, if it is for this session's own flock, with a
+    /// certificate renewed to the current epoch.
     ///
     /// # Errors
-    /// The challenge names another flock, or cannot be encoded.
-    pub fn prove_stream(&self, ch: &StreamChallenge) -> Result<Assertion, SessionError> {
+    /// The challenge names another flock, renewal failed, or it cannot be
+    /// encoded.
+    pub fn prove_stream(&mut self, ch: &StreamChallenge) -> Result<Assertion, SessionError> {
         if ch.flock != self.flock {
             return Err(SessionError::Refused(
                 "that stream challenge is for another flock".into(),
             ));
         }
+        // a reader need never emit, so nothing else would bring the
+        // certificate up to the epoch the server checks the proof at
+        self.renew()?;
         let id = ch.id()?;
         Ok(Assertion::sign(self.key.get(), &id))
     }
