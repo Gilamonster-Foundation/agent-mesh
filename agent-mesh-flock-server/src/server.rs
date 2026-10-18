@@ -8,7 +8,7 @@ use crate::journal::Journal;
 use crate::log::Log;
 use crate::refusal::{Reason, RefusalEntry, RefusalRecord};
 use crate::sessions::Sessions;
-use crate::state::{check_frame_shape, Spec, State};
+use crate::state::{check_frame_shape, drops_member, Spec, State};
 use crate::{load_server_key, CrashPlan, ServerError};
 use agent_mesh_flock::{Board, ConflictKind, Event, Kind, Refusal, SignerClass};
 use agent_mesh_protocol::{AgentKey, Assertion, Issuer};
@@ -80,9 +80,8 @@ pub(crate) fn rebuild_with(
             return Err(corrupt("empty frame".into()));
         }
         check_frame_shape(&frame.sealed).map_err(corrupt)?;
-        for sealed in &frame.sealed {
-            st.replay(sealed).map_err(|e| corrupt(e.to_string()))?;
-        }
+        st.replay_frame(&frame.sealed)
+            .map_err(|e| corrupt(e.to_string()))?;
         after(&st);
     }
     Ok(st)
@@ -300,6 +299,38 @@ impl Server {
             let why = Refusal::TooLarge;
             self.record_refusal(&cid, &node, &why)?;
             return Err(ServerError::Refused(why));
+        }
+        if node.payload.kind == Kind::Roster {
+            // A roster that drops a member is sealed with its epoch bump.
+            let mut next = self.st.clone();
+            next.commit(&prepared)?;
+            if drops_member(self.st.board.members(), next.board.members()) {
+                let epoch = next.chain.epoch + 1;
+                let (en, es) = next.server_event(
+                    &self.key,
+                    Spec {
+                        kind: Kind::Epoch,
+                        refs: vec![],
+                        body: agent_mesh_flock::Body::Epoch { epoch },
+                    },
+                )?;
+                let bump = next.prepare(&self.key, &en, es)?;
+                next.commit(&bump)?;
+                let sealed = vec![prepared.sealed.clone(), bump.sealed];
+                if !crate::wire::frame_fits(&sealed)? {
+                    let why = Refusal::TooLarge;
+                    self.record_refusal(&cid, &node, &why)?;
+                    return Err(ServerError::Refused(why));
+                }
+                self.append(sealed.clone())?;
+                self.st = next;
+                self.journal.publish(sealed, self.st.eligible());
+                return Ok(Receipt {
+                    index: prepared.sealed.record.payload.index,
+                    duplicate: false,
+                    conflict: prepared.conflict,
+                });
+            }
         }
         self.append(vec![prepared.sealed.clone()])?;
         self.st.commit(&prepared)?;

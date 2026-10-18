@@ -134,7 +134,8 @@ fn two_racing_roster_replacements_exactly_one_wins() {
     assert!(results
         .iter()
         .any(|r| matches!(r, Err(ServerError::Refused(Refusal::StaleRoster)))));
-    assert_eq!(server.lock().unwrap().admitted(), 1);
+    // the winner replaced the whole roster, so it dropped names: roster + epoch
+    assert_eq!(server.lock().unwrap().admitted(), 2);
 }
 
 #[test]

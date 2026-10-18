@@ -125,15 +125,16 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   pending or ended session, or a proof from another connection is refused),
   and it closes right after any epoch-bearing frame after which its session is no
   longer live or its member is no longer on the roster (a `session-end`, a
-  hand-off away, or an existing bump after a roster change; the roster change
-  alone does not bump yet, step 6b). A request whose frame would not fit one
+  hand-off away, or a roster change that drops a member). A `roster` that drops
+  a name always carries its `epoch` in the same frame: the server's own roster
+  path and a shepherd's roster event are sealed `roster, epoch`, and both readers
+  (open/recovery and the follower) refuse a log where it is not. Adding members or
+  changing devices or roles needs no bump. A request whose frame would not fit one
   stream message is refused (`TooLarge`) before it is committed, so every
   admitted frame can be watched. One reader per state directory (locked). Ceilings: the journal is in memory; the reader rewrites its
   whole file per save.
 
-**Planned, not built:** the epoch bump when a member is removed from the
-roster (until then a dropped member cannot open a stream, but one already
-open is not closed by the roster event; step 6b); operator approval of a **delegate**
+**Planned, not built:** operator approval of a **delegate**
 hand-off (#127's other half; waits on the delegate designation, step 13); device changes
 signed by a listed device (server-signed only today); operator-signed events (`answer`); the rest of
 the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; only `init`,
