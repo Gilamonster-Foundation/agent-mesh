@@ -67,3 +67,47 @@ fn panes_joins_the_roster_to_labels_and_only_ever_lists() {
 }
 
 use predicates::prelude::PredicateBooleanExt as _;
+
+#[test]
+fn hostile_member_names_and_herdr_text_are_printed_inert() {
+    // a roster name, and a pane whose label, agent and status are all escape
+    // sequences (herdr's text is untrusted too)
+    let name = "ev\u{1b}]52;c;aGk=\u{7}il";
+    let panes = r#"{"id":"x","result":{"panes":[
+ {"pane_id":"w1:p\u001b[2J1","tab_id":"w1:t1","label":"ev\u001b]52;c;aGk=\u0007il","agent":"a\u001b[31mgent","agent_status":"\u001b]0;pwn\u0007idle"}]}}"#;
+    let home = TempDir::new().unwrap();
+    let bin = TempDir::new().unwrap();
+    let script = format!("#!/bin/sh\ncat <<'EOF'\n{panes}\nEOF\n");
+    let path = bin.path().join("herdr");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let amesh = |args: &[&str]| {
+        let mut c = Command::cargo_bin("amesh").unwrap();
+        c.arg("--home").arg(home.path()).args(args);
+        c.env("PATH", format!("{}:/usr/bin:/bin", bin.path().display()));
+        c
+    };
+    amesh(&["keygen"]).assert().success();
+    amesh(&[
+        "flock",
+        "init",
+        "--name",
+        "f",
+        "--member",
+        &format!("{name}:helper"),
+    ])
+    .assert()
+    .success();
+    let out = amesh(&["flock", "panes", "--name", "f"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !text.chars().any(|c| c.is_control() && c != '\n'),
+        "a control character reached the terminal: {text:?}"
+    );
+    assert!(text.contains("ev\\x1b]52;c;aGk=\\x07il"), "{text}");
+}
