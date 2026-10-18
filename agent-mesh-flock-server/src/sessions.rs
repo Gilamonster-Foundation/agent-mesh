@@ -349,19 +349,37 @@ impl Sessions {
         }
     }
 
-    /// A session a hand-off activated writes `prev = handoff` as its first
-    /// event, so a zombie cannot fork the chain.
+    /// What `session`'s next event must have as `prev`: its own head, or, before
+    /// its first event, the hand-off that activated it.
+    #[must_use]
+    pub fn chain_head(&self, board: &Board, session: &str) -> Option<ContentId> {
+        board
+            .head_of(session)
+            .or_else(|| self.sessions.get(session)?.activated_by)
+    }
+
+    /// A session's first event. One a hand-off activated writes exactly that
+    /// hand-off as `prev`, so a zombie cannot fork the chain; one no hand-off
+    /// activated writes no `prev`, so it cannot claim a causal link to a
+    /// hand-off that was not its own.
     ///
     /// # Errors
-    /// The first event does not follow the hand-off.
+    /// The first event does not follow the rule.
     pub fn first_link(&self, board: &Board, ev: &Event) -> Result<(), String> {
-        match self.sessions.get(&ev.author) {
-            Some(Session {
-                activated_by: Some(h),
-                ..
-            }) if board.head_of(&ev.author).is_none() && ev.prev != Some(*h) => {
+        let Some(session) = self.sessions.get(&ev.author) else {
+            return Ok(());
+        };
+        if board.head_of(&ev.author).is_some() {
+            return Ok(());
+        }
+        match (session.activated_by, ev.prev) {
+            (Some(h), prev) if prev != Some(h) => {
                 Err("the first event after a hand-off must have prev = the handoff".into())
             }
+            (None, Some(_)) => Err(
+                "a session no hand-off activated cannot chain its first event onto a hand-off"
+                    .into(),
+            ),
             _ => Ok(()),
         }
     }

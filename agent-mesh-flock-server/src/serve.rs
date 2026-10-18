@@ -416,7 +416,7 @@ fn handle(server: &mut Server, req: Req, bound: &mut Option<String>) -> Result<R
         Req::RenewFinish { challenge, proof } => {
             Resp::Cert(server.renew_finish(&challenge, &proof)?)
         }
-        Req::Head { session } => Resp::Head(server.board().head_of(&session)),
+        Req::Head { session } => Resp::Head(server.sessions().chain_head(server.board(), &session)),
         Req::Admit { node, sig } => {
             let r = server.admit(node, sig)?;
             Resp::Admitted {

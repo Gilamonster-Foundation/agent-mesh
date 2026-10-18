@@ -297,3 +297,44 @@ fn serving_a_log_already_at_a_later_epoch_waits_for_nothing() {
     assert!(serving.wait_epoch(1));
     r.serving = Some(serving);
 }
+
+#[test]
+fn a_session_a_hand_off_activated_can_emit_because_the_server_hands_it_its_chain_head() {
+    use agent_mesh_flock::{FileRef, HandoffApproval};
+    use content_addressable::{MerkleNode, RawContentId};
+    let r = rig();
+    let (_shep_conn, shep_key, _) = enrol_by_hand(&r, "shep");
+    let old = r.session("h1");
+    let mut new = r.session("h1"); // pending replacement
+    let approval = r.serving.as_ref().unwrap().with_server(|s| {
+        MerkleNode::genesis(HandoffApproval {
+            flock: s.flock(),
+            member: "h1".into(),
+            from: old.id().to_owned(),
+            to: new.id().to_owned(),
+            resume: s.sessions().get(old.id()).unwrap().start,
+            context: Some(FileRef {
+                root: "r".into(),
+                path: "HANDOFF.md".into(),
+                id: RawContentId::from_content(b"h"),
+            }),
+        })
+    });
+    let sig = Assertion::sign(&shep_key, &approval.content_id().unwrap());
+    r.serving
+        .as_ref()
+        .unwrap()
+        .with_server(|s| s.handoff(approval, sig))
+        .unwrap();
+    // its first event must chain from the hand-off; the session cannot know
+    // that, so the server's answer to "what is my head?" has to say so
+    let job = Body::Job {
+        lane: "l".into(),
+        label: "first".into(),
+    };
+    let (_, first) = new
+        .emit(Kind::Job, Default::default(), job.clone())
+        .unwrap();
+    let (_, second) = new.emit(Kind::Job, Default::default(), job).unwrap();
+    assert!(first > 0 && second == first + 1);
+}
