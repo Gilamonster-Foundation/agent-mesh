@@ -48,6 +48,21 @@ impl Assertion {
         &self.author
     }
 
+    /// The detached signature alone, for a record that cites the author's
+    /// certificate instead of carrying it.
+    #[must_use]
+    pub fn signature(&self) -> &SerdeSig {
+        &self.sig
+    }
+
+    /// An assertion from a certificate chain and a signature kept apart. The
+    /// pair is not checked here: [`Assertion::verify`] is what says whether
+    /// `sig` is `author`'s.
+    #[must_use]
+    pub fn from_parts(author: CertChain, sig: SerdeSig) -> Self {
+        Self { author, sig }
+    }
+
     /// Check that the author signed `cid` and that the author's chain passes
     /// is **rooted** at `trust_root` (the flock server's agent public key) at epoch
     /// `generation`: the trust root must be the root agent, the certificate

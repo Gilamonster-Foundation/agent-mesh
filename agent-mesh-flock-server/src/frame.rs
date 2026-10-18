@@ -15,8 +15,8 @@
 use crate::ServerError;
 use agent_mesh_flock::Event;
 #[cfg(feature = "serve")]
-use agent_mesh_protocol::AgentKey;
-use agent_mesh_protocol::{Assertion, CertChain};
+use agent_mesh_protocol::{AgentKey, Assertion};
+use agent_mesh_protocol::{CertChain, SerdeSig};
 use content_addressable::canonical::{from_canonical_dagcbor_checked, to_canonical_dagcbor};
 #[cfg(feature = "serve")]
 use content_addressable::ContentAddressable;
@@ -41,17 +41,25 @@ pub struct AdmissionRecord {
     pub cert: ContentId,
 }
 
-/// One admitted event with everything a fresh reader needs to verify it.
+/// One admitted event with everything a reader that holds the log before it
+/// needs to verify it. Signatures are bare, and each is made under a
+/// different certificate: `event_sig` under the author's, the one
+/// `record.cert` names (the server's, from genesis, for a server event; a
+/// session's, from its `session-start` or a `renewal`, otherwise), and
+/// `record_sig` always under the genesis server certificate. Both certificates
+/// are already in the log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sealed {
     /// The event node.
     pub event: MerkleNode<Event>,
-    /// The author's detached signature (carries the certificate).
-    pub event_sig: Assertion,
+    /// The author's detached signature, made under the certificate
+    /// `record.cert` names.
+    pub event_sig: SerdeSig,
     /// `parents: {previous record, or genesis}`.
     pub record: MerkleNode<AdmissionRecord>,
-    /// The server's signature over the record's id.
-    pub record_sig: Assertion,
+    /// The server's signature over the record's id, under its genesis
+    /// certificate.
+    pub record_sig: SerdeSig,
 }
 
 /// One transaction: the requested event first, then any records it caused.
@@ -94,10 +102,12 @@ pub fn seal(
         },
         [prev],
     );
-    let record_sig = Assertion::sign(server, &record.content_id().map_err(enc)?);
+    let record_sig = Assertion::sign(server, &record.content_id().map_err(enc)?)
+        .signature()
+        .clone();
     Ok(Sealed {
         event,
-        event_sig,
+        event_sig: event_sig.signature().clone(),
         record,
         record_sig,
     })

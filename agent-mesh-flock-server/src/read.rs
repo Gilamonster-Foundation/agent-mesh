@@ -29,9 +29,8 @@ impl Snapshot {
     /// Missing or bad genesis; [`ServerError::Corrupt`]; I/O.
     pub fn read(dir: &Path) -> Result<Self, ServerError> {
         let genesis = load_genesis(dir)?;
-        let server_pub = genesis.node.payload.server_cert.agent_pubkey;
         let (frames, torn) = read_frames::<Frame>(&dir.join(LOG_FILE))?;
-        let st = rebuild(&genesis.node, server_pub, frames)?;
+        let st = rebuild(&genesis.node, frames)?;
         Ok(Self { st, torn })
     }
 
