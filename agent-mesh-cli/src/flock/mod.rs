@@ -1,6 +1,8 @@
 //! `amesh flock` — the flock server's command line.
 
 use crate::util;
+#[cfg(unix)]
+use agent_mesh_flock::{Body, Kind};
 use agent_mesh_flock::{Member, Role};
 use agent_mesh_flock_server::{init as flock_init, InitSpec};
 use agent_mesh_protocol::UserKey;
@@ -9,7 +11,16 @@ use clap::Subcommand;
 use rand::RngCore;
 use std::path::PathBuf;
 
+#[cfg(unix)]
+mod discover;
+#[cfg(unix)]
+mod emit;
 mod panes;
+#[cfg(unix)]
+mod read;
+
+#[cfg(unix)]
+use discover::Where;
 
 /// `amesh flock` subcommands.
 #[derive(Subcommand, Debug)]
@@ -64,6 +75,99 @@ pub enum FlockCommand {
         #[arg(long)]
         allow_unlocked: bool,
     },
+    /// Which session this is, and optionally tell the log its herdr pane.
+    #[cfg(unix)]
+    Join {
+        #[command(flatten)]
+        at: Where,
+        /// Also announce the herdr pane this session runs in.
+        #[arg(long)]
+        announce: bool,
+    },
+    /// Briefs and reviews addressed to this session's member and still open.
+    #[cfg(unix)]
+    Inbox {
+        #[command(flatten)]
+        at: Where,
+    },
+    /// Every lane and where it stands.
+    #[cfg(unix)]
+    Status {
+        #[command(flatten)]
+        at: Where,
+    },
+    /// The admitted events in order, with their content ids.
+    #[cfg(unix)]
+    Log {
+        #[command(flatten)]
+        at: Where,
+        /// First admission index to show.
+        #[arg(long, default_value_t = 0)]
+        from: u64,
+    },
+    /// Shepherd: give a member a task.
+    #[cfg(unix)]
+    Brief {
+        #[command(flatten)]
+        at: Where,
+        /// The addressee.
+        #[arg(long)]
+        to: String,
+        /// The lane.
+        #[arg(long)]
+        lane: String,
+    },
+    /// Shepherd: ask a member to review a head.
+    #[cfg(unix)]
+    Review {
+        #[command(flatten)]
+        at: Where,
+        /// The reviewer.
+        #[arg(long)]
+        to: String,
+        /// The lane.
+        #[arg(long)]
+        lane: String,
+        /// The head under review.
+        #[arg(long)]
+        head: String,
+    },
+    /// Acknowledge a brief or review (an `ack`).
+    #[cfg(unix)]
+    Take {
+        #[command(flatten)]
+        at: Where,
+        /// The brief or review's content id.
+        cid: String,
+    },
+    /// Close a brief with its outcome.
+    #[cfg(unix)]
+    Result {
+        #[command(flatten)]
+        at: Where,
+        /// The brief's content id.
+        brief: String,
+        /// `completed` or `failed`.
+        #[arg(long)]
+        outcome: String,
+    },
+    /// Close a review with a verdict.
+    #[cfg(unix)]
+    Verdict {
+        #[command(flatten)]
+        at: Where,
+        /// The review's content id.
+        review: String,
+        /// The head the review named.
+        #[arg(long)]
+        head: String,
+        /// Approve it.
+        #[arg(long, conflicts_with = "reject")]
+        approve: bool,
+        /// Reject it.
+        #[arg(long)]
+        reject: bool,
+    },
     /// Show the roster next to the herdr panes that carry its members.
     /// Read-only: reads the log without its lock and asks herdr only to list.
     Panes {
@@ -99,6 +203,63 @@ pub fn run(home: PathBuf, cmd: FlockCommand) -> Result<()> {
             socket,
             allow_unlocked,
         } => unix::session(&dir, &member, &token, socket, allow_unlocked),
+        #[cfg(unix)]
+        FlockCommand::Join { at, announce } => emit::join(&home, &at, announce),
+        #[cfg(unix)]
+        FlockCommand::Inbox { at } => read::inbox(&home, &at),
+        #[cfg(unix)]
+        FlockCommand::Status { at } => read::status(&home, &at),
+        #[cfg(unix)]
+        FlockCommand::Log { at, from } => read::log(&home, &at, from),
+        #[cfg(unix)]
+        FlockCommand::Brief { at, to, lane } => {
+            emit::emit(&home, &at, Kind::Brief, &[], Body::Brief { to, lane })
+        }
+        #[cfg(unix)]
+        FlockCommand::Review { at, to, lane, head } => emit::emit(
+            &home,
+            &at,
+            Kind::Review,
+            &[],
+            Body::Review { to, lane, head },
+        ),
+        #[cfg(unix)]
+        FlockCommand::Take { at, cid } => {
+            emit::emit(&home, &at, Kind::Ack, &[("of", &cid)], Body::Ack)
+        }
+        #[cfg(unix)]
+        FlockCommand::Result { at, brief, outcome } => {
+            let outcome = emit::parse_outcome(&outcome)?;
+            emit::emit(
+                &home,
+                &at,
+                Kind::Result,
+                &[("brief", &brief)],
+                Body::Result { outcome },
+            )
+        }
+        #[cfg(unix)]
+        FlockCommand::Verdict {
+            at,
+            review,
+            head,
+            approve,
+            reject,
+        } => {
+            if approve == reject {
+                return Err(anyhow!("say exactly one of --approve or --reject"));
+            }
+            emit::emit(
+                &home,
+                &at,
+                Kind::Verdict,
+                &[("review", &review)],
+                Body::Verdict {
+                    head,
+                    approved: approve,
+                },
+            )
+        }
         FlockCommand::Panes {
             name,
             dir,
