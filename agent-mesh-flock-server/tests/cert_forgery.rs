@@ -263,3 +263,61 @@ fn a_record_citing_a_certificate_the_log_does_not_hold_says_so() {
     let why = format!("{:?}", f.apply(std::slice::from_ref(&sealed)).unwrap_err());
     assert!(why.contains("does not hold"), "{why}");
 }
+
+/// The server's own key under a second, equally valid certificate: only the
+/// metadata differs, and the same user signs it. Nothing in the log holds it.
+fn alternate_server_cert(w: &World) -> AgentKey {
+    use agent_mesh_protocol::{CertChain, SerdeSig};
+    let server = w.env.server_key();
+    let mut meta = server.cert().metadata.clone();
+    meta.issued_at = "2026-12-31T00:00:00Z".into();
+    let mut payload = server.cert().agent_pubkey.to_vec();
+    payload.extend(serde_json::to_vec(&meta).unwrap());
+    let cert = CertChain {
+        agent_pubkey: server.cert().agent_pubkey,
+        metadata: meta,
+        issuer: server.cert().issuer.clone(),
+        issuer_sig: SerdeSig(w.env.user.sign(&payload)),
+    };
+    cert.verify().expect("the alternate certificate is valid");
+    AgentKey::from_seed_and_cert(&server.signing_key_bytes(), cert).unwrap()
+}
+
+#[test]
+fn a_valid_alternate_server_certificate_is_refused_at_admission_and_the_log_stays_readable() {
+    let mut w = world();
+    let alt = alternate_server_cert(&w);
+    assert_ne!(alt.cert(), w.env.server_key().cert());
+    let before = w.env.log_len();
+    // a server-authored event signed under it
+    let (node, _) = w.env.server_event("under the alternate certificate");
+    let node_id = content_addressable::ContentAddressable::content_id(&node).unwrap();
+    let sig = Assertion::sign(&alt, &node_id);
+    let err = w.server.admit(node, sig).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("does not hold"),
+        "refused for its citation: {err:?}"
+    );
+    assert_eq!(w.env.log_len(), before, "nothing was appended");
+
+    // and the flock goes on: an honest event is admitted, and every reader
+    // that replays the log agrees with the server
+    let key = key_of(&w.shep);
+    let (n, s) = brief(&mut w, &key);
+    w.server.admit(n, s).unwrap();
+    let head = w.server.head_record();
+    let genesis = agent_mesh_flock_server::load_genesis(w.env.tmp.path())
+        .unwrap()
+        .node;
+    let mut f = Follower::new(&genesis).unwrap();
+    for fr in prefix(&w) {
+        f.apply(&fr).unwrap();
+    }
+    assert_eq!(f.admitted(), w.server.admitted());
+    let snap = agent_mesh_flock_server::Snapshot::read(w.env.tmp.path()).unwrap();
+    assert_eq!(snap.admitted(), w.server.admitted());
+    let env = w.env;
+    drop(w.server);
+    let reopened = Server::open(&env.dir()).unwrap();
+    assert_eq!(reopened.head_record(), head);
+}

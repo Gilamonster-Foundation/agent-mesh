@@ -15,7 +15,7 @@ use agent_mesh_flock::{
 };
 #[cfg(feature = "serve")]
 use agent_mesh_protocol::AgentKey;
-use agent_mesh_protocol::{Assertion, Issuer};
+use agent_mesh_protocol::{Assertion, CertChain, Issuer};
 #[cfg(feature = "serve")]
 use content_addressable::ContentAddressable;
 use content_addressable::{ContentId, MerkleNode};
@@ -141,6 +141,22 @@ impl State {
         Ok((signer, conflict))
     }
 
+    /// The certificate a record's citation names, from what the log holds: the
+    /// genesis server certificate, or one a `session-start` or `renewal` put
+    /// there. Replay resolves every record through this, and `prepare` asks it
+    /// before sealing, so nothing is appended that a reader could not resolve.
+    ///
+    /// # Errors
+    /// [`ServerError::Signer`] when the log does not hold it.
+    fn cited_cert(&self, cid: &ContentId) -> Result<CertChain, ServerError> {
+        if *cid == cert_cid(&self.chain.server_cert)? {
+            return Ok(self.chain.server_cert.clone());
+        }
+        self.sessions.cert(cid).cloned().ok_or_else(|| {
+            ServerError::Signer("record cites a certificate the log does not hold".into())
+        })
+    }
+
     /// Check and seal `node` as the next admission, changing nothing.
     #[cfg(feature = "serve")]
     pub fn prepare(
@@ -152,6 +168,8 @@ impl State {
         let id = node.content_id().map_err(enc)?;
         let epoch = self.chain.epoch_for(node.payload.kind);
         let (signer, conflict) = self.vet(node, &id, &sig, epoch)?;
+        // the citation the record will carry must resolve the way replay does
+        self.cited_cert(&cert_cid(sig.author())?)?;
         let sealed = seal(
             key,
             self.chain.prev,
@@ -183,16 +201,7 @@ impl State {
         let rec = &sealed.record.payload;
         // the record cites the certificate the event was signed under; it must
         // be one this log holds
-        let cert = if rec.cert == cert_cid(&self.chain.server_cert)? {
-            self.chain.server_cert.clone()
-        } else {
-            self.sessions
-                .cert(&rec.cert)
-                .ok_or_else(|| {
-                    ServerError::Signer("record cites a certificate the log does not hold".into())
-                })?
-                .clone()
-        };
+        let cert = self.cited_cert(&rec.cert)?;
         let sig = Assertion::from_parts(cert, sealed.event_sig.clone());
         let (signer, _) = self.vet(&sealed.event, &id, &sig, rec.epoch)?;
         self.apply(&sealed.event, signer, id, record_id, rec)

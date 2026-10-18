@@ -42,9 +42,12 @@ pub struct AdmissionRecord {
 }
 
 /// One admitted event with everything a reader that holds the log before it
-/// needs to verify it. Signatures are bare: the certificate each was made
-/// under is the one `record.cert` names, which the log already holds (the
-/// server's in genesis, a session's in its `session-start` or a `renewal`).
+/// needs to verify it. Signatures are bare, and each is made under a
+/// different certificate: `event_sig` under the author's, the one
+/// `record.cert` names (the server's, from genesis, for a server event; a
+/// session's, from its `session-start` or a `renewal`, otherwise), and
+/// `record_sig` always under the genesis server certificate. Both certificates
+/// are already in the log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sealed {
     /// The event node.

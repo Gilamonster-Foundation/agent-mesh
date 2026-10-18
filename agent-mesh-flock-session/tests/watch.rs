@@ -837,3 +837,56 @@ fn a_frame_that_nearly_fills_the_message_limit_is_committed_and_watchable() {
     );
     assert!(kinds.len() as u64 >= index);
 }
+
+#[test]
+fn an_event_under_a_valid_alternate_server_certificate_is_refused_and_the_reader_goes_on() {
+    use agent_mesh_protocol::{CertChain, SerdeSig};
+    let mut r = rig();
+    let mut shep = r.enrol("shep");
+    r.brief(&mut shep, "a0");
+    // the server's key under a second certificate the same user signed
+    let server =
+        agent_mesh_flock_server::load_server_key(&r.tmp.path().join("server.key")).unwrap();
+    let mut meta = server.cert().metadata.clone();
+    meta.issued_at = "2026-12-31T00:00:00Z".into();
+    let mut payload = server.cert().agent_pubkey.to_vec();
+    payload.extend(serde_json::to_vec(&meta).unwrap());
+    let cert = CertChain {
+        agent_pubkey: server.cert().agent_pubkey,
+        metadata: meta,
+        issuer: server.cert().issuer.clone(),
+        issuer_sig: SerdeSig(r.user.sign(&payload)),
+    };
+    let alt = AgentKey::from_seed_and_cert(&server.signing_key_bytes(), cert).unwrap();
+    let node = Event {
+        flock: r.genesis().content_id().unwrap(),
+        kind: Kind::Invite,
+        author: alt.fingerprint().hex(),
+        prev: None,
+        refs: Default::default(),
+        files: vec![],
+        at: 99,
+        body: Body::Invite {
+            member: "h1".into(),
+            verifier: content_addressable::RawContentId::from_content(b"x"),
+        },
+    }
+    .node();
+    let sig = Assertion::sign(&alt, &node.content_id().unwrap());
+    let before = r.serving().with_server(|s| s.admitted());
+    let refused = r.serving().with_server(|s| s.admit(node, sig));
+    assert!(
+        format!("{refused:?}").contains("does not hold"),
+        "{refused:?}"
+    );
+    assert_eq!(r.serving().with_server(|s| s.admitted()), before);
+    // the reader still reaches the server's head
+    r.brief(&mut shep, "a1");
+    let dir = TempDir::new().unwrap();
+    let mut reader = Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
+    reader.sync(&r.sock, &key_prover(&shep.key)).unwrap();
+    assert_eq!(
+        reader.follower().admitted(),
+        r.serving().with_server(|s| s.admitted())
+    );
+}
