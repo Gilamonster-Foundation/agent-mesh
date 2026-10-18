@@ -439,6 +439,37 @@ fn the_published_schema_accepts_every_body_shape_the_tool_takes() {
 }
 
 #[test]
+fn refs_is_optional_but_never_null_in_the_schema_and_in_the_parser_alike() {
+    let f = flock();
+    let h1 = f.session("h1");
+    let mut m = f.mcp(Some(&h1));
+    let schema = m.schema("flock_emit");
+    let job = |refs: Option<Value>| {
+        let mut a = json!({"kind": "job", "body": {"job": {"lane": "l1", "label": "x"}}});
+        if let Some(r) = refs {
+            a["refs"] = r;
+        }
+        a
+    };
+    // omitted and {} both conform, and both are taken
+    for refs in [None, Some(json!({}))] {
+        let args = job(refs);
+        assert!(conforms(&schema, &args), "{args}");
+        assert!(m.tool("flock_emit", args).unwrap().starts_with("admitted "));
+    }
+    // null does not conform, and the parser agrees: it is refused, nothing is sent
+    let before = f.log(&h1);
+    let null = job(Some(Value::Null));
+    assert!(
+        !conforms(&schema, &null),
+        "the schema must not allow null refs"
+    );
+    let err = m.tool("flock_emit", null).unwrap_err();
+    assert!(err.contains("refs"), "{err}");
+    assert_eq!(f.log(&h1), before);
+}
+
+#[test]
 fn every_flock_tool_fails_once_the_bound_socket_stops_being_its_session() {
     let f = flock();
     let h1 = f.session("h1");
