@@ -106,7 +106,7 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   and a pane two members claim is `ambiguous`. A replacement session is
   pending; once a hand-off activates it, the server's answer to "what is my
   head?" is the hand-off until its first event, so it can announce and emit.
-  The server's first-link check is unchanged.
+  A session's first event is checked the same way live and on replay: an activated replacement writes exactly the hand-off that activated it as `prev`; any other session writes no `prev` (it cannot chain onto a hand-off that was not its own).
 
 - **`watch --from (index, signed head)`** (library and `serve`; the `amesh flock
   watch` command is step 7b). One stream carries the replay, a `Caught` marker,
@@ -135,14 +135,14 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
 
 - **the CLI, first half (step 7a)**, Unix only, every write through a session
   process (the CLI holds no key and checks nothing admission decides):
-  `join [--announce]` (who is this session), `inbox` (open briefs and reviews
+  `join [--announce]` (who is this session; its `state` is read from the log when a flock is named, the session's own `pending` is labelled as the enrollment-time flag), `inbox` (open briefs and reviews
   addressed to this session's member), `status` (lanes), `log [--from N]`
   (events with full content ids), and the writers `brief --to --lane`,
   `review --to --lane --head`, `take <cid>` (an `ack`), `result <brief>
   --outcome completed|failed`, `verdict <review> --head --approve|--reject`.
   The session is `--session <socket>`, else `AMESH_FLOCK_SESSION`, else the one
   live `run/session-*.sock` in `--dir`/`--name` (dead sockets skipped; none or
-  several is an error that names them). Reads replay the log without its lock
+  several is an error that names them). When a flock is named, the session must belong to it (any selector; a session of another flock is refused before anything is sent); with none named the session alone decides. Reads replay the log without its lock
   (as `panes` does) and do not check for rollback; only `watch` does.
 
 **Planned, not built:** operator approval of a **delegate**

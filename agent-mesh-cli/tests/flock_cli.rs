@@ -145,7 +145,7 @@ fn a_lane_runs_end_to_end_through_the_sessions() {
     let f = flock();
     let (shep, h1, rev) = (f.session("shep"), f.session("h1"), f.session("rev"));
     let joined = f.ok(&h1, &["join"]);
-    assert!(joined.contains("member:  h1") && joined.contains("state:   active"));
+    assert!(joined.contains("member:  h1") && joined.contains("state:   active (in the log)"));
 
     let brief = f.emit(&shep, &["brief", "--to", "h1", "--lane", "l1"]);
     assert!(
@@ -374,4 +374,21 @@ fn with_no_flock_named_the_session_alone_decides() {
         .env_remove("AMESH_FLOCK_SESSION");
     assert!(c.output().unwrap().status.success());
     assert!(a.log(&shep).contains("brief"));
+}
+
+#[test]
+fn join_labels_the_enrollment_flag_and_reads_the_current_state_from_the_log() {
+    let f = flock();
+    let _first = f.session("h1");
+    let second = f.session("h1"); // a replacement: pending until a hand-off
+    let out = f.ok(&second, &["join"]);
+    assert!(out.contains("enrolled: pending (at enrollment"), "{out}");
+    assert!(out.contains("state:   pending (in the log)"), "{out}");
+    // without a flock named there is no log to ask: say so, do not guess
+    let mut c = amesh(f.home.path());
+    c.args(["flock", "join", "--session"])
+        .arg(&second.sock)
+        .env_remove("AMESH_FLOCK_SESSION");
+    let out = String::from_utf8(c.output().unwrap().stdout).unwrap();
+    assert!(out.contains("state:   unknown"), "{out}");
 }
