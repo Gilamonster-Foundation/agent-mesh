@@ -53,6 +53,12 @@ pub enum Reason {
     HeadMismatch,
     /// `replaces` is not the current roster.
     StaleRoster,
+    /// Only a server-signed roster changes operator devices.
+    DevicesLocked,
+    /// `devices` on a member that is not an operator.
+    DevicesOnNonOperator,
+    /// Two roster members share a name.
+    DuplicateMember,
     /// A pane or tab claim that is empty, too long or not printable.
     BadClaim,
 }
@@ -79,6 +85,9 @@ impl From<&Refusal> for Reason {
             Refusal::AdapterCannotAck => Self::AdapterCannotAck,
             Refusal::HeadMismatch => Self::HeadMismatch,
             Refusal::StaleRoster => Self::StaleRoster,
+            Refusal::DevicesLocked => Self::DevicesLocked,
+            Refusal::DevicesOnNonOperator => Self::DevicesOnNonOperator,
+            Refusal::DuplicateMember => Self::DuplicateMember,
             Refusal::BadClaim => Self::BadClaim,
         }
     }

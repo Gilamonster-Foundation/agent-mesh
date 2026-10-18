@@ -73,6 +73,7 @@ fn other_user_cannot_use_the_socket() {
         roster: vec![Member {
             name: "shep".into(),
             role: Role::Shepherd,
+            devices: vec![],
         }],
         salt: "00".into(),
         host: "h".into(),

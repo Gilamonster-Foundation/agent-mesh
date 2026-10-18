@@ -6,7 +6,7 @@ use crate::server::Server;
 use crate::sessions::{session_caveats, token_digest, InviteInfo, SessionInfo, Status};
 use crate::state::Spec;
 use crate::ServerError;
-use agent_mesh_flock::{Body, EndReason, HandoffApproval, Kind};
+use agent_mesh_flock::{Body, EndReason, HandoffApproval, Kind, Member};
 use agent_mesh_protocol::agent_key::PossessionChallenge;
 use agent_mesh_protocol::Assertion;
 use agent_mesh_protocol::{AgentMetadata, CertChain, Fingerprint};
@@ -251,6 +251,22 @@ impl Server {
             },
         }])?;
         Ok(cert)
+    }
+
+    /// Replace the roster with a server-signed `roster` event. This is the
+    /// only way operator `devices` change (the shepherd's roster events must
+    /// leave them as they are).
+    ///
+    /// # Errors
+    /// A roster the model refuses, or I/O.
+    pub fn replace_roster(&mut self, members: Vec<Member>) -> Result<ContentId, ServerError> {
+        let replaces = self.st.board.roster_id();
+        let ids = self.transact(vec![Spec {
+            kind: Kind::Roster,
+            refs: vec![("replaces", replaces)],
+            body: Body::Roster { members },
+        }])?;
+        Ok(ids[0])
     }
 
     /// Move a member's role from one session to another, on the roster

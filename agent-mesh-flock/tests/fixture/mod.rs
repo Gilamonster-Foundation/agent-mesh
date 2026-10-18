@@ -57,6 +57,7 @@ pub fn genesis_of(server: &AgentKey) -> MerkleNode<Genesis> {
             .map(|(n, r)| Member {
                 name: (*n).into(),
                 role: *r,
+                devices: vec![],
             })
             .collect(),
         salt: "s".into(),

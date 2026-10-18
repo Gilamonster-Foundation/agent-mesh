@@ -105,6 +105,7 @@ fn two_racing_roster_replacements_exactly_one_wins() {
         members: vec![Member {
             name: extra.into(),
             role: Role::Helper,
+            devices: vec![],
         }],
     };
     let a = env.event(

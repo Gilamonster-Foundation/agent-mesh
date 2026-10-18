@@ -384,3 +384,63 @@ fn a_handoff_binds_its_approval_and_fields() {
     other.payload.member = "h2".into();
     assert_ne!(base, handoff(other, "bb"));
 }
+
+/// Roster members as they were encoded before `devices` existed.
+#[derive(serde::Serialize)]
+struct MemberBefore {
+    name: String,
+    role: agent_mesh_flock::Role,
+}
+
+fn roster_node(devices: Vec<agent_mesh_protocol::Fingerprint>) -> MerkleNode<Event> {
+    use agent_mesh_flock::{Member, Role};
+    let members = vec![
+        Member {
+            name: "shep".into(),
+            role: Role::Shepherd,
+            devices: vec![],
+        },
+        Member {
+            name: "op".into(),
+            role: Role::Operator,
+            devices,
+        },
+    ];
+    event(
+        Kind::Roster,
+        Body::Roster { members },
+        &[("replaces", "roster")],
+    )
+}
+
+#[test]
+fn a_member_without_devices_encodes_as_it_did_before_devices_existed() {
+    use content_addressable::canonical::to_canonical_dagcbor;
+    let m = agent_mesh_flock::Member {
+        name: "shep".into(),
+        role: agent_mesh_flock::Role::Shepherd,
+        devices: vec![],
+    };
+    let before = MemberBefore {
+        name: "shep".into(),
+        role: agent_mesh_flock::Role::Shepherd,
+    };
+    assert_eq!(
+        to_canonical_dagcbor(&m).unwrap(),
+        to_canonical_dagcbor(&before).unwrap()
+    );
+}
+
+#[test]
+fn a_roster_with_devices_has_its_pinned_id_and_differs_from_one_without() {
+    let none = roster_node(vec![]).content_id().unwrap().to_string();
+    let one = roster_node(vec![agent_mesh_protocol::Fingerprint([7; 32])])
+        .content_id()
+        .unwrap()
+        .to_string();
+    assert_ne!(none, one);
+    assert_eq!(
+        one, "bafyr4iatidh7yrc3nsinfuyh6iry7cioxd5pwis5cd6gwi2wcwp4xb2cou",
+        "pin this"
+    );
+}

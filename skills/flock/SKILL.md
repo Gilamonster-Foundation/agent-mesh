@@ -44,7 +44,7 @@ session starts pending and can sign nothing until a hand-off activates it.
 
 ## Built vs planned
 
-Built (plan steps 1–4 and the read-only herdr view, 4c):
+Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
 - the detached author `Assertion` (`agent-mesh-protocol`);
 - the `agent-mesh-flock` model crate: schema, admission table, board fold, and
   real `invite`, `session-start`, `session-end`, `epoch` and `renewal` bodies;
@@ -64,10 +64,10 @@ Built (plan steps 1–4 and the read-only herdr view, 4c):
   later sessions start pending;
 - **hand-off**: `handoff(approval, sig)` on a single-use approval bound to
   `{flock, member, from, to, resume, context}`; `context` (the `HANDOFF.md`
-  file ref) is required. Signed by an active shepherd, for a helper only: the
-  shepherd, operator and adapter roles are refused, and so is a key merely
-  certified by the user key (no operator approval until the roster binds
-  operator devices). One
+  file ref) is required. Signed by an active shepherd for a helper, or by a
+  **listed operator device** for a shepherd; reviewer, adapter and operator
+  members are refused, and so is a key merely certified by the user key but
+  not listed. One
   frame: `handoff` ends `from`, activates the pending `to` and is followed by
   the `epoch` bump. The new session's first event must have `prev = handoff`;
   only a member's current holder can be handed off, so competing hand-offs
@@ -83,6 +83,13 @@ Built (plan steps 1–4 and the read-only herdr view, 4c):
   users, not other harnesses under the same account (agent-bridle's job). The
   CLI side so far is the library (`call`/`CtlReq`); the user-facing commands
   that use it come in step 7. Unix only.
+- **operator devices**: an operator member in the roster carries `devices`
+  (fingerprints of keys the user key certified). The check is "chains to this
+  flock's user key" **and** "listed in the roster at that point in the log", so
+  a removed device can't approve later, and an earlier hand-off still replays.
+  Devices change only in a server-signed `roster` event (`replace_roster`) or
+  genesis; a shepherd's roster must leave them as they are. Operator members
+  only. Rosters without devices encode as before;
 - **`Snapshot`** (`agent-mesh-flock-server`): reads and replays the log with no
   lock and no repair, stopping at a torn tail, so it runs beside a live server;
 - **`amesh flock panes --name <flock> [--tab <id>] [--map member=pane]`**:
@@ -103,9 +110,9 @@ Built (plan steps 1–4 and the read-only herdr view, 4c):
   server's first-link check is unchanged.
 
 **Planned, not built:** the epoch bump when a member is removed from the
-roster; operator device keys listed per device in the roster, and with them operator
-approval of a shepherd or delegate hand-off (refused today), plus
-operator-signed events; `watch`; the rest of
+roster; operator approval of a **delegate** hand-off (#127's other half; waits on the
+delegate designation, step 13); device changes signed by a listed device
+(server-signed only today); operator-signed events (`answer`); `watch`; the rest of
 the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; only `init`,
 `serve`, `invite`, `session` and `panes` exist); `amesh-tui`; attaching from another host; the
 `amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native
