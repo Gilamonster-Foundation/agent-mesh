@@ -81,8 +81,7 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   epoch bump leaves its key uncertified. `mlock` denied means the session
   refuses to start, unless `--allow-unlocked`. The sockets keep out other Unix
   users, not other harnesses under the same account (agent-bridle's job). The
-  CLI side so far is the library (`call`/`CtlReq`); the user-facing commands
-  that use it come in step 7. Unix only.
+  CLI commands that use it are below (step 7a). Unix only.
 - **operator devices**: an operator member in the roster carries `devices`
   (fingerprints of keys the user key certified). The check is "chains to this
   flock's user key" **and** "listed in the roster at that point in the log", so
@@ -105,12 +104,12 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   trusts only the active session's latest claim, only if herdr still lists
   that pane (in `--tab`, if given), ranks it below `--map` and above a label,
   and a pane two members claim is `ambiguous`. A replacement session is
-  pending; announcing after a hand-off is **deferred** (its first event must
-  have `prev = handoff`, which the session cannot yet supply: step 7). The
-  server's first-link check is unchanged.
+  pending; once a hand-off activates it, the server's answer to "what is my
+  head?" is the hand-off until its first event, so it can announce and emit.
+  The server's first-link check is unchanged.
 
 - **`watch --from (index, signed head)`** (library and `serve`; the `amesh flock
-  watch` command is step 7). One stream carries the replay, a `Caught` marker,
+  watch` command is step 7b). One stream carries the replay, a `Caught` marker,
   then live frames, each exactly once: the server publishes a frame to a
   journal only after its fsync, and readers read the journal without the
   writer's lock. The resume token is the last signed admission record. The
@@ -131,13 +130,24 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   admitted frame can be watched. One reader per state directory (locked). Ceilings: the journal is in memory; the reader rewrites its
   whole file per save.
 
+- **the CLI, first half (step 7a)**, Unix only, every write through a session
+  process (the CLI holds no key and checks nothing admission decides):
+  `join [--announce]` (who is this session), `inbox` (open briefs and reviews
+  addressed to this session's member), `status` (lanes), `log [--from N]`
+  (events with full content ids), and the writers `brief --to --lane`,
+  `review --to --lane --head`, `take <cid>` (an `ack`), `result <brief>
+  --outcome completed|failed`, `verdict <review> --head --approve|--reject`.
+  The session is `--session <socket>`, else `AMESH_FLOCK_SESSION`, else the one
+  live `run/session-*.sock` in `--dir`/`--name` (dead sockets skipped; none or
+  several is an error that names them). Reads replay the log without its lock
+  (as `panes` does) and do not check for rollback; only `watch` does.
+
 **Planned, not built:** the epoch bump when a member is removed from the
 roster (until then a dropped member cannot open a stream, but one already
 open is not closed by the roster event; step 6b); operator approval of a **delegate**
 hand-off (#127's other half; waits on the delegate designation, step 13); device changes
 signed by a listed device (server-signed only today); operator-signed events (`answer`); the rest of
-the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; only `init`,
-`serve`, `invite`, `session` and `panes` exist); `amesh-tui`; attaching from another host; the
+the CLI (`run`, `watch`, `answer`) and the MCP tools (steps 7b, 7c); `amesh-tui`; attaching from another host; the
 `amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native
 newt receive. Until they land, lanes run on files
 as the herdr-flock skill describes. Status: epic #109.
