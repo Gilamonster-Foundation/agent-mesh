@@ -18,7 +18,7 @@ members = [
 [workspace.package]
 version = "0.7.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.91"
 license = "Apache-2.0"
 repository = "https://github.com/Gilamonster-Foundation/agent-mesh"
 homepage = "https://github.com/Gilamonster-Foundation/agent-mesh"
