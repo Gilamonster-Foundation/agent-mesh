@@ -1,6 +1,6 @@
 //! With `mlock` denied, enrollment fails before any secret exists or any
 //! byte goes to the server. One test per file: the rlimit is per process.
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "emit"))]
 
 use agent_mesh_flock_session::{Policy, Session, SessionError};
 use rustix::process::{getrlimit, setrlimit, Resource};

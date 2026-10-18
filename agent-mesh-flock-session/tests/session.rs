@@ -1,5 +1,5 @@
 //! The session against an in-process server.
-#![cfg(unix)]
+#![cfg(all(unix, feature = "emit"))]
 
 use agent_mesh_flock::{Body, EndReason, Kind, Member, Role};
 use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp};

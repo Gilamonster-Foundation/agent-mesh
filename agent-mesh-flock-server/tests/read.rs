@@ -1,5 +1,5 @@
 //! `Snapshot`: a verified prefix of the log, read beside a live server.
-#![cfg(unix)]
+#![cfg(all(unix, feature = "serve"))]
 mod support;
 
 use agent_mesh_flock_server::{CrashPlan, Snapshot};

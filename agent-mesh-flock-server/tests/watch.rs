@@ -1,5 +1,5 @@
 //! The published log, the cursor, the follower and who may open a stream.
-#![cfg(unix)]
+#![cfg(all(unix, feature = "serve"))]
 mod support;
 
 use agent_mesh_flock::EndReason;

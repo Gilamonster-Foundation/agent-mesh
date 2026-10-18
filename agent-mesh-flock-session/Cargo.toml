@@ -10,6 +10,12 @@ authors.workspace = true
 description = "The agent-mesh flock session process: an ssh-agent-style holder of one session key."
 readme = "README.md"
 
+[features]
+# The signer: the session process, its key, and the emit path. On by default;
+# a reader that only follows a log turns it off.
+default = ["emit"]
+emit = ["agent-mesh-flock-server/serve"]
+
 [dependencies]
 agent-mesh-protocol.workspace = true
 agent-mesh-flock.workspace = true
@@ -26,6 +32,8 @@ rustix = { version = "1", features = ["mm", "process", "net", "event", "fs"] }
 libc = "0.2"
 
 [dev-dependencies]
+# fixtures build a log with a real server, whatever the features under test
+agent-mesh-flock-server = { workspace = true, features = ["serve"] }
 tempfile.workspace = true
 
 [lints]

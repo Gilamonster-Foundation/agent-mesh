@@ -1,13 +1,20 @@
 //! The log file: exclusive lock, append with one fsync, torn-tail cut.
 
 use crate::frame::{self, Next};
-use crate::{lock, ServerError};
+#[cfg(feature = "serve")]
+use crate::lock;
+use crate::ServerError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::File;
+#[cfg(feature = "serve")]
+use std::fs::OpenOptions;
+use std::io::Read;
+#[cfg(feature = "serve")]
+use std::io::Write;
 use std::path::Path;
 
+#[cfg(feature = "serve")]
 /// Test-only: where an append dies. No clock, no sleeps; the write path is
 /// simply stopped at a byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +27,7 @@ pub enum CrashPlan {
     AfterSync,
 }
 
+#[cfg(feature = "serve")]
 /// The open, locked log.
 pub struct Log {
     file: File,
@@ -32,6 +40,7 @@ pub struct Log {
     syncs: u64,
 }
 
+#[cfg(feature = "serve")]
 impl Log {
     /// Open and lock `path` and parse every frame. Nothing is modified: an
     /// incomplete final frame is only noted, and cut by

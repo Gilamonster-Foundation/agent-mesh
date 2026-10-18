@@ -10,7 +10,9 @@ use crate::frame::{AdmissionRecord, Sealed};
 use agent_mesh_protocol::Assertion;
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "serve")]
 use std::collections::BTreeSet;
+#[cfg(feature = "serve")]
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 /// A signed head: an admission record and the server's signature over it.
@@ -68,26 +70,32 @@ pub enum Resume {
 /// roster once a frame had been applied: immutable, published with the
 /// frame, so a stream can re-check its own eligibility without the writer's
 /// lock.
+#[cfg(feature = "serve")]
 pub type Eligible = Arc<BTreeSet<String>>;
 
 /// One published frame and who was eligible after it.
+#[cfg(feature = "serve")]
 pub type Published = (Arc<Vec<Sealed>>, Eligible);
 
+#[cfg(feature = "serve")]
 struct Inner {
     frames: Vec<Published>,
     stopped: bool,
 }
 
 /// The published frames and the signal that announces new ones.
+#[cfg(feature = "serve")]
 pub struct Journal {
     inner: Mutex<Inner>,
     more: Condvar,
 }
 
+#[cfg(feature = "serve")]
 fn last_index(f: &[Sealed]) -> u64 {
     f.last().map_or(0, |s| s.record.payload.index)
 }
 
+#[cfg(feature = "serve")]
 impl Journal {
     pub(crate) fn new(frames: Vec<(Vec<Sealed>, Eligible)>) -> Arc<Self> {
         Arc::new(Self {
@@ -164,11 +172,13 @@ impl Journal {
 }
 
 /// A reader's place in the journal.
+#[cfg(feature = "serve")]
 pub struct Cursor {
     journal: Arc<Journal>,
     next: usize,
 }
 
+#[cfg(feature = "serve")]
 impl Cursor {
     /// The index of the last event delivered (or the resume point).
     #[must_use]

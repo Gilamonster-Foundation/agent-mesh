@@ -4,8 +4,7 @@
 use crate::frame::Frame;
 use crate::init::{load_genesis, LOG_FILE};
 use crate::log::read_frames;
-use crate::server::rebuild;
-use crate::state::State;
+use crate::state::{rebuild, State};
 use crate::{ServerError, Sessions};
 use agent_mesh_flock::Board;
 use std::path::Path;

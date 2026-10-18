@@ -1,5 +1,5 @@
 //! Hand-off: pending replacements, the single-use approval, zombies.
-#![cfg(unix)]
+#![cfg(all(unix, feature = "serve"))]
 mod support;
 
 use agent_mesh_flock::{Body, EndReason, Kind, Refusal};

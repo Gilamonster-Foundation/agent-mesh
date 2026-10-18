@@ -1,5 +1,5 @@
 //! `init`, the key file, and a restart.
-#![cfg(unix)]
+#![cfg(all(unix, feature = "serve"))]
 mod support;
 
 use agent_mesh_flock_server::{
