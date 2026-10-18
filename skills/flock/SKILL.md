@@ -235,7 +235,7 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   real server and session feeding the model, and the same cargo-tree and
   compile-probe checks as the read side (`tests_common::readside`) run against
   the TUI: neither writer feature resolves and no writer API can be named by a
-  consumer of the crate. The Board scrolls to keep the selected member on screen (header and footer fixed). A frame whose checkpoint cannot be saved is rolled back by the reader itself (`Reader::follow` keeps nothing it did not save), so the view and `amesh flock watch` only ever show the saved prefix; the TUI header says `cannot save the checkpoint` and keeps the last saved state. Stream, Lane and Waiting views are 8c-8e.
+  consumer of the crate. The Board scrolls to keep the selected member on screen (header and footer fixed). A frame whose checkpoint cannot be saved is rolled back by the reader itself (`Reader::follow` keeps nothing it did not save, and `Reader::open` makes a checkpoint it finds durable (file and directory fsync) before showing it, or does not open: a rename left visible by a failed directory fsync is never presented as saved until it will survive power loss), so the view and `amesh flock watch` only ever show the saved prefix; the TUI header says `cannot save the checkpoint` and keeps the last saved state. Stream, Lane and Waiting views are 8c-8e.
 
 **Planned, not built:** operator approval of a **delegate**
 hand-off (#127's other half; waits on the delegate designation, step 13); device changes

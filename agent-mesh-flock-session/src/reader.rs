@@ -65,6 +65,18 @@ impl<F: Fs> Reader<F> {
         let frames = match fs.read(&dir.join(FILE))? {
             None => vec![],
             Some(bytes) => {
+                // What is on disk may be visible without being durable: a save
+                // whose directory fsync failed leaves its renamed file in place.
+                // Verifying it proves it is intact, not that it will survive
+                // power loss, so make it durable (the barriers a save ends
+                // with) before it is shown as the saved prefix. If that fails
+                // the reader does not open: nothing older is on hand to show
+                // instead, and a head that might vanish must not be presented
+                // as witnessed.
+                let file = dir.join(FILE);
+                fs.sync_file(&file)
+                    .and_then(|()| fs.sync_dir(dir))
+                    .map_err(ReaderError::Save)?;
                 let cp: Checkpoint = from_canonical_dagcbor_checked(&bytes)
                     .map_err(|e| ReaderError::Invalid(format!("saved state: {e}")))?;
                 for f in &cp.frames {

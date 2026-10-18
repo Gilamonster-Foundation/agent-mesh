@@ -890,3 +890,63 @@ fn an_event_under_a_valid_alternate_server_certificate_is_refused_and_the_reader
         r.serving().with_server(|s| s.admitted())
     );
 }
+
+/// The reviewer's recipe: a save whose directory fsync failed leaves the new
+/// checkpoint visible but not durable. The reader that failed rolls back, but
+/// a later ordinary open must not present that visible head as saved unless it
+/// has made it durable: what is shown must survive power loss.
+#[test]
+fn a_checkpoint_left_visible_by_a_failed_directory_fsync_is_made_durable_before_it_is_shown() {
+    let mut r = rig();
+    let mut shep = r.enrol("shep");
+    r.brief(&mut shep, "a0");
+    let dir = Path::new("/state");
+    let fs = power::PowerFs::default();
+    let mut rd = Reader::open(r.genesis(), dir, fs.clone()).unwrap();
+    rd.sync(&r.sock, &key_prover(&shep.key)).unwrap();
+    let saved = rd.follower().admitted();
+
+    r.brief(&mut shep, "a1");
+    // write, fsync of the file and rename succeed; the directory fsync fails
+    fs.crash_at(3);
+    let err = rd.sync(&r.sock, &key_prover(&shep.key)).unwrap_err();
+    assert!(matches!(err, ReaderError::Save(_)), "{err}");
+    assert_eq!(rd.follower().admitted(), saved, "rolled back in memory");
+    drop(rd);
+
+    // the fault clears on the same filesystem (no power loss): reopen, and
+    // follow, which has nothing new to apply or save
+    fs.heal();
+    let mut again = Reader::open(r.genesis(), dir, fs.clone()).unwrap();
+    again.sync(&r.sock, &key_prover(&shep.key)).unwrap();
+    let shown = again.follower().admitted();
+    drop(again);
+
+    let after = Reader::open(r.genesis(), dir, fs.after_power_loss()).unwrap();
+    assert_eq!(
+        after.follower().admitted(),
+        shown,
+        "the head shown after the reopen did not survive power loss"
+    );
+}
+
+#[test]
+fn a_reader_that_cannot_make_its_loaded_checkpoint_durable_does_not_open() {
+    let mut r = rig();
+    let mut shep = r.enrol("shep");
+    r.brief(&mut shep, "a0");
+    let dir = Path::new("/state");
+    let fs = power::PowerFs::default();
+    let mut rd = Reader::open(r.genesis(), dir, fs.clone()).unwrap();
+    rd.sync(&r.sock, &key_prover(&shep.key)).unwrap();
+    drop(rd);
+    fs.crash_at(0); // no further step succeeds
+    let err = match Reader::open(r.genesis(), dir, fs.clone()) {
+        Err(e) => e,
+        Ok(_) => panic!("opened on a checkpoint it could not make durable"),
+    };
+    assert!(matches!(err, ReaderError::Save(_)), "{err}");
+    // and the failed open let go of the directory
+    fs.heal();
+    Reader::open(r.genesis(), dir, fs.clone()).unwrap();
+}
