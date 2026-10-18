@@ -12,7 +12,7 @@ use std::fmt;
 /// A 32-byte BLAKE3 hash, used as the canonical ID for keys and
 /// content-addressed blobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Fingerprint(pub [u8; 32]);
+pub struct Fingerprint(#[serde(with = "serde_bytes")] pub [u8; 32]);
 
 impl Fingerprint {
     /// Hash an arbitrary byte slice with BLAKE3, returning the

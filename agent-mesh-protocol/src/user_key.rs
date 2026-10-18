@@ -201,12 +201,11 @@ mod verifying_key_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(key: &VerifyingKey, ser: S) -> Result<S::Ok, S::Error> {
-        let bytes: &[u8] = key.as_bytes();
-        bytes.serialize(ser)
+        serde_bytes::Bytes::new(key.as_bytes()).serialize(ser)
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<VerifyingKey, D::Error> {
-        let bytes: Vec<u8> = Vec::deserialize(de)?;
+        let bytes = serde_bytes::ByteBuf::deserialize(de)?;
         if bytes.len() != 32 {
             return Err(serde::de::Error::custom("expected 32 bytes"));
         }

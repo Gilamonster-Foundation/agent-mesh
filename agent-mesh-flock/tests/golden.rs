@@ -462,7 +462,11 @@ fn a_roster_with_devices_has_its_pinned_id_and_differs_from_one_without() {
         .to_string();
     assert_ne!(none, one);
     assert_eq!(
-        one, "bafyr4iatidh7yrc3nsinfuyh6iry7cioxd5pwis5cd6gwi2wcwp4xb2cou",
+        // Re-pinned when keys and fingerprints became CBOR byte strings (was
+        // bafyr4iatidh7yrc3nsinfuyh6iry7cioxd5pwis5cd6gwi2wcwp4xb2cou, with
+        // the fingerprint as an array of 32 integers).
+        one,
+        "bafyr4ig43nudonwg2wiifkv33lu5xpj3uxiol4dwpiakhy6uv2pbe2xrwa",
         "pin this"
     );
 }
