@@ -309,6 +309,7 @@ fn a_member_the_roster_dropped_may_not_open_a_stream_though_its_session_is_still
                 "herdr" => Role::Adapter,
                 _ => Role::Operator,
             },
+            devices: vec![],
         })
         .collect();
     let prev = server.board().head_of(&shep.key.fingerprint().hex());

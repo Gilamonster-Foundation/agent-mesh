@@ -11,7 +11,7 @@ use crate::sessions::Sessions;
 use crate::state::{check_frame_shape, Spec, State};
 use crate::{load_server_key, CrashPlan, ServerError};
 use agent_mesh_flock::{Board, ConflictKind, Event, Kind, Refusal, SignerClass};
-use agent_mesh_protocol::{AgentKey, Assertion};
+use agent_mesh_protocol::{AgentKey, Assertion, Issuer};
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -64,8 +64,13 @@ pub(crate) fn rebuild_with(
     mut after: impl FnMut(&State),
 ) -> Result<State, ServerError> {
     let board = Board::new(genesis).map_err(enc)?;
+    let Issuer::User(user) = &genesis.payload.server_cert.issuer else {
+        return Err(ServerError::Signer(
+            "genesis server certificate is not issued by a user key".into(),
+        ));
+    };
     let mut st = State {
-        chain: Chain::new(board.flock(), server_pub),
+        chain: Chain::new(board.flock(), server_pub, user.clone()),
         board,
         sessions: Sessions::default(),
     };

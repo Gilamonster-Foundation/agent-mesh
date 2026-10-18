@@ -296,10 +296,10 @@ impl Sessions {
         Ok(())
     }
 
-    /// The roster's hand-off authority signed it: an active shepherd session,
-    /// and only for a helper. Everything else fails closed. Operator approval
-    /// waits on a logged key-to-operator binding, which the roster cannot yet
-    /// carry; a key merely certified by the flock's user key is not one.
+    /// The roster's hand-off authority signed it: an active shepherd session
+    /// for a helper, or a listed operator device for a shepherd. Everything
+    /// else fails closed. A key merely certified by the flock's user key is
+    /// not a device; the roster at this point in the log must list it.
     fn approver_ok(
         &self,
         role: Role,
@@ -310,7 +310,24 @@ impl Sessions {
         epoch: u64,
     ) -> Result<(), String> {
         if matches!(sig.author().issuer, Issuer::User(_)) {
-            return Err("operator approval is not supported: no key-to-operator binding".into());
+            let fp = sig.author().agent_fingerprint();
+            if !board
+                .members()
+                .iter()
+                .any(|m| m.role == Role::Operator && m.devices.contains(&fp))
+            {
+                return Err(
+                    "key is certified by the flock's user but is not a listed operator device"
+                        .into(),
+                );
+            }
+            sig.verify_user(ap_id, &chain.user, epoch)
+                .map_err(|e| format!("approval: {e}"))?;
+            return if role == Role::Shepherd {
+                Ok(())
+            } else {
+                Err("an operator device approves a shepherd hand-off only".into())
+            };
         }
         let signer = self.resolve(sig, ap_id, &chain.server_pub, epoch)?;
         let SignerClass::Session {

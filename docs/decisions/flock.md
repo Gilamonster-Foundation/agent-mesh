@@ -154,7 +154,12 @@ activates it, and a member has at most one active session.
 A hand-off moves a role from one session to another, either after a `lost`
 session or as a planned handover such as a tab restart.
 1. The roster's authority approves it: the shepherd for a helper, the operator
-   for the shepherd or the delegate. The approval is single-use and bound to
+   for the shepherd or the delegate. The operator signs with a device key the
+   roster lists; a key merely certified by the same `UserKey` doesn't count.
+   Devices change only in a server-signed `roster` event, and the check uses
+   the roster as of the approval's own admission index, so replay is stable
+   after a device is removed. (Built for the shepherd; the delegate half waits
+   on the delegate designation.) The approval is single-use and bound to
    `{flock, member, from, to, resume, context}`.
 2. The server admits `handoff {from, to, resume, context}`. It ends `from` and
    activates `to` in the same step. `context` cites the `HANDOFF.md` the new

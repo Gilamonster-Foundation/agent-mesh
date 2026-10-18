@@ -31,10 +31,12 @@ fn spec() -> InitSpec {
             Member {
                 name: "shep".into(),
                 role: Role::Shepherd,
+                devices: vec![],
             },
             Member {
                 name: "h1".into(),
                 role: Role::Helper,
+                devices: vec![],
             },
         ],
         salt: "00".into(),
@@ -181,6 +183,7 @@ impl Rig {
                 members: vec![Member {
                     name: "shep".into(),
                     role: Role::Shepherd,
+                    devices: vec![],
                 }],
             },
         }

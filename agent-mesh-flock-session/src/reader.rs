@@ -99,7 +99,10 @@ impl<F: Fs> Reader<F> {
     /// Save atomically; returns the head now witnessed.
     ///
     /// # Errors
-    /// I/O or encoding; the previous save is intact.
+    /// I/O or encoding. Before the rename the previous save is intact; after it
+    /// the new file may already be visible even if the directory fsync then
+    /// fails, in which case the save is reported as failed and its head is not
+    /// witnessed.
     pub fn save(&self) -> Result<Option<Head>, ReaderError> {
         let bytes = to_canonical_dagcbor(&Checkpoint {
             frames: self.frames.clone(),

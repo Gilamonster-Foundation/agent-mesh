@@ -122,6 +122,7 @@ fn parse_member(spec: &str) -> Result<Member> {
     Ok(Member {
         name: name.into(),
         role,
+        devices: vec![],
     })
 }
 
@@ -636,6 +637,7 @@ mod tests {
                 members: vec![agent_mesh_flock::Member {
                     name: "shep".into(),
                     role: agent_mesh_flock::Role::Shepherd,
+                    devices: vec![],
                 }],
             },
         }

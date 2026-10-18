@@ -7,6 +7,7 @@ use crate::journal::Head;
 use crate::state::{check_frame_shape, State};
 use crate::{Chain, Sealed, ServerError, Sessions};
 use agent_mesh_flock::{Board, Genesis};
+use agent_mesh_protocol::Issuer;
 use content_addressable::MerkleNode;
 
 /// Why a frame was refused.
@@ -35,9 +36,14 @@ impl Follower {
     pub fn new(genesis: &MerkleNode<Genesis>) -> Result<Self, ServerError> {
         let server_pub = genesis.payload.server_cert.agent_pubkey;
         let board = Board::new(genesis).map_err(|e| ServerError::Encoding(e.to_string()))?;
+        let Issuer::User(user) = &genesis.payload.server_cert.issuer else {
+            return Err(ServerError::Signer(
+                "genesis server certificate is not issued by a user key".into(),
+            ));
+        };
         Ok(Self {
             st: State {
-                chain: Chain::new(board.flock(), server_pub),
+                chain: Chain::new(board.flock(), server_pub, user.clone()),
                 board,
                 sessions: Sessions::default(),
             },

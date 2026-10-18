@@ -5,9 +5,10 @@
 //! references, then who may sign what.
 
 use crate::board::Board;
-use crate::event::{Body, Event, Kind, Role};
+use crate::event::{Body, Event, Kind, Member, Role};
 use crate::signer::{Signer, SignerClass};
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Why an event is refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +54,12 @@ pub enum Refusal {
     StaleRoster,
     /// The frame this would commit is too large to deliver to a watcher.
     TooLarge,
+    /// Only a server-signed roster changes operator devices.
+    DevicesLocked,
+    /// `devices` on a member that is not an operator.
+    DevicesOnNonOperator,
+    /// Two roster members share a name.
+    DuplicateMember,
     /// A claim (pane, tab) that is empty, too long or not printable.
     BadClaim,
 }
@@ -108,6 +115,9 @@ fn decide(board: &Board, node: &MerkleNode<Event>, signer: &Signer) -> Result<Ve
         return Err(Refusal::BodyKindMismatch);
     }
     let member = signer_member(board, ev.kind, signer)?;
+    if let Body::Roster { members } = &ev.body {
+        check_devices(board, members, signer)?;
+    }
     writer_chain(board, ev, signer)?;
     let target = check_refs(board, ev)?;
     let closes = apply_table(board, ev, member, target)?;
@@ -115,6 +125,46 @@ fn decide(board: &Board, node: &MerkleNode<Event>, signer: &Signer) -> Result<Ve
         Some(first) => Verdict::Conflict(ConflictKind::SecondCloser { first }),
         None => Verdict::Admit,
     })
+}
+
+/// A roster is well formed when member names are unique (bindings are by
+/// name) and devices belong to operator members only. Every reader of a
+/// roster (init, the genesis loader, roster admission) uses this one rule.
+#[must_use]
+pub fn roster_well_formed(members: &[Member]) -> bool {
+    let mut names = std::collections::BTreeSet::new();
+    members.iter().all(|m| {
+        names.insert(m.name.as_str()) && (m.role == Role::Operator || m.devices.is_empty())
+    })
+}
+
+/// Device bindings by member name, each list sorted: roster order and device
+/// order are not part of the binding.
+fn bindings(ms: &[Member]) -> BTreeMap<&str, Vec<[u8; 32]>> {
+    ms.iter()
+        .filter(|m| !m.devices.is_empty())
+        .map(|m| {
+            let mut d: Vec<_> = m.devices.iter().map(|f| f.0).collect();
+            d.sort_unstable();
+            (m.name.as_str(), d)
+        })
+        .collect()
+}
+
+/// Operator `devices`: only on operator members, and changed only by the
+/// server (a shepherd's roster must carry the bindings the roster has now).
+fn check_devices(board: &Board, new: &[Member], signer: &Signer) -> Result<(), Refusal> {
+    let mut names = BTreeSet::new();
+    if !new.iter().all(|m| names.insert(m.name.as_str())) {
+        return Err(Refusal::DuplicateMember);
+    }
+    if !roster_well_formed(new) {
+        return Err(Refusal::DevicesOnNonOperator);
+    }
+    if signer.class != SignerClass::Server && bindings(new) != bindings(board.members()) {
+        return Err(Refusal::DevicesLocked);
+    }
+    Ok(())
 }
 
 /// The signing member (name, role) for session signers, after the class gate.

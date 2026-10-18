@@ -75,6 +75,12 @@ pub struct Member {
     pub name: String,
     /// Its role.
     pub role: Role,
+    /// Operator members only: the device keys (fingerprints of keys the user
+    /// key certified) whose signature counts as this operator's. Changed only
+    /// by a server-signed `roster` event. Empty devices are not encoded, so a
+    /// roster without devices has the bytes it always had.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<agent_mesh_protocol::Fingerprint>,
 }
 
 /// How a brief ended.

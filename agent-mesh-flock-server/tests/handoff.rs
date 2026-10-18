@@ -304,7 +304,7 @@ fn a_user_certified_key_is_not_an_operator_device() {
         f.server
             .handoff(ap.clone(), sign_approval(&operator(&f.env), &ap)),
     );
-    assert!(why.contains("operator"), "{why}");
+    assert!(why.contains("not a listed operator device"), "{why}");
     assert_eq!(
         (f.server.epoch(), f.server.board().entries().count()),
         (0, before)
