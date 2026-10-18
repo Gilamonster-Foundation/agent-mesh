@@ -131,7 +131,7 @@ epoch-bounded certificate for the key it names.
   refuses one that does not extend it. A stream opens only after the session
   key signs a fresh `StreamChallenge` (an active session of a current member)
   and closes after an epoch-bearing frame once its session is no longer live or its member left the roster (eligibility is published with each frame). Recovery fsyncs the retained log before publishing it, and a request whose frame would not fit one stream message is refused (`TooLarge`).
-- Not yet: the `amesh flock watch` command (step 7), the epoch bump when a member leaves the roster,
+- Not yet: the `amesh flock watch` command (step 7b), the epoch bump when a member leaves the roster,
   per-device operator listing in the roster (so no operator approval),
   operator-signed events, any CLI beyond `amesh flock init`, MCP or TUI.
 - Unix only (file modes and `flock(2)`); on other hosts the crate builds, the

@@ -349,6 +349,15 @@ impl Sessions {
         }
     }
 
+    /// What `session`'s next event must have as `prev`: its own head, or, before
+    /// its first event, the hand-off that activated it.
+    #[must_use]
+    pub fn chain_head(&self, board: &Board, session: &str) -> Option<ContentId> {
+        board
+            .head_of(session)
+            .or_else(|| self.sessions.get(session)?.activated_by)
+    }
+
     /// A session a hand-off activated writes `prev = handoff` as its first
     /// event, so a zombie cannot fork the chain.
     ///
