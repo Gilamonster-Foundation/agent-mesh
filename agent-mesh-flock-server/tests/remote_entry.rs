@@ -1,7 +1,7 @@
 //! The attach socket: what a remote host's bridge may ask of the server, and
 //! nothing else. Every entry is tried on it, so a request added later without
 //! a decision shows up here.
-#![cfg(unix)]
+#![cfg(all(unix, feature = "serve"))]
 mod support;
 
 use agent_mesh_flock::{Body, Kind};
