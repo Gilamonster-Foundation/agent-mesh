@@ -9,7 +9,7 @@ use agent_mesh_flock_session::{call, CtlReq, CtlResp};
 use anyhow::{anyhow, bail, Context, Result};
 use content_addressable::ContentId;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Send one event through the session and print what the server admitted.
 pub fn emit(home: &Path, w: &Where, kind: Kind, refs: &[(&str, &str)], body: Body) -> Result<()> {
@@ -21,26 +21,30 @@ pub fn emit(home: &Path, w: &Where, kind: Kind, refs: &[(&str, &str)], body: Bod
                 .map_err(|e| anyhow!("'{cid}' is not a content id: {e}"))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
+    println!("{}", send(home, w, kind, refs, body)?);
+    Ok(())
+}
+
+/// One `Emit` to the session; the line that says what was admitted. The MCP
+/// `flock_emit` tool goes through here too, so both carry the same rules.
+pub fn send(
+    home: &Path,
+    w: &Where,
+    kind: Kind,
+    refs: BTreeMap<String, ContentId>,
+    body: Body,
+) -> Result<String> {
     let (socket, _) = w.session(home)?;
     match call(&socket, &CtlReq::Emit { kind, refs, body })? {
-        CtlResp::Admitted { event, index } => {
-            println!("admitted {event} at {index}");
-            Ok(())
-        }
+        CtlResp::Admitted { event, index } => Ok(format!("admitted {event} at {index}")),
         _ => bail!("the session answered something else"),
     }
 }
 
 /// `join`: who is this session, and optionally tell the log its pane.
 pub fn join(home: &Path, w: &Where, announce: bool) -> Result<()> {
-    let (socket, me) = w.session(home)?;
-    let snap = match w.dir(home) {
-        Ok(dir) => Some(
-            Snapshot::read(&dir).with_context(|| format!("read the log in {}", dir.display()))?,
-        ),
-        Err(_) => None,
-    };
-    print!("{}", describe(&me, snap.as_ref()));
+    let (socket, text) = whoami(home, w)?;
+    print!("{text}");
     if announce {
         match call(&socket, &CtlReq::Announce)? {
             CtlResp::Admitted { event, index } => println!("announced {event} at {index}"),
@@ -48,6 +52,18 @@ pub fn join(home: &Path, w: &Where, announce: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The session's socket and what `join` prints about it.
+pub fn whoami(home: &Path, w: &Where) -> Result<(PathBuf, String)> {
+    let (socket, me) = w.session(home)?;
+    let snap = match w.dir(home) {
+        Ok(dir) => Some(
+            Snapshot::read(&dir).with_context(|| format!("read the log in {}", dir.display()))?,
+        ),
+        Err(_) => None,
+    };
+    Ok((socket, describe(&me, snap.as_ref())))
 }
 
 pub fn parse_outcome(s: &str) -> Result<Outcome> {

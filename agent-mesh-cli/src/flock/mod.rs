@@ -15,6 +15,8 @@ use std::path::PathBuf;
 mod discover;
 #[cfg(unix)]
 mod emit;
+#[cfg(unix)]
+pub(crate) mod mcp;
 mod panes;
 #[cfg(unix)]
 mod read;

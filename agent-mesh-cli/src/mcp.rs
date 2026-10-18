@@ -37,13 +37,16 @@ struct McpState {
     bus: Bus,
     resolver: PeerResolver,
     announce: bool,
+    /// The `flock_*` tools, present only when started with a session socket.
+    #[cfg(unix)]
+    flock: Option<crate::flock::mcp::FlockTools>,
     /// Keeps the resolver's mDNS browser thread alive.
     _resolver_handle: ResolverHandle,
 }
 
 /// Run the `mcp` subcommand: bind the bus, then serve MCP over stdio
 /// until the client closes stdin.
-pub async fn run(home: PathBuf, quiet: bool) -> Result<()> {
+pub async fn run(home: PathBuf, quiet: bool, flock_session: Option<PathBuf>) -> Result<()> {
     let key_path = home.join("user.key");
     let user = UserKey::load(&key_path)
         .with_context(|| format!("load {} — run `amesh keygen` first", key_path.display()))?;
@@ -59,6 +62,15 @@ pub async fn run(home: PathBuf, quiet: bool) -> Result<()> {
             caveats: Caveats::top(),
         },
     );
+
+    #[cfg(unix)]
+    let flock = flock_session
+        .map(|sock| crate::flock::mcp::FlockTools::new(home.clone(), &sock))
+        .transpose()?;
+    #[cfg(not(unix))]
+    if flock_session.is_some() {
+        anyhow::bail!("the flock tools are Unix only");
+    }
 
     let announce = !quiet;
     let bus = Bus::bind_with(&user, agent, 0, BusOptions { announce }).await?;
@@ -76,6 +88,8 @@ pub async fn run(home: PathBuf, quiet: bool) -> Result<()> {
         bus,
         resolver,
         announce,
+        #[cfg(unix)]
+        flock,
         _resolver_handle: resolver_handle,
     });
     serve(state, tokio::io::stdin(), tokio::io::stdout()).await
@@ -181,7 +195,7 @@ async fn handle_request(
         // Sent by clients after `initialize`; nothing to do.
         "notifications/initialized" => Ok(Value::Null),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tool_definitions() })),
+        "tools/list" => Ok(json!({ "tools": tool_list(state) })),
         "tools/call" => {
             let name = params
                 .get("name")
@@ -196,13 +210,42 @@ async fn handle_request(
                 "mesh_peers" => tool_peers(state, &args).await,
                 "mesh_request" => tool_request(state, &args).await,
                 "mesh_publish" => tool_publish(state, &args).await,
-                other => Err(anyhow!("unknown tool: {other}")),
+                other => flock_tool(state, other, &args)
+                    .unwrap_or_else(|| Err(anyhow!("unknown tool: {other}"))),
             }
             .map_err(RpcError::internal)?;
             Ok(json!({ "content": [{ "type": "text", "text": text }] }))
         }
         other => Err(RpcError::method_not_found(other)),
     }
+}
+
+/// The catalogue plus, when a flock session was given at startup, the
+/// `flock_*` tools.
+#[cfg(unix)]
+fn tool_list(state: &McpState) -> Value {
+    let mut tools = tool_definitions();
+    if state.flock.is_some() {
+        if let Some(v) = tools.as_array_mut() {
+            v.extend(crate::flock::mcp::FlockTools::definitions());
+        }
+    }
+    tools
+}
+
+#[cfg(not(unix))]
+fn tool_list(_: &McpState) -> Value {
+    tool_definitions()
+}
+
+#[cfg(unix)]
+fn flock_tool(state: &McpState, name: &str, args: &Value) -> Option<Result<String>> {
+    state.flock.as_ref()?.call(name, args)
+}
+
+#[cfg(not(unix))]
+fn flock_tool(_: &McpState, _: &str, _: &Value) -> Option<Result<String>> {
+    None
 }
 
 /// The MCP tool catalogue (shared by `tools/list`).
@@ -538,6 +581,8 @@ mod tests {
             bus,
             resolver,
             announce: false,
+            #[cfg(unix)]
+            flock: None,
             _resolver_handle: resolver_handle,
         }
     }

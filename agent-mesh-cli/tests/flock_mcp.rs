@@ -1,0 +1,360 @@
+//! The `flock_*` MCP tools through `amesh mcp` over stdio, against a live
+//! `serve` and live sessions. The tools sign nothing and check nothing: the
+//! session signs, admission decides, and a refusal is the tool's error.
+#![cfg(unix)]
+
+use agent_mesh_flock::{Body, EndReason, HandoffApproval};
+use agent_mesh_protocol::{AgentKey, AgentMetadata, Assertion, Caveats, UserKey};
+use assert_cmd::cargo::cargo_bin;
+use content_addressable::{ContentAddressable as _, ContentId, MerkleNode, RawContentId};
+use serde_json::{json, Value};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
+use tempfile::TempDir;
+
+struct Proc(Child);
+impl Drop for Proc {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn amesh(home: &Path) -> Command {
+    let mut c = Command::new(cargo_bin("amesh"));
+    c.arg("--home").arg(home).env_remove("AMESH_FLOCK_SESSION");
+    c
+}
+
+struct Flock {
+    home: TempDir,
+    dir: PathBuf,
+    _serve: Proc,
+}
+
+fn flock() -> Flock {
+    let home = TempDir::new().unwrap();
+    assert!(amesh(home.path()).arg("keygen").status().unwrap().success());
+    let mut init = amesh(home.path());
+    init.args(["flock", "init", "--name", "f"]);
+    for m in ["shep:shepherd", "h1:helper", "h2:helper"] {
+        init.args(["--member", m]);
+    }
+    assert!(init.stdout(Stdio::null()).status().unwrap().success());
+    let dir = home.path().join("flocks").join("f");
+    let mut serve = amesh(home.path())
+        .args(["flock", "serve", "--dir"])
+        .arg(&dir)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(serve.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert!(line.starts_with("serving"), "{line}");
+    Flock {
+        home,
+        dir,
+        _serve: Proc(serve),
+    }
+}
+
+struct Sess {
+    _proc: Proc,
+    sock: PathBuf,
+}
+
+impl Flock {
+    fn session(&self, member: &str) -> Sess {
+        let inv = amesh(self.home.path())
+            .args(["flock", "invite", "--dir"])
+            .arg(&self.dir)
+            .arg(member)
+            .output()
+            .unwrap();
+        assert!(inv.status.success());
+        let token = String::from_utf8(inv.stdout).unwrap().trim().to_owned();
+        let mut child = amesh(self.home.path())
+            .args(["flock", "session", "--dir"])
+            .arg(&self.dir)
+            .args(["--member", member])
+            .env("AMESH_FLOCK_TOKEN", token)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut out = BufReader::new(child.stdout.take().unwrap());
+        let (mut id, mut sock) = (String::new(), String::new());
+        out.read_line(&mut id).unwrap();
+        out.read_line(&mut sock).unwrap();
+        Sess {
+            _proc: Proc(child),
+            sock: sock.trim().strip_prefix("socket: ").unwrap().into(),
+        }
+    }
+
+    /// `amesh flock <args>` as the given session.
+    fn cli(&self, s: &Sess, args: &[&str]) -> Output {
+        let mut c = amesh(self.home.path());
+        c.arg("flock").arg(args[0]);
+        c.arg("--dir").arg(&self.dir).arg("--session").arg(&s.sock);
+        c.args(&args[1..]).output().unwrap()
+    }
+
+    fn log(&self, s: &Sess) -> String {
+        let o = self.cli(s, &["log"]);
+        assert!(o.status.success());
+        String::from_utf8(o.stdout).unwrap()
+    }
+
+    /// An `amesh mcp` process for `s` (or none).
+    fn mcp(&self, s: Option<&Sess>) -> Mcp {
+        let mut c = amesh(self.home.path());
+        c.args(["mcp", "--quiet"]);
+        if let Some(s) = s {
+            c.arg("--flock-session").arg(&s.sock);
+        }
+        let mut child = c
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        Mcp {
+            stdin: child.stdin.take().unwrap(),
+            out: BufReader::new(child.stdout.take().unwrap()),
+            _proc: Proc(child),
+            id: 0,
+        }
+    }
+}
+
+struct Mcp {
+    _proc: Proc,
+    stdin: ChildStdin,
+    out: BufReader<ChildStdout>,
+    id: u64,
+}
+
+impl Mcp {
+    fn rpc(&mut self, method: &str, params: Value) -> Value {
+        self.id += 1;
+        let req = json!({"jsonrpc": "2.0", "id": self.id, "method": method, "params": params});
+        writeln!(self.stdin, "{req}").unwrap();
+        self.stdin.flush().unwrap();
+        let mut line = String::new();
+        self.out.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line:?}"))
+    }
+
+    /// `tools/call`: the text of a success, or the error message.
+    fn tool(&mut self, name: &str, args: Value) -> Result<String, String> {
+        let r = self.rpc("tools/call", json!({"name": name, "arguments": args}));
+        match r.get("error") {
+            Some(e) => Err(e["message"].as_str().unwrap().to_owned()),
+            None => Ok(r["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()),
+        }
+    }
+
+    fn tool_names(&mut self) -> Vec<String> {
+        let r = self.rpc("tools/list", json!({}));
+        r["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+}
+
+fn admitted_cid(text: &str) -> String {
+    text.split_whitespace().nth(1).unwrap().to_owned()
+}
+
+#[test]
+fn the_flock_tools_exist_only_when_started_with_a_session() {
+    let f = flock();
+    let mut bare = f.mcp(None);
+    let names = bare.tool_names();
+    assert!(names.iter().all(|n| !n.starts_with("flock_")), "{names:?}");
+    let err = bare.tool("flock_emit", json!({"kind": "ack", "body": "ack"}));
+    assert!(err.unwrap_err().contains("unknown tool"));
+
+    let h1 = f.session("h1");
+    let mut with = f.mcp(Some(&h1));
+    let names = with.tool_names();
+    for t in ["flock_whoami", "flock_inbox", "flock_status", "flock_emit"] {
+        assert!(names.iter().any(|n| n == t), "{t} in {names:?}");
+    }
+    assert!(
+        names.iter().any(|n| n == "mesh_whoami"),
+        "the mesh tools stay"
+    );
+}
+
+#[test]
+fn a_socket_that_is_not_a_live_session_stops_the_server_at_startup() {
+    let f = flock();
+    let bogus = f.dir.join("run").join("session-nope.sock");
+    let o = amesh(f.home.path())
+        .args(["mcp", "--quiet", "--flock-session"])
+        .arg(&bogus)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+}
+
+#[test]
+fn the_addressee_acks_through_the_tool_and_a_non_addressee_is_refused() {
+    let f = flock();
+    let (shep, h1, h2) = (f.session("shep"), f.session("h1"), f.session("h2"));
+    let o = f.cli(&shep, &["brief", "--to", "h1", "--lane", "l1"]);
+    assert!(o.status.success());
+    let brief = admitted_cid(&String::from_utf8(o.stdout).unwrap());
+
+    let mut m1 = f.mcp(Some(&h1));
+    let who = m1.tool("flock_whoami", json!({})).unwrap();
+    assert!(who.contains("member:  h1"), "{who}");
+    let inbox = m1.tool("flock_inbox", json!({})).unwrap();
+    assert!(
+        inbox.contains(&brief) && !inbox.contains("epoch"),
+        "{inbox}"
+    );
+    let status = m1.tool("flock_status", json!({})).unwrap();
+    assert!(
+        status.contains("epoch") && status.contains("l1"),
+        "{status}"
+    );
+
+    // the forger first: h2 was not addressed
+    let before = f.log(&shep);
+    let mut m2 = f.mcp(Some(&h2));
+    let why = m2
+        .tool(
+            "flock_emit",
+            json!({"kind": "ack", "refs": {"of": brief}, "body": "ack"}),
+        )
+        .unwrap_err();
+    assert!(why.contains("NotAddressee"), "{why}");
+    assert_eq!(f.log(&shep), before, "the log is unchanged");
+
+    // the addressee
+    let ok = m1
+        .tool(
+            "flock_emit",
+            json!({"kind": "ack", "refs": {"of": brief}, "body": "ack"}),
+        )
+        .unwrap();
+    assert!(ok.starts_with("admitted "), "{ok}");
+    assert!(m1
+        .tool("flock_status", json!({}))
+        .unwrap()
+        .contains("working"));
+    assert_ne!(f.log(&shep), before);
+}
+
+/// Real bodies of every kind the server alone signs, so each one parses and
+/// the only thing that can stop it is admission.
+fn server_signed_bodies(flock: ContentId) -> Vec<(&'static str, Body)> {
+    let user = UserKey::generate();
+    let key = AgentKey::issue(
+        &user,
+        AgentMetadata {
+            role: "x".into(),
+            host: "x".into(),
+            capabilities: vec![],
+            issued_at: "2026-10-18T00:00:00Z".into(),
+            expires_at: None,
+            caveats: Caveats::top(),
+        },
+    );
+    let approval = MerkleNode::genesis(HandoffApproval {
+        flock,
+        member: "h1".into(),
+        from: "a".into(),
+        to: "b".into(),
+        resume: flock,
+        context: None,
+    });
+    let approval_sig = Assertion::sign(&key, &approval.content_id().unwrap());
+    vec![
+        ("epoch", Body::Epoch { epoch: 99 }),
+        (
+            "invite",
+            Body::Invite {
+                member: "h1".into(),
+                verifier: RawContentId::from_content(b"v"),
+            },
+        ),
+        (
+            "session-start",
+            Body::SessionStart {
+                member: "h1".into(),
+                session: "x".into(),
+                cert: key.cert().clone(),
+            },
+        ),
+        (
+            "session-end",
+            Body::SessionEnd {
+                session: "x".into(),
+                reason: EndReason::Closed,
+            },
+        ),
+        (
+            "handoff",
+            Body::Handoff {
+                from: "a".into(),
+                to: "b".into(),
+                resume: flock,
+                context: None,
+                approval: Box::new(approval),
+                approval_sig: Box::new(approval_sig),
+            },
+        ),
+        (
+            "renewal",
+            Body::Renewal {
+                session: "x".into(),
+                epoch: 1,
+                cert: key.cert().clone(),
+            },
+        ),
+    ]
+}
+
+#[test]
+fn server_signed_kinds_are_refused_by_admission_not_by_the_tool() {
+    let f = flock();
+    let shep = f.session("shep");
+    let before = f.log(&shep);
+    let mut m = f.mcp(Some(&shep));
+    let who = m.tool("flock_whoami", json!({})).unwrap();
+    let flock_id: ContentId = who
+        .lines()
+        .find_map(|l| l.strip_prefix("flock:"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    for (kind, body) in server_signed_bodies(flock_id) {
+        let why = m
+            .tool(
+                "flock_emit",
+                json!({"kind": kind, "body": serde_json::to_value(&body).unwrap()}),
+            )
+            .unwrap_err();
+        assert!(why.contains("refused"), "{kind}: {why}");
+        assert!(
+            !why.contains("not an event"),
+            "{kind} must reach admission: {why}"
+        );
+    }
+    assert_eq!(f.log(&shep), before, "none of them reached the log");
+}
