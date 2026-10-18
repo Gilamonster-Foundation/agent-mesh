@@ -59,7 +59,7 @@ impl Where {
     /// is allowed is admission's job.
     pub fn session(&self, home: &Path) -> Result<(PathBuf, Who)> {
         let want = self.named(home)?;
-        let belongs = |me: &Who| want.map_or(true, |w| w == me.flock);
+        let belongs = |me: &Who| want.is_none_or(|w| w == me.flock);
         if let Some(socket) = &self.session {
             let me = who(socket)?;
             if !belongs(&me) {

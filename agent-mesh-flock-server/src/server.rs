@@ -371,9 +371,8 @@ impl Server {
     }
 
     fn append(&mut self, sealed: Vec<Sealed>) -> Result<(), ServerError> {
-        self.log.append(&Frame { sealed }).map_err(|e| {
+        self.log.append(&Frame { sealed }).inspect_err(|_| {
             self.poisoned = true;
-            e
         })
     }
 
