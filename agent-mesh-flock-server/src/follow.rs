@@ -34,7 +34,6 @@ impl Follower {
     /// # Errors
     /// Encoding failure.
     pub fn new(genesis: &MerkleNode<Genesis>) -> Result<Self, ServerError> {
-        let server_pub = genesis.payload.server_cert.agent_pubkey;
         let board = Board::new(genesis).map_err(|e| ServerError::Encoding(e.to_string()))?;
         let Issuer::User(user) = &genesis.payload.server_cert.issuer else {
             return Err(ServerError::Signer(
@@ -43,7 +42,11 @@ impl Follower {
         };
         Ok(Self {
             st: State {
-                chain: Chain::new(board.flock(), server_pub, user.clone()),
+                chain: Chain::new(
+                    board.flock(),
+                    genesis.payload.server_cert.clone(),
+                    user.clone(),
+                ),
                 board,
                 sessions: Sessions::default(),
             },

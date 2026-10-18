@@ -55,8 +55,8 @@ fn a_real_admission_frame_stays_under_its_ceiling() {
         last = c.next_frame().unwrap().0.to_vec();
     }
     let n = len(&agent_mesh_flock_server::Frame { sealed: last });
-    // measured with byte strings; as integer arrays this frame was about 2.2 KB
+    // a cited certificate, not a carried one: with the two certificate chains inline it was 1.7 KB
     assert!(n <= CEILING, "a brief frame is {n} bytes, over {CEILING}");
 }
 
-const CEILING: usize = 1750;
+const CEILING: usize = 600;

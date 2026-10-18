@@ -36,6 +36,7 @@ libc = "0.2"
 agent-mesh-flock-server = { workspace = true, features = ["serve"] }
 tempfile.workspace = true
 tests-common.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

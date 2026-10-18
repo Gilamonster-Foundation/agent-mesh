@@ -67,7 +67,7 @@ impl Server {
             frames.iter().map(|(_, f)| f.sealed.clone()).collect();
         sealed_frames.reverse();
         let mut published = Vec::new();
-        let st = rebuild_with(&genesis.node, server_pub, frames, |st| {
+        let st = rebuild_with(&genesis.node, frames, |st| {
             if let Some(f) = sealed_frames.pop() {
                 published.push((f, st.eligible()));
             }

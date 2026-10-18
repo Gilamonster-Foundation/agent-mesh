@@ -268,7 +268,10 @@ pub fn read_msg<T: DeserializeOwned + Serialize>(
 
 /// Whether `frame` can be delivered to a watcher as one [`Resp::Frame`]: the
 /// message limit applies to the response, which carries the admission record
-/// and its signature on top of the request that caused it.
+/// and its signatures on top of the event. (The request that caused it also
+/// carries the author's certificate chain, which the frame only cites, so for
+/// a single event the request limit is reached first; a server-built
+/// transaction of several events can still exceed this one.)
 ///
 /// # Errors
 /// Encoding failure.

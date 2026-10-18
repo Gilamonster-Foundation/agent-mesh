@@ -6,10 +6,10 @@
 //! index, names this event and the certificate its signature chains through,
 //! and moves the epoch only as an `epoch` event does.
 
-use crate::frame::{cert_cid, AdmissionRecord, Sealed};
+use crate::frame::{AdmissionRecord, Sealed};
 use crate::ServerError;
 use agent_mesh_flock::Kind;
-use agent_mesh_protocol::UserPublic;
+use agent_mesh_protocol::{Assertion, CertChain, UserPublic};
 use content_addressable::{ContentAddressable, ContentError, ContentId};
 
 /// Running state of a chain: what the next record must extend.
@@ -23,6 +23,9 @@ pub struct Chain {
     pub epoch: u64,
     /// The server's agent public key, from genesis.
     pub server_pub: [u8; 32],
+    /// The server's certificate, from genesis: the chain every record
+    /// signature is made under.
+    pub server_cert: CertChain,
     /// The user key that certified the server, from genesis: the only user
     /// whose devices a roster can list.
     pub user: UserPublic,
@@ -31,12 +34,13 @@ pub struct Chain {
 impl Chain {
     /// Start after genesis.
     #[must_use]
-    pub fn new(genesis: ContentId, server_pub: [u8; 32], user: UserPublic) -> Self {
+    pub fn new(genesis: ContentId, server_cert: CertChain, user: UserPublic) -> Self {
         Self {
             prev: genesis,
             next_index: 1,
             epoch: 0,
-            server_pub,
+            server_pub: server_cert.agent_pubkey,
+            server_cert,
             user,
         }
     }
@@ -77,11 +81,8 @@ pub fn verify_record(
 ) -> Result<(ContentId, ContentId), ServerError> {
     let rec = &sealed.record.payload;
     let record_id = sealed.record.content_id().map_err(enc)?;
-    if sealed.record_sig.author().agent_pubkey != chain.server_pub {
-        return Err(bad("record is not signed by the server key"));
-    }
-    sealed
-        .record_sig
+    // always the genesis certificate: a record cites no other
+    Assertion::from_parts(chain.server_cert.clone(), sealed.record_sig.clone())
         .verify(&record_id, &chain.server_pub, rec.epoch)
         .map_err(|e| bad(&format!("record signature: {e}")))?;
     if sealed.record.parents != std::iter::once(chain.prev).collect() {
@@ -93,9 +94,6 @@ pub fn verify_record(
     let event_id = sealed.event.content_id().map_err(enc)?;
     if rec.event != event_id {
         return Err(bad("record names another event"));
-    }
-    if rec.cert != cert_cid(sealed.event_sig.author())? {
-        return Err(bad("record names another certificate"));
     }
     if rec.epoch != chain.epoch_for(sealed.event.payload.kind) {
         return Err(bad("epoch does not follow the logged transitions"));
