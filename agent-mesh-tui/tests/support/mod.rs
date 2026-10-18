@@ -223,3 +223,41 @@ pub fn assert_snapshot(name: &str, actual: &str) {
         "screen differs from {name}.txt (UPDATE_SNAPSHOTS=1 rewrites it)"
     );
 }
+
+/// Blank every content id and session fingerprint on a screen: they differ
+/// with every generated key, and nothing else does.
+pub fn mask_hashes(text: &str) -> String {
+    let word = |w: &str| {
+        let t = w.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        if t.starts_with("bafy") && t.len() > 20 {
+            w.replacen(t, "<cid>", 1)
+        } else if t.len() >= 60 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+            w.replacen(t, "<session>", 1)
+        } else {
+            w.to_owned()
+        }
+    };
+    text.lines()
+        .map(|l| l.split(' ').map(word).collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+/// The model of the busy flock, folded from its log on disk.
+pub fn busy_model(link: agent_mesh_tui::model::Link) -> (Fixture, agent_mesh_tui::model::Model) {
+    use agent_mesh_flock_server::Snapshot;
+    use content_addressable::ContentAddressable as _;
+    let (f, _) = busy();
+    let snap = Snapshot::read(f.path()).unwrap();
+    let genesis = agent_mesh_flock_server::load_genesis(f.path())
+        .unwrap()
+        .node;
+    let id = genesis.content_id().unwrap();
+    let name = genesis.payload.name.clone();
+    let m = agent_mesh_tui::model::fold(
+        &agent_mesh_tui::model::Source::of_snapshot(&name, id, &snap),
+        link,
+    );
+    (f, m)
+}

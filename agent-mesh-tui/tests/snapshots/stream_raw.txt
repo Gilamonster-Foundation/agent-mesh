@@ -1,0 +1,24 @@
+amesh-tui · flock fx · id ············ · 7 members
+log ✓ 24 · epoch 1 · live
+ Board  [Stream]
+event #13  <cid>
+✓ signature, session certificate and admission checked; admitted at #13
+kind ack · signed by h1, helper; session <session>
+lane l1 · at 3
+parents:
+  1 of     → #11 brief  <cid>
+body:
+  "ack"
+
+
+
+
+
+
+
+
+
+
+
+
+1-9 jump to a parent · Backspace back · ↑↓ neighbours · Esc close

@@ -1,6 +1,9 @@
 //! The views, as newtui components over the model.
 
 mod app;
+mod board;
 pub mod render;
+mod stream;
 
-pub use app::App;
+pub use app::{App, Tab};
+pub use stream::Filters;

@@ -1,0 +1,12 @@
+amesh-tui · flock fx · id ············ · 7 members
+log ✓ 24 · epoch 1 · live
+ Board  [Stream]
+      # KIND          MEMBER   LANE     SUMMARY
+▸    13 ack           h1       l1
+
+
+
+
+
+kind ack · lane all · member all · follow on · 1 of 24 events
+↑↓ select · Enter raw · f follow · k/l/m filter kind/lane/member · c clear
