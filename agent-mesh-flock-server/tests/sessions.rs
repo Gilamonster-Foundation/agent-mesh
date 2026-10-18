@@ -6,7 +6,7 @@ use agent_mesh_flock::{Body, EndReason, Kind, Refusal};
 use agent_mesh_flock_server::{
     cert_cid, session_caveats, token_digest, CrashPlan, ServerError, Status,
 };
-use agent_mesh_protocol::AgentKey;
+use agent_mesh_protocol::{AgentKey, Assertion};
 use content_addressable::ContentAddressable;
 use ed25519_dalek::{Signer as _, SigningKey};
 use rand::rngs::OsRng;
@@ -266,13 +266,25 @@ fn a_fresh_reader_verifies_every_event_across_several_bumps() {
     // the reader holds only the bytes: each event verifies at the epoch its
     // own record names, with the certificate that record names
     let mut epochs_seen = std::collections::BTreeSet::new();
+    // the certificates the reader has seen so far: genesis's, then each one a
+    // session-start or renewal put in the log
+    let genesis = agent_mesh_flock_server::load_genesis(env.tmp.path()).unwrap();
+    let server_cert = genesis.node.payload.server_cert.clone();
+    let mut certs =
+        std::collections::BTreeMap::from([(cert_cid(&server_cert).unwrap(), server_cert)]);
     for sealed in read_frames(&env).iter().flat_map(|f| f.sealed.iter()) {
         let (rec, cid) = (&sealed.record.payload, sealed.event.content_id().unwrap());
-        sealed
-            .event_sig
+        let cert = certs
+            .get(&rec.cert)
+            .expect("the record cites a certificate already in the log");
+        Assertion::from_parts(cert.clone(), sealed.event_sig.clone())
             .verify(&cid, &server_pub, rec.epoch)
             .unwrap();
-        assert_eq!(rec.cert, cert_cid(sealed.event_sig.author()).unwrap());
+        if let Body::SessionStart { cert, .. } | Body::Renewal { cert, .. } =
+            &sealed.event.payload.body
+        {
+            certs.insert(cert_cid(cert).unwrap(), cert.clone());
+        }
         if sealed.event.payload.kind == Kind::Brief {
             epochs_seen.insert(rec.epoch);
         }

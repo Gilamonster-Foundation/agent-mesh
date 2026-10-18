@@ -93,9 +93,22 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   strings in the canonical encoding and on the session wire (they were arrays of
   one integer per byte: about 22% larger frames, and a size that varied with the
   key's bytes). JSON paths are unchanged. This changed every record id, so a
-  flock created before it cannot be opened: re-run `amesh flock init`. Release
-  note for agent-mesh-protocol: the Rust API is unchanged, its CBOR encoding is
-  not (minor bump);
+  flock created before it cannot be opened, and `init` will not reuse its
+  directory (it refuses an existing `server.key`, genesis or log): create a new
+  flock in a fresh directory, or move the old one aside first. Release note for
+  agent-mesh-protocol: the Rust API is unchanged, its CBOR encoding is not (minor
+  bump);
+- **cited certificates**: a stored or streamed event carries its signature only.
+  The certificate it was signed under is the one the server-signed
+  `record.cert` names, and both are already in the log: the server's in genesis,
+  a session's in its `session-start` or a `renewal`. A reader holding the log up
+  to that point resolves it; a record citing a certificate the log does not hold
+  is refused, and the certificate must still be one recorded for the event's
+  author at the record's epoch. Event, record and certificate ids did not change.
+  A brief frame went from 1699 to 543 bytes. The request an event arrives in
+  (`Admit`) still carries its chain, and a hand-off's operator-device approval
+  keeps its inline chain (that certificate is not in the log). Flocks made before
+  this cannot be opened either: new flock, fresh directory;
 - **the attach socket** (`amesh flock serve --attach`, Unix): a second socket,
   `run/attach.sock` (mode 0600, private directory), the surface a remote host's
   bridge will connect to (step 9b; the bridge is not built yet). Without

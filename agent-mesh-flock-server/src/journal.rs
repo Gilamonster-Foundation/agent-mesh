@@ -7,7 +7,7 @@
 //! upgrade by keeping `Vec<offset>` and reading frames back from the file.
 
 use crate::frame::{AdmissionRecord, Sealed};
-use agent_mesh_protocol::Assertion;
+use agent_mesh_protocol::SerdeSig;
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "serve")]
@@ -22,7 +22,7 @@ pub struct Head {
     /// The record (its parents chain to every earlier record).
     pub record: MerkleNode<AdmissionRecord>,
     /// The server's signature over the record's id.
-    pub sig: Assertion,
+    pub sig: SerdeSig,
 }
 
 impl Head {
