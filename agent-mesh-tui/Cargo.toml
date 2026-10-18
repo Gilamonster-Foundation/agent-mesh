@@ -1,0 +1,44 @@
+[package]
+name = "agent-mesh-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "amesh-tui: a read-only terminal view of a flock (Unix only)."
+publish = false
+
+[lib]
+name = "agent_mesh_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "amesh-tui"
+path = "src/main.rs"
+
+# The read side only: no `serve`, no `emit`. tests/no_emit.rs keeps it so.
+[target.'cfg(unix)'.dependencies]
+agent-mesh-flock.workspace = true
+agent-mesh-flock-server.workspace = true
+agent-mesh-flock-session.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+content-addressable.workspace = true
+newtui.workspace = true
+ratatui.workspace = true
+rustix = { version = "1", features = ["process"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+# fixtures only: a real server and a real session to feed the view
+agent-mesh-flock-server = { workspace = true, features = ["serve"] }
+agent-mesh-flock-session = { workspace = true, features = ["emit"] }
+agent-mesh-protocol.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+tempfile.workspace = true
+tests-common.workspace = true
+
+[lints]
+workspace = true
