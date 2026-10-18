@@ -9,7 +9,7 @@ use crate::refusal::{Reason, RefusalEntry, RefusalRecord};
 use crate::sessions::Sessions;
 use crate::state::{drops_member, enc, rebuild_with, Spec, State};
 use crate::{load_server_key, CrashPlan, ServerError};
-use agent_mesh_flock::{Board, ConflictKind, Event, Kind, Refusal, SignerClass};
+use agent_mesh_flock::{Board, ConflictKind, Event, Genesis, Kind, Refusal, SignerClass};
 use agent_mesh_protocol::{AgentKey, Assertion};
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
 use std::collections::BTreeMap;
@@ -30,6 +30,7 @@ pub struct Receipt {
 /// An open flock server.
 pub struct Server {
     pub(crate) key: AgentKey,
+    genesis: MerkleNode<Genesis>,
     pub(crate) st: State,
     log: Log,
     refusal_log: Log,
@@ -93,6 +94,7 @@ impl Server {
         refusal_log.commit_recovery()?;
         Ok(Self {
             key,
+            genesis: genesis.node,
             st,
             log,
             refusal_log,
@@ -102,6 +104,12 @@ impl Server {
             poisoned: false,
             journal: Journal::new(published),
         })
+    }
+
+    /// The flock's genesis node: public, and what the flock id is the hash of.
+    #[must_use]
+    pub fn genesis(&self) -> &MerkleNode<Genesis> {
+        &self.genesis
     }
 
     /// The published log, readable without this server's lock.

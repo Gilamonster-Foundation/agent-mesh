@@ -58,7 +58,7 @@ pub use private::{bind_private, peer_ok, private_dir, uid_allowed};
 pub use read::Snapshot;
 pub use refusal::{Reason, RefusalEntry, RefusalRecord};
 #[cfg(all(unix, feature = "serve"))]
-pub use serve::{serve, Serving};
+pub use serve::{serve, serve_with_attach, Serving};
 #[cfg(feature = "serve")]
 pub use server::{Receipt, Server};
 pub use sessions::{session_caveats, token_digest, InviteInfo, SessionInfo, Sessions, Status};

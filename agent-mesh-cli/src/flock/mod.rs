@@ -50,6 +50,12 @@ pub enum FlockCommand {
         /// Flock directory.
         #[arg(long)]
         dir: PathBuf,
+        /// Also serve the attach socket (`run/attach.sock`, mode 0600), the
+        /// surface a remote host's bridge connects to. It offers enroll, renew,
+        /// admit and watch, never an invite. Without it nothing remote can
+        /// reach this flock.
+        #[arg(long)]
+        attach: bool,
     },
     /// Mint an invite for a member through the running server; prints the
     /// token once.
@@ -227,7 +233,7 @@ pub fn run(home: PathBuf, cmd: FlockCommand) -> Result<()> {
     match cmd {
         FlockCommand::Init { name, members, dir } => init(home, name, &members, dir),
         #[cfg(unix)]
-        FlockCommand::Serve { dir } => unix::serve(&dir),
+        FlockCommand::Serve { dir, attach } => unix::serve(&dir, attach),
         #[cfg(unix)]
         FlockCommand::Invite { dir, member } => unix::invite(&dir, &member),
         #[cfg(unix)]
@@ -366,7 +372,7 @@ fn init(home: PathBuf, name: String, members: &[String], dir: Option<PathBuf>) -
 mod unix {
     use super::{anyhow, Context, PathBuf, Result};
     use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp};
-    use agent_mesh_flock_server::{bind_private, serve as serve_log, Server};
+    use agent_mesh_flock_server::{bind_private, serve as serve_log, serve_with_attach, Server};
     use agent_mesh_flock_session::Policy;
     use std::os::unix::net::UnixStream;
     use std::path::Path;
@@ -375,12 +381,24 @@ mod unix {
         dir.join("run").join("serve.sock")
     }
 
-    pub fn serve(dir: &Path) -> Result<()> {
+    fn attach_sock(dir: &Path) -> PathBuf {
+        dir.join("run").join("attach.sock")
+    }
+
+    pub fn serve(dir: &Path, attach: bool) -> Result<()> {
         let server = Server::open(dir).with_context(|| format!("open {}", dir.display()))?;
         // The log lock is ours, so any socket file left behind is stale.
         let listener = bind_private(&sock(dir))?;
-        println!("serving {}", sock(dir).display());
-        match serve_log(server, listener)?.wait() {
+        let serving = if attach {
+            let remote = bind_private(&attach_sock(dir))?;
+            println!("serving {}", sock(dir).display());
+            println!("attach {}", attach_sock(dir).display());
+            serve_with_attach(server, listener, remote)?
+        } else {
+            println!("serving {}", sock(dir).display());
+            serve_log(server, listener)?
+        };
+        match serving.wait() {
             Some(why) => Err(anyhow!("stopped: could not persist: {why}")),
             None => Ok(()),
         }
