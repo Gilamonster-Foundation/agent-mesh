@@ -614,3 +614,170 @@ fn the_approval_must_be_for_the_members_own_sessions() {
     );
     assert!(why.contains("pending"), "{why}");
 }
+
+/// A hand-off has happened and `herdr` (an adapter that no hand-off
+/// activated) has a certificate current at the new epoch.
+fn after_a_handoff_with_an_unrelated_session() -> (Flock, Enrolment, ContentId) {
+    let mut f = flock();
+    let (old, new) = (clone(&f.old), clone(&f.new));
+    f.handoff(&old, &new).unwrap();
+    let mut herdr = enroll(&mut f.server, "herdr");
+    let (mut shep, mut new) = (clone(&f.shep), new);
+    renew_all(&mut f.server, &mut [&mut herdr, &mut shep, &mut new]);
+    let handoff_id = f
+        .server
+        .board()
+        .entries()
+        .find(|e| e.event.kind == Kind::Handoff)
+        .map(|e| e.id)
+        .unwrap();
+    (f, herdr, handoff_id)
+}
+
+fn status(text: &str) -> Body {
+    Body::Status { text: text.into() }
+}
+
+#[test]
+fn an_ordinary_first_event_needs_no_prev_and_chains_on_its_own_head_after() {
+    let (mut f, herdr, _) = after_a_handoff_with_an_unrelated_session();
+    let (n, s) = f
+        .env
+        .event(&herdr.key, Kind::Status, None, &[], status("one"));
+    let first = id(&n);
+    f.server.admit(n, s).unwrap();
+    let (n, s) = f
+        .env
+        .event(&herdr.key, Kind::Status, Some(first), &[], status("two"));
+    f.server.admit(n, s).unwrap();
+}
+
+#[test]
+fn a_session_no_handoff_activated_cannot_chain_onto_one() {
+    let (mut f, herdr, handoff_id) = after_a_handoff_with_an_unrelated_session();
+    let before = f.server.admitted();
+    let (n, s) = f
+        .env
+        .event(&herdr.key, Kind::Status, Some(handoff_id), &[], status("x"));
+    let why = session_err(f.server.admit(n, s));
+    assert!(why.contains("hand-off"), "{why}");
+    assert_eq!(f.server.admitted(), before, "nothing was written");
+    // and it still has no head: an honest first event is fine
+    let (n, s) = f
+        .env
+        .event(&herdr.key, Kind::Status, None, &[], status("ok"));
+    f.server.admit(n, s).unwrap();
+}
+
+#[test]
+fn the_activated_replacement_chains_on_exactly_its_own_activation_and_not_a_later_one() {
+    let mut f = flock();
+    let (old, new) = (clone(&f.old), clone(&f.new));
+    f.handoff(&old, &new).unwrap();
+    let (mut shep, mut new) = (clone(&f.shep), new);
+    renew_all(&mut f.server, &mut [&mut shep, &mut new]);
+    let own = f
+        .server
+        .board()
+        .entries()
+        .find(|e| e.event.kind == Kind::Handoff)
+        .map(|e| e.id)
+        .unwrap();
+    // the epoch event that follows the hand-off is not its activation
+    let epoch_id = f
+        .server
+        .board()
+        .entries()
+        .find(|e| e.event.kind == Kind::Epoch)
+        .map(|e| e.id)
+        .unwrap();
+    let job = || Body::Job {
+        lane: "l".into(),
+        label: "x".into(),
+    };
+    let (n, s) = f.env.event(&new.key, Kind::Job, Some(epoch_id), &[], job());
+    assert!(f.server.admit(n, s).is_err(), "not its activation");
+    let (n, s) = f.env.event(&new.key, Kind::Job, Some(own), &[], job());
+    let first = id(&n);
+    f.server.admit(n, s).unwrap();
+    let (n, s) = f.env.event(&new.key, Kind::Job, Some(first), &[], job());
+    f.server.admit(n, s).unwrap();
+}
+
+#[test]
+fn replay_refuses_what_admission_refuses_an_unactivated_session_chained_to_a_handoff() {
+    use std::io::Write;
+    for (prev_is_handoff, opens) in [(false, true), (true, false)] {
+        let (mut f, herdr, handoff_id) = after_a_handoff_with_an_unrelated_session();
+        let key = f.env.server_key();
+        let prev = prev_is_handoff.then_some(handoff_id);
+        let (n, s) = f
+            .env
+            .event(&herdr.key, Kind::Status, prev, &[], status("x"));
+        let (head, index, epoch) = (
+            f.server.head_record(),
+            f.server.admitted() + 1,
+            f.server.epoch(),
+        );
+        let frame = Frame {
+            sealed: vec![seal(&key, head, index, epoch, n, s).unwrap()],
+        };
+        let env = f.env;
+        drop(f.server);
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(env.log_path())
+            .unwrap();
+        log.write_all(&encode(&frame).unwrap()).unwrap();
+        drop(log);
+        assert_eq!(
+            Server::open(&env.dir()).is_ok(),
+            opens,
+            "prev is the hand-off: {prev_is_handoff}"
+        );
+    }
+}
+
+#[test]
+fn an_activated_replacement_cannot_chain_onto_another_sessions_handoff() {
+    let mut f = flock();
+    let (old, new) = (clone(&f.old), clone(&f.new));
+    f.handoff(&old, &new).unwrap();
+    let first_handoff = f
+        .server
+        .board()
+        .entries()
+        .find(|e| e.event.kind == Kind::Handoff)
+        .map(|e| e.id)
+        .unwrap();
+    // a third session replaces the second: a second hand-off exists
+    let mut third = enroll(&mut f.server, "h1");
+    let (mut shep, mut new) = (clone(&f.shep), new);
+    renew_all(&mut f.server, &mut [&mut shep, &mut new, &mut third]);
+    let ap = approval(&f.env, &f.server, "h1", &new, &third);
+    let sig = sign_approval(&shep.key, &ap);
+    f.server.handoff(ap, sig).unwrap();
+    renew_all(&mut f.server, &mut [&mut shep, &mut third]);
+    let second_handoff = f
+        .server
+        .board()
+        .entries()
+        .filter(|e| e.event.kind == Kind::Handoff)
+        .map(|e| e.id)
+        .last()
+        .unwrap();
+    assert_ne!(first_handoff, second_handoff);
+    let job = || Body::Job {
+        lane: "l".into(),
+        label: "x".into(),
+    };
+    let (n, s) = f
+        .env
+        .event(&third.key, Kind::Job, Some(first_handoff), &[], job());
+    let why = session_err(f.server.admit(n, s));
+    assert!(why.contains("must have prev"), "{why}");
+    let (n, s) = f
+        .env
+        .event(&third.key, Kind::Job, Some(second_handoff), &[], job());
+    f.server.admit(n, s).unwrap();
+}
