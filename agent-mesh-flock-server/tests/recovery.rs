@@ -282,7 +282,9 @@ fn a_record_must_name_the_event_and_certificate_it_carries() {
     let mut s1 = forged(&mut env, root, 1, 0, Kind::Invite);
     s1.record.payload.cert = ContentId::from_canonical_bytes(b"another cert");
     s1.record_sig =
-        agent_mesh_protocol::Assertion::sign(&env.server_key(), &s1.record.content_id().unwrap());
+        agent_mesh_protocol::Assertion::sign(&env.server_key(), &s1.record.content_id().unwrap())
+            .signature()
+            .clone();
     append_raw(&env, &[s1]);
     assert!(corrupt_at(reopen(&env)), "certificate swapped");
 }

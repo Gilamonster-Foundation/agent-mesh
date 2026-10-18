@@ -234,3 +234,32 @@ fn the_servers_certificate_on_a_session_event_is_refused() {
         "server cert over a session signature"
     );
 }
+
+#[test]
+fn a_record_citing_a_certificate_the_log_does_not_hold_says_so() {
+    // a frame cites its certificate by id; one the log never recorded is
+    // refused for that reason, not for some later failure
+    let mut w = world();
+    let stranger = AgentKey::issue(
+        &w.env.user,
+        AgentMetadata {
+            role: "x".into(),
+            host: "x".into(),
+            capabilities: vec![],
+            issued_at: "2026-10-18T00:00:00Z".into(),
+            expires_at: None,
+            caveats: Caveats::top(),
+        },
+    );
+    let (n, s) = brief(&mut w, &stranger);
+    let sealed = seal_next(&w, n, s);
+    let genesis = agent_mesh_flock_server::load_genesis(w.env.tmp.path())
+        .unwrap()
+        .node;
+    let mut f = Follower::new(&genesis).unwrap();
+    for fr in prefix(&w) {
+        f.apply(&fr).unwrap();
+    }
+    let why = format!("{:?}", f.apply(std::slice::from_ref(&sealed)).unwrap_err());
+    assert!(why.contains("does not hold"), "{why}");
+}

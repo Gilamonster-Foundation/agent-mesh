@@ -5,7 +5,7 @@
 use crate::chain::{verify_record, Chain};
 #[cfg(feature = "serve")]
 use crate::frame::seal;
-use crate::frame::{AdmissionRecord, Frame, Sealed};
+use crate::frame::{cert_cid, AdmissionRecord, Frame, Sealed};
 use crate::sessions::Sessions;
 use crate::ServerError;
 #[cfg(feature = "serve")]
@@ -181,7 +181,20 @@ impl State {
     pub fn replay(&mut self, sealed: &Sealed) -> Result<(), ServerError> {
         let (id, record_id) = verify_record(&self.chain, sealed)?;
         let rec = &sealed.record.payload;
-        let (signer, _) = self.vet(&sealed.event, &id, &sealed.event_sig, rec.epoch)?;
+        // the record cites the certificate the event was signed under; it must
+        // be one this log holds
+        let cert = if rec.cert == cert_cid(&self.chain.server_cert)? {
+            self.chain.server_cert.clone()
+        } else {
+            self.sessions
+                .cert(&rec.cert)
+                .ok_or_else(|| {
+                    ServerError::Signer("record cites a certificate the log does not hold".into())
+                })?
+                .clone()
+        };
+        let sig = Assertion::from_parts(cert, sealed.event_sig.clone());
+        let (signer, _) = self.vet(&sealed.event, &id, &sig, rec.epoch)?;
         self.apply(&sealed.event, signer, id, record_id, rec)
     }
 
@@ -235,16 +248,14 @@ impl State {
 /// Replay the retained frames from genesis, verifying each admission.
 pub(crate) fn rebuild(
     genesis: &MerkleNode<agent_mesh_flock::Genesis>,
-    server_pub: [u8; 32],
     frames: Vec<(u64, Frame)>,
 ) -> Result<State, ServerError> {
-    rebuild_with(genesis, server_pub, frames, |_| {})
+    rebuild_with(genesis, frames, |_| {})
 }
 
 /// [`rebuild`], calling `after` with the state after each whole frame.
 pub(crate) fn rebuild_with(
     genesis: &MerkleNode<agent_mesh_flock::Genesis>,
-    server_pub: [u8; 32],
     frames: Vec<(u64, Frame)>,
     mut after: impl FnMut(&State),
 ) -> Result<State, ServerError> {
@@ -255,7 +266,11 @@ pub(crate) fn rebuild_with(
         ));
     };
     let mut st = State {
-        chain: Chain::new(board.flock(), server_pub, user.clone()),
+        chain: Chain::new(
+            board.flock(),
+            genesis.payload.server_cert.clone(),
+            user.clone(),
+        ),
         board,
         sessions: Sessions::default(),
     };

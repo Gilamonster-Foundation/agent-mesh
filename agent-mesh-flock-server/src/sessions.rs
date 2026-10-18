@@ -80,6 +80,17 @@ pub struct Sessions {
     holders: BTreeMap<String, String>,
     /// Approvals already consumed by a hand-off.
     approvals: BTreeSet<ContentId>,
+    /// Every certificate a `session-start` or `renewal` put in the log, by
+    /// the id a record cites it with.
+    chains: BTreeMap<ContentId, CertChain>,
+}
+
+impl Sessions {
+    /// The certificate chain the log recorded under `cid`.
+    #[must_use]
+    pub fn cert(&self, cid: &ContentId) -> Option<&CertChain> {
+        self.chains.get(cid)
+    }
 }
 
 /// The digest an `invite` event carries for a bearer token.
@@ -414,7 +425,9 @@ impl Sessions {
                 } else {
                     Status::Pending
                 };
-                let certs = BTreeSet::from([cert_cid(cert).map_err(|e| e.to_string())?]);
+                let cid = cert_cid(cert).map_err(|e| e.to_string())?;
+                self.chains.insert(cid, cert.clone());
+                let certs = BTreeSet::from([cid]);
                 self.sessions.insert(
                     session.clone(),
                     Session {
@@ -453,7 +466,9 @@ impl Sessions {
                 cert,
             } => {
                 if let Some(s) = self.sessions.get_mut(session) {
-                    s.certs.insert(cert_cid(cert).map_err(|e| e.to_string())?);
+                    let cid = cert_cid(cert).map_err(|e| e.to_string())?;
+                    self.chains.insert(cid, cert.clone());
+                    s.certs.insert(cid);
                     s.epoch = *epoch;
                 }
             }
