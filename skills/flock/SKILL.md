@@ -171,6 +171,30 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   session (`CtlReq::ProveStream`, only for its own flock, after renewing its
   certificate to the current epoch), so the CLI holds no key. A closed stream is an error exit with the server's reason.
 
+- **read-side features (step 8a)**: `agent-mesh-flock-server` has a `serve`
+  feature (the `Server`, entry/enrollment, sockets, key file, log writer and
+  journal) and `agent-mesh-flock-session` an `emit` feature (the session
+  process, its locked key, `CtlReq::Emit`/`Announce`). Both are on by default
+  and nothing else changes. Without them the crates still verify and follow a
+  log: `Snapshot`, `Follower`, `Reader`/`Watch`, `session_prover` (the
+  `ProveStream` client) and the types. The workspace entries are
+  `default-features = false`, so a member that writes asks for the writer
+  (the CLI does); a read-only member (the TUI, step 8b) takes them as they
+  stand. With both off, no signing or mutating API resolves for a consumer:
+  `seal`, `RefusalEntry::sign`, `Server`, `init`, `Session`, the request
+  variants `Invite`/`EnrollBegin`/`EnrollFinish`/`Renew`/`RenewFinish`/`Head`/
+  `Admit`/`End` and `CtlReq::{Emit, Announce, End}` are all gated, and the held-key
+  `key_prover` lives only in test code. What stays is verify, follow and watch
+  (`Snapshot`, `Follower`, `Reader`/`Watch`, `session_prover`, the stream
+  requests, `read_msg`/`write_msg` as plain framing). The session's proof
+  renews its own certificate first (intended). `read_side_api.rs` proves it by
+  compiling a scratch consumer (writer APIs must fail, the same lines must
+  compile with the writer on, the read API must compile), and
+  `agent-mesh-flock-session/tests/read_side.rs` enforces the feature names from
+  `cargo tree -p … --format "{p}|{f}"` (per-package resolution; `cargo
+  metadata` unifies features across the workspace and would always see the
+  CLI's).
+
 **Planned, not built:** operator approval of a **delegate**
 hand-off (#127's other half; waits on the delegate designation, step 13); device changes
 signed by a listed device (server-signed only today); operator-signed events (`answer`); the rest of

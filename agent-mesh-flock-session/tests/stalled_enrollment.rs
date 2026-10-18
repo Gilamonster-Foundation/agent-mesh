@@ -1,6 +1,6 @@
 //! The seed must be in locked memory while enrollment waits on the server.
 //! One test per file: `VmLck` is per process.
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "emit"))]
 
 use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp};
 use agent_mesh_flock_session::{Policy, Session};

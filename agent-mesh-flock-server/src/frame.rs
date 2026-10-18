@@ -14,9 +14,13 @@
 
 use crate::ServerError;
 use agent_mesh_flock::Event;
-use agent_mesh_protocol::{AgentKey, Assertion, CertChain};
+#[cfg(feature = "serve")]
+use agent_mesh_protocol::AgentKey;
+use agent_mesh_protocol::{Assertion, CertChain};
 use content_addressable::canonical::{from_canonical_dagcbor_checked, to_canonical_dagcbor};
-use content_addressable::{ContentAddressable, ContentId, MerkleNode};
+#[cfg(feature = "serve")]
+use content_addressable::ContentAddressable;
+use content_addressable::{ContentId, MerkleNode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +75,7 @@ pub fn cert_cid(cert: &CertChain) -> Result<ContentId, ServerError> {
 ///
 /// # Errors
 /// Encoding failure.
+#[cfg(feature = "serve")]
 pub fn seal(
     server: &AgentKey,
     prev: ContentId,

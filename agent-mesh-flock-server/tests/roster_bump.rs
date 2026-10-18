@@ -1,5 +1,5 @@
 //! A roster that drops a member carries its epoch bump in the same frame.
-#![cfg(unix)]
+#![cfg(all(unix, feature = "serve"))]
 mod support;
 
 use agent_mesh_flock::{Body, Kind};

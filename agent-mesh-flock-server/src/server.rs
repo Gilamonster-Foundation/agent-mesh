@@ -1,6 +1,5 @@
 //! The server: one process, one log, one admission transaction at a time.
 
-use crate::chain::Chain;
 use crate::entry::Held;
 use crate::frame::{Frame, Sealed};
 use crate::init::{load_genesis, KEY_FILE, LOG_FILE, REFUSALS_FILE};
@@ -8,10 +7,10 @@ use crate::journal::Journal;
 use crate::log::Log;
 use crate::refusal::{Reason, RefusalEntry, RefusalRecord};
 use crate::sessions::Sessions;
-use crate::state::{check_frame_shape, drops_member, Spec, State};
+use crate::state::{drops_member, enc, rebuild_with, Spec, State};
 use crate::{load_server_key, CrashPlan, ServerError};
 use agent_mesh_flock::{Board, ConflictKind, Event, Kind, Refusal, SignerClass};
-use agent_mesh_protocol::{AgentKey, Assertion, Issuer};
+use agent_mesh_protocol::{AgentKey, Assertion};
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -41,50 +40,6 @@ pub struct Server {
     pub(crate) challenges: BTreeMap<[u8; 32], Held>,
     poisoned: bool,
     journal: Arc<Journal>,
-}
-
-fn enc(e: content_addressable::ContentError) -> ServerError {
-    ServerError::Encoding(e.to_string())
-}
-
-/// Replay the retained frames from genesis, verifying each admission.
-pub(crate) fn rebuild(
-    genesis: &MerkleNode<agent_mesh_flock::Genesis>,
-    server_pub: [u8; 32],
-    frames: Vec<(u64, Frame)>,
-) -> Result<State, ServerError> {
-    rebuild_with(genesis, server_pub, frames, |_| {})
-}
-
-/// [`rebuild`], calling `after` with the state after each whole frame.
-pub(crate) fn rebuild_with(
-    genesis: &MerkleNode<agent_mesh_flock::Genesis>,
-    server_pub: [u8; 32],
-    frames: Vec<(u64, Frame)>,
-    mut after: impl FnMut(&State),
-) -> Result<State, ServerError> {
-    let board = Board::new(genesis).map_err(enc)?;
-    let Issuer::User(user) = &genesis.payload.server_cert.issuer else {
-        return Err(ServerError::Signer(
-            "genesis server certificate is not issued by a user key".into(),
-        ));
-    };
-    let mut st = State {
-        chain: Chain::new(board.flock(), server_pub, user.clone()),
-        board,
-        sessions: Sessions::default(),
-    };
-    for (offset, frame) in frames {
-        let corrupt = |why: String| ServerError::Corrupt { offset, why };
-        if frame.sealed.is_empty() {
-            return Err(corrupt("empty frame".into()));
-        }
-        check_frame_shape(&frame.sealed).map_err(corrupt)?;
-        st.replay_frame(&frame.sealed)
-            .map_err(|e| corrupt(e.to_string()))?;
-        after(&st);
-    }
-    Ok(st)
 }
 
 impl Server {

@@ -10,6 +10,12 @@ authors.workspace = true
 description = "The agent-mesh flock server: init, the signed append-only log, admission and recovery."
 readme = "README.md"
 
+[features]
+# The writer: the server, its sockets, key file and log. On by default; a
+# reader that only verifies and follows a log turns it off.
+default = ["serve"]
+serve = []
+
 [dependencies]
 agent-mesh-protocol.workspace = true
 agent-mesh-flock.workspace = true

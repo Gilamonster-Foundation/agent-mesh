@@ -1,6 +1,6 @@
 //! Another Unix user can't use the sockets. Needs root to become that user,
 //! so both tests are `#[ignore]`d; CI runs this binary under `sudo --ignored`.
-#![cfg(unix)]
+#![cfg(all(unix, feature = "emit"))]
 
 use agent_mesh_flock::{Member, Role};
 use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp};

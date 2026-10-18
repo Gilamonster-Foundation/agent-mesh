@@ -1,5 +1,5 @@
 //! Admission through the server: duplicates, signers, forks, races.
-#![cfg(unix)]
+#![cfg(all(unix, feature = "serve"))]
 mod support;
 
 use agent_mesh_flock::{Body, Kind, Member, Refusal, Role};

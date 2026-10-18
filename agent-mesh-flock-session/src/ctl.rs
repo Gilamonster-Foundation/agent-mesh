@@ -2,11 +2,13 @@
 //! connection, in the server wire's framing.
 
 use crate::SessionError;
+#[cfg(feature = "emit")]
 use agent_mesh_flock::{Body, Kind};
 use agent_mesh_flock_server::wire::{read_msg, write_msg, StreamChallenge};
 use agent_mesh_protocol::Assertion;
 use content_addressable::ContentId;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "emit")]
 use std::collections::BTreeMap;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -18,6 +20,7 @@ pub enum CtlReq {
     /// Who is this session?
     Whoami,
     /// Sign and admit one event with the held key.
+    #[cfg(feature = "emit")]
     Emit {
         /// The event kind.
         kind: Kind,
@@ -28,6 +31,7 @@ pub enum CtlReq {
     },
     /// Tell the log which herdr pane this session was started in. The claim
     /// comes from the session's own environment, never from the caller.
+    #[cfg(feature = "emit")]
     Announce,
     /// Sign a server's stream challenge, so the CLI can open a `watch`
     /// without holding a key. Only a challenge for this session's own flock.
@@ -36,6 +40,7 @@ pub enum CtlReq {
         challenge: StreamChallenge,
     },
     /// Say goodbye and exit.
+    #[cfg(feature = "emit")]
     End,
 }
 
@@ -54,6 +59,7 @@ pub enum CtlResp {
         pending: bool,
     },
     /// Answer to `Emit`.
+    #[cfg(feature = "emit")]
     Admitted {
         /// The event id.
         event: ContentId,
@@ -63,6 +69,7 @@ pub enum CtlResp {
     /// Answer to `ProveStream`.
     Proof(Box<Assertion>),
     /// The session is closing.
+    #[cfg(feature = "emit")]
     Ended,
     /// Refused or failed.
     Err(String),

@@ -1,12 +1,24 @@
 //! `init`: mint the server key and genesis, once.
 
-use crate::{store_server_key, ServerError};
-use agent_mesh_flock::{Genesis, Member};
-use agent_mesh_protocol::{AgentKey, AgentMetadata, Assertion, Caveats, UserKey};
-use content_addressable::canonical::{from_canonical_dagcbor_checked, to_canonical_dagcbor};
-use content_addressable::{ContentAddressable, ContentId, MerkleNode};
+#[cfg(feature = "serve")]
+use crate::store_server_key;
+use crate::ServerError;
+use agent_mesh_flock::Genesis;
+#[cfg(feature = "serve")]
+use agent_mesh_flock::Member;
+use agent_mesh_protocol::Assertion;
+#[cfg(feature = "serve")]
+use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, UserKey};
+use content_addressable::canonical::from_canonical_dagcbor_checked;
+#[cfg(feature = "serve")]
+use content_addressable::canonical::to_canonical_dagcbor;
+#[cfg(feature = "serve")]
+use content_addressable::ContentId;
+use content_addressable::{ContentAddressable, MerkleNode};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "serve")]
 use std::fs::{File, OpenOptions};
+#[cfg(feature = "serve")]
 use std::io::Write;
 use std::path::Path;
 
@@ -19,6 +31,7 @@ pub const LOG_FILE: &str = "log";
 /// Refused-event journal file name.
 pub const REFUSALS_FILE: &str = "refusals";
 
+#[cfg(feature = "serve")]
 /// What the caller chooses for a new flock.
 #[derive(Debug, Clone)]
 pub struct InitSpec {
@@ -43,6 +56,7 @@ pub struct SignedGenesis {
     pub sig: Assertion,
 }
 
+#[cfg(feature = "serve")]
 /// Create the flock in `dir`: server key under `user`, signed genesis, empty log.
 /// Returns the flock id (the genesis CID).
 ///

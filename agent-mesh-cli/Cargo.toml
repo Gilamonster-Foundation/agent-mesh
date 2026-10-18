@@ -23,7 +23,7 @@ agent-mesh-discovery.workspace = true
 agent-mesh-transport.workspace = true
 agent-mesh-bus.workspace = true
 agent-mesh-flock.workspace = true
-agent-mesh-flock-server.workspace = true
+agent-mesh-flock-server = { workspace = true, features = ["serve"] }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
@@ -40,7 +40,7 @@ content-addressable.workspace = true
 rand.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-agent-mesh-flock-session.workspace = true
+agent-mesh-flock-session = { workspace = true, features = ["emit"] }
 
 [dev-dependencies]
 tempfile.workspace = true

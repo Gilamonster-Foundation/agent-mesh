@@ -3,14 +3,22 @@
 //! so a failure half way leaves the live state untouched.
 
 use crate::chain::{verify_record, Chain};
-use crate::frame::{seal, AdmissionRecord, Sealed};
+#[cfg(feature = "serve")]
+use crate::frame::seal;
+use crate::frame::{AdmissionRecord, Frame, Sealed};
 use crate::sessions::Sessions;
 use crate::ServerError;
+#[cfg(feature = "serve")]
+use agent_mesh_flock::Body;
 use agent_mesh_flock::{
-    admit, Board, Body, ConflictKind, Event, Kind, LogEntry, Member, Signer, Verdict,
+    admit, Board, ConflictKind, Event, Kind, LogEntry, Member, Signer, Verdict,
 };
-use agent_mesh_protocol::{AgentKey, Assertion};
-use content_addressable::{ContentAddressable, ContentId, MerkleNode};
+#[cfg(feature = "serve")]
+use agent_mesh_protocol::AgentKey;
+use agent_mesh_protocol::{Assertion, Issuer};
+#[cfg(feature = "serve")]
+use content_addressable::ContentAddressable;
+use content_addressable::{ContentId, MerkleNode};
 
 #[derive(Clone)]
 pub struct State {
@@ -20,6 +28,7 @@ pub struct State {
 }
 
 /// A server-authored event to be built, signed and admitted.
+#[cfg(feature = "serve")]
 pub struct Spec {
     pub kind: Kind,
     pub refs: Vec<(&'static str, ContentId)>,
@@ -27,6 +36,7 @@ pub struct Spec {
 }
 
 /// An event that passed every check, sealed and ready to append.
+#[cfg(feature = "serve")]
 pub struct Prepared {
     pub sealed: Sealed,
     pub signer: Signer,
@@ -35,7 +45,7 @@ pub struct Prepared {
     pub record_id: ContentId,
 }
 
-fn enc(e: content_addressable::ContentError) -> ServerError {
+pub(crate) fn enc(e: content_addressable::ContentError) -> ServerError {
     ServerError::Encoding(e.to_string())
 }
 
@@ -89,6 +99,7 @@ impl State {
     /// The sessions that are live (not ended) and whose member is on the
     /// current roster.
     #[must_use]
+    #[cfg(feature = "serve")]
     pub fn eligible(&self) -> crate::Eligible {
         let members = self.board.members();
         std::sync::Arc::new(
@@ -131,6 +142,7 @@ impl State {
     }
 
     /// Check and seal `node` as the next admission, changing nothing.
+    #[cfg(feature = "serve")]
     pub fn prepare(
         &self,
         key: &AgentKey,
@@ -159,6 +171,7 @@ impl State {
     }
 
     /// Take a prepared admission (after it is durable) into the state.
+    #[cfg(feature = "serve")]
     pub fn commit(&mut self, p: &Prepared) -> Result<(), ServerError> {
         let rec = &p.sealed.record.payload;
         self.apply(&p.sealed.event, p.signer.clone(), p.id, p.record_id, rec)
@@ -192,6 +205,7 @@ impl State {
     }
 
     /// A server event chained after the server's previous one.
+    #[cfg(feature = "serve")]
     pub fn server_event(
         &self,
         key: &AgentKey,
@@ -216,4 +230,44 @@ impl State {
         let sig = Assertion::sign(key, &node.content_id().map_err(enc)?);
         Ok((node, sig))
     }
+}
+
+/// Replay the retained frames from genesis, verifying each admission.
+pub(crate) fn rebuild(
+    genesis: &MerkleNode<agent_mesh_flock::Genesis>,
+    server_pub: [u8; 32],
+    frames: Vec<(u64, Frame)>,
+) -> Result<State, ServerError> {
+    rebuild_with(genesis, server_pub, frames, |_| {})
+}
+
+/// [`rebuild`], calling `after` with the state after each whole frame.
+pub(crate) fn rebuild_with(
+    genesis: &MerkleNode<agent_mesh_flock::Genesis>,
+    server_pub: [u8; 32],
+    frames: Vec<(u64, Frame)>,
+    mut after: impl FnMut(&State),
+) -> Result<State, ServerError> {
+    let board = Board::new(genesis).map_err(enc)?;
+    let Issuer::User(user) = &genesis.payload.server_cert.issuer else {
+        return Err(ServerError::Signer(
+            "genesis server certificate is not issued by a user key".into(),
+        ));
+    };
+    let mut st = State {
+        chain: Chain::new(board.flock(), server_pub, user.clone()),
+        board,
+        sessions: Sessions::default(),
+    };
+    for (offset, frame) in frames {
+        let corrupt = |why: String| ServerError::Corrupt { offset, why };
+        if frame.sealed.is_empty() {
+            return Err(corrupt("empty frame".into()));
+        }
+        check_frame_shape(&frame.sealed).map_err(corrupt)?;
+        st.replay_frame(&frame.sealed)
+            .map_err(|e| corrupt(e.to_string()))?;
+        after(&st);
+    }
+    Ok(st)
 }

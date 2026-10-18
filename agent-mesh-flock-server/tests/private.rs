@@ -1,5 +1,5 @@
 //! Keeping other Unix users off the sockets.
-#![cfg(unix)]
+#![cfg(all(unix, feature = "serve"))]
 
 use agent_mesh_flock_server::{bind_private, peer_ok, private_dir, uid_allowed};
 use std::os::unix::fs::PermissionsExt;

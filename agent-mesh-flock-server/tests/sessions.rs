@@ -1,5 +1,5 @@
 //! Invites, enrollment, session end, the epoch ratchet and renewal.
-#![cfg(unix)]
+#![cfg(all(unix, feature = "serve"))]
 mod support;
 
 use agent_mesh_flock::{Body, EndReason, Kind, Refusal};

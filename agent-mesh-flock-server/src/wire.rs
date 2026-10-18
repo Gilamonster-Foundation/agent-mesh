@@ -5,11 +5,17 @@
 //! protocol's own type.
 
 use crate::{Head, Sealed, ServerError};
+#[cfg(feature = "serve")]
 use agent_mesh_flock::Event;
+#[cfg(feature = "serve")]
 use agent_mesh_protocol::agent_key::PossessionChallenge;
-use agent_mesh_protocol::{Assertion, CertChain};
+use agent_mesh_protocol::Assertion;
+#[cfg(feature = "serve")]
+use agent_mesh_protocol::CertChain;
 use content_addressable::canonical::{from_canonical_dagcbor_checked, to_canonical_dagcbor};
-use content_addressable::{ContentId, MerkleNode};
+use content_addressable::ContentId;
+use content_addressable::MerkleNode;
+#[cfg(feature = "serve")]
 use ed25519_dalek::Signature;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -26,11 +32,13 @@ pub enum Req {
     /// Which flock, and at which epoch.
     Hello,
     /// Mint an invite for a member (the local owner's surface).
+    #[cfg(feature = "serve")]
     Invite {
         /// The roster member.
         member: String,
     },
     /// Enrollment steps 2-3.
+    #[cfg(feature = "serve")]
     EnrollBegin {
         /// The bearer token.
         token: String,
@@ -40,6 +48,7 @@ pub enum Req {
         pubkey: [u8; 32],
     },
     /// Enrollment step 4; binds this connection to the new session.
+    #[cfg(feature = "serve")]
     EnrollFinish {
         /// The challenge from `EnrollBegin`.
         challenge: PossessionChallenge,
@@ -47,11 +56,13 @@ pub enum Req {
         proof: Signature,
     },
     /// Ask to renew if the certificate is behind the epoch.
+    #[cfg(feature = "serve")]
     Renew {
         /// The session's latest certificate.
         last: CertChain,
     },
     /// Answer a renewal challenge.
+    #[cfg(feature = "serve")]
     RenewFinish {
         /// The challenge from `Renew`.
         challenge: PossessionChallenge,
@@ -59,11 +70,13 @@ pub enum Req {
         proof: Signature,
     },
     /// The session's last admitted event.
+    #[cfg(feature = "serve")]
     Head {
         /// The session's fingerprint, hex.
         session: String,
     },
     /// Admit a session-signed event.
+    #[cfg(feature = "serve")]
     Admit {
         /// The event node.
         node: MerkleNode<Event>,
@@ -71,6 +84,7 @@ pub enum Req {
         sig: Assertion,
     },
     /// A clean goodbye: the session is recorded `closed`, not `lost`.
+    #[cfg(feature = "serve")]
     End,
     /// Ask for a stream challenge (the first step of `Watch`).
     WatchBegin,
@@ -121,13 +135,16 @@ pub enum Resp {
         epoch: u64,
     },
     /// Answer to `Invite`.
+    #[cfg(feature = "serve")]
     Invited {
         /// The bearer token, shown once.
         token: String,
     },
     /// A possession challenge to sign.
+    #[cfg(feature = "serve")]
     Challenge(PossessionChallenge),
     /// Enrollment done.
+    #[cfg(feature = "serve")]
     Enrolled {
         /// The session fingerprint, hex.
         session: String,
@@ -137,12 +154,16 @@ pub enum Resp {
         pending: bool,
     },
     /// A renewed certificate.
+    #[cfg(feature = "serve")]
     Cert(CertChain),
     /// The certificate is already for the current epoch.
+    #[cfg(feature = "serve")]
     Current,
     /// Answer to `Head`.
+    #[cfg(feature = "serve")]
     Head(Option<ContentId>),
     /// Answer to `Admit`.
+    #[cfg(feature = "serve")]
     Admitted {
         /// Admission index.
         index: u64,
@@ -173,6 +194,7 @@ pub enum Resp {
         reason: String,
     },
     /// Done.
+    #[cfg(feature = "serve")]
     Ok,
     /// Refused or failed.
     Err(String),

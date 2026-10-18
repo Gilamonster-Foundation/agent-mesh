@@ -11,42 +11,54 @@
 //! fresh reader rebuilds the same table in replay order.
 
 mod chain;
+#[cfg(feature = "serve")]
 mod entry;
 mod error;
 mod follow;
 mod frame;
 mod init;
 mod journal;
+#[cfg(feature = "serve")]
 mod keyfile;
+#[cfg(feature = "serve")]
 mod lock;
 mod log;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "serve"))]
 mod private;
 mod read;
 mod refusal;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "serve"))]
 mod serve;
+#[cfg(feature = "serve")]
 mod server;
 mod sessions;
 mod state;
 pub mod wire;
 
 pub use chain::{verify_record, Chain};
+#[cfg(feature = "serve")]
 pub use entry::{Enrolled, Invited};
 pub use error::ServerError;
 pub use follow::{FollowError, Follower};
-pub use frame::{cert_cid, encode, seal, AdmissionRecord, Frame, Sealed};
-pub use init::{
-    init, load_genesis, InitSpec, SignedGenesis, GENESIS_FILE, KEY_FILE, LOG_FILE, REFUSALS_FILE,
-};
-pub use journal::{Cursor, Eligible, Head, Journal, Published, Resume};
+#[cfg(feature = "serve")]
+pub use frame::seal;
+pub use frame::{cert_cid, encode, AdmissionRecord, Frame, Sealed};
+#[cfg(feature = "serve")]
+pub use init::{init, InitSpec};
+pub use init::{load_genesis, SignedGenesis, GENESIS_FILE, KEY_FILE, LOG_FILE, REFUSALS_FILE};
+#[cfg(feature = "serve")]
+pub use journal::{Cursor, Eligible, Journal, Published};
+pub use journal::{Head, Resume};
+#[cfg(feature = "serve")]
 pub use keyfile::{load_server_key, store_server_key};
+#[cfg(feature = "serve")]
 pub use log::CrashPlan;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "serve"))]
 pub use private::{bind_private, peer_ok, private_dir, uid_allowed};
 pub use read::Snapshot;
 pub use refusal::{Reason, RefusalEntry, RefusalRecord};
-#[cfg(unix)]
+#[cfg(all(unix, feature = "serve"))]
 pub use serve::{serve, Serving};
+#[cfg(feature = "serve")]
 pub use server::{Receipt, Server};
 pub use sessions::{session_caveats, token_digest, InviteInfo, SessionInfo, Sessions, Status};

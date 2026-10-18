@@ -1,6 +1,6 @@
 //! Operator devices: the roster lists them, and only a listed device's
 //! signature approves a shepherd hand-off (#127).
-#![cfg(unix)]
+#![cfg(all(unix, feature = "serve"))]
 mod support;
 
 use agent_mesh_flock::{Body, Kind, Member, Refusal, Role};
