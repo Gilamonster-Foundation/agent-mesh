@@ -10,9 +10,9 @@ use harness::{amesh, flock_with, Sess};
 use std::collections::BTreeMap;
 use std::process::Output;
 
-/// OSC 52 (set the clipboard), BEL, a one-character CSI, a bidi override.
-/// No colon (member specs split on it) and no newline (it is an argument).
-const HOSTILE: &str = "\u{1b}]52;c;aGk=\u{7}\u{9b}31m\u{202e}rtl";
+/// OSC 52 (set the clipboard), BEL, a one-character CSI, a bidi override, and a
+/// newline that would start a forged line. No colon (member specs split on it).
+const HOSTILE: &str = "\u{1b}]52;c;aGk=\u{7}\u{9b}31m\u{202e}rtl\nFORGED";
 
 /// What a terminal could act on: ESC, BEL, any C1 control, bidi/zero-width.
 fn dangerous(bytes: &[u8]) -> Option<String> {
@@ -26,6 +26,10 @@ fn dangerous(bytes: &[u8]) -> Option<String> {
 }
 
 fn safe(o: &Output, what: &str) {
+    // a newline in a member's text must not start a line of its own
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        assert!(!line.starts_with("FORGED"), "{what}: forged line {line:?}");
+    }
     for (name, b) in [("stdout", &o.stdout), ("stderr", &o.stderr)] {
         assert!(dangerous(b).is_none(), "{what} {name}: {:?}", dangerous(b));
     }
@@ -96,7 +100,7 @@ fn no_command_hands_member_authored_text_to_the_terminal() {
     let inbox = run(&w.evil, &["inbox"]);
     let join = run(&w.evil, &["join"]);
     // the payload really is in the log, and the escaped forms are what is shown
-    let want = "\\x1b]52;c;aGk=\\x07\\x9b31m\\u{202e}rtl";
+    let want = "\\x1b]52;c;aGk=\\x07\\x9b31m\\u{202e}rtl\\nFORGED";
     assert!(log.contains(want), "{log}");
     assert!(watch.contains(want), "{watch}");
     assert!(status.contains("\\x1b"), "{status}");

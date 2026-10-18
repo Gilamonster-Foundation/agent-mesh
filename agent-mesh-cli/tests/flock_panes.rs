@@ -72,9 +72,9 @@ use predicates::prelude::PredicateBooleanExt as _;
 fn hostile_member_names_and_herdr_text_are_printed_inert() {
     // a roster name, and a pane whose label, agent and status are all escape
     // sequences (herdr's text is untrusted too)
-    let name = "ev\u{1b}]52;c;aGk=\u{7}il";
+    let name = "ev\u{1b}]52;c;aGk=\u{7}il\nFORGED";
     let panes = r#"{"id":"x","result":{"panes":[
- {"pane_id":"w1:p\u001b[2J1","tab_id":"w1:t1","label":"ev\u001b]52;c;aGk=\u0007il","agent":"a\u001b[31mgent","agent_status":"\u001b]0;pwn\u0007idle"}]}}"#;
+ {"pane_id":"w1:p\u001b[2J1","tab_id":"w1:t1","label":"ev\u001b]52;c;aGk=\u0007il\nFORGED","agent":"a\u001b[31mgent","agent_status":"\u001b]0;pwn\u0007idle\nFORGED"}]}}"#;
     let home = TempDir::new().unwrap();
     let bin = TempDir::new().unwrap();
     let script = format!("#!/bin/sh\ncat <<'EOF'\n{panes}\nEOF\n");
@@ -109,5 +109,9 @@ fn hostile_member_names_and_herdr_text_are_printed_inert() {
         !text.chars().any(|c| c.is_control() && c != '\n'),
         "a control character reached the terminal: {text:?}"
     );
-    assert!(text.contains("ev\\x1b]52;c;aGk=\\x07il"), "{text}");
+    assert!(text.contains("ev\\x1b]52;c;aGk=\\x07il\\nFORGED"), "{text}");
+    assert!(
+        !text.lines().any(|l| l.starts_with("FORGED")),
+        "a newline forged a line: {text:?}"
+    );
 }
