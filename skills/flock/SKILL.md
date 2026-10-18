@@ -89,6 +89,15 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   Devices change only in a server-signed `roster` event (`replace_roster`) or
   genesis; a shepherd's roster must leave them as they are. Operator members
   only. Rosters without devices encode as before;
+- **MCP tools** (`amesh mcp --flock-session <sock>` or `AMESH_FLOCK_SESSION`,
+  Unix): `flock_whoami`, `flock_inbox`, `flock_status` and `flock_emit{kind,
+  refs, body}` join the `mesh_*` tools, only when a session is given. The
+  socket is fixed at startup, bound to its flock (a socket that is not a live
+  session of the flock holding it stops the server), and no tool takes one. The
+  tools hold no key and make no policy check: `flock_emit` is the same single
+  `Emit` the CLI sends, so the session signs, admission decides, and a refusal
+  (a non-addressee's `ack`, any server-signed kind) comes back as the tool
+  error with the log unchanged;
 - **`Snapshot`** (`agent-mesh-flock-server`): reads and replays the log with no
   lock and no repair, stopping at a torn tail, so it runs beside a live server;
 - **`amesh flock panes --name <flock> [--tab <id>] [--map member=pane]`**:
@@ -148,7 +157,7 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
 **Planned, not built:** operator approval of a **delegate**
 hand-off (#127's other half; waits on the delegate designation, step 13); device changes
 signed by a listed device (server-signed only today); operator-signed events (`answer`); the rest of
-the CLI (`run`, `watch`, `answer`) and the MCP tools (steps 7b, 7c); `amesh-tui`; attaching from another host; the
+the CLI (`run`, `watch`, `answer`; step 7b); `amesh-tui`; attaching from another host; the
 `amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native
 newt receive. Until they land, lanes run on files
 as the herdr-flock skill describes. Status: epic #109.
