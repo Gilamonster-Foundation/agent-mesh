@@ -4,7 +4,7 @@
 use crate::frame::cert_cid;
 use crate::server::Server;
 use crate::sessions::{session_caveats, token_digest, InviteInfo, SessionInfo, Status};
-use crate::state::Spec;
+use crate::state::{drops_member, Spec};
 use crate::ServerError;
 use agent_mesh_flock::{Body, EndReason, HandoffApproval, Kind, Member};
 use agent_mesh_protocol::agent_key::PossessionChallenge;
@@ -261,11 +261,22 @@ impl Server {
     /// A roster the model refuses, or I/O.
     pub fn replace_roster(&mut self, members: Vec<Member>) -> Result<ContentId, ServerError> {
         let replaces = self.st.board.roster_id();
-        let ids = self.transact(vec![Spec {
+        let drops = drops_member(self.st.board.members(), &members);
+        let mut specs = vec![Spec {
             kind: Kind::Roster,
             refs: vec![("replaces", replaces)],
             body: Body::Roster { members },
-        }])?;
+        }];
+        if drops {
+            specs.push(Spec {
+                kind: Kind::Epoch,
+                refs: vec![],
+                body: Body::Epoch {
+                    epoch: self.st.chain.epoch + 1,
+                },
+            });
+        }
+        let ids = self.transact(specs)?;
         Ok(ids[0])
     }
 

@@ -6,7 +6,9 @@ use crate::chain::{verify_record, Chain};
 use crate::frame::{seal, AdmissionRecord, Sealed};
 use crate::sessions::Sessions;
 use crate::ServerError;
-use agent_mesh_flock::{admit, Board, Body, ConflictKind, Event, Kind, LogEntry, Signer, Verdict};
+use agent_mesh_flock::{
+    admit, Board, Body, ConflictKind, Event, Kind, LogEntry, Member, Signer, Verdict,
+};
 use agent_mesh_protocol::{AgentKey, Assertion};
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
 
@@ -55,7 +57,35 @@ pub fn check_frame_shape(sealed: &[Sealed]) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `after` lacks a name that `before` has: the one roster change
+/// that strands live sessions, so it must carry an epoch bump.
+#[must_use]
+pub fn drops_member(before: &[Member], after: &[Member]) -> bool {
+    before
+        .iter()
+        .any(|b| !after.iter().any(|a| a.name == b.name))
+}
+
 impl State {
+    /// Replay one frame: each `roster` that drops a member must be followed
+    /// at once by the `epoch` bump, in the same frame.
+    pub fn replay_frame(&mut self, sealed: &[Sealed]) -> Result<(), ServerError> {
+        for (i, s) in sealed.iter().enumerate() {
+            let before = self.board.members().to_vec();
+            self.replay(s)?;
+            if s.event.payload.kind == Kind::Roster
+                && drops_member(&before, self.board.members())
+                && sealed.get(i + 1).map(|n| n.event.payload.kind) != Some(Kind::Epoch)
+            {
+                return Err(ServerError::Session(
+                    "a roster that drops a member is not followed by its epoch bump in the same frame"
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// The sessions that are live (not ended) and whose member is on the
     /// current roster.
     #[must_use]
