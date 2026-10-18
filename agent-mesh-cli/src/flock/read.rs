@@ -69,26 +69,41 @@ pub fn log(home: &Path, w: &Where, from: u64) -> Result<()> {
 
 /// Lanes and where they stand.
 pub fn status(home: &Path, w: &Where) -> Result<()> {
+    print!("{}", status_text(home, w)?);
+    Ok(())
+}
+
+/// [`status`] as text, for the MCP tool.
+pub fn status_text(home: &Path, w: &Where) -> Result<String> {
     let snap = snapshot(home, w)?;
     let board = snap.board();
-    println!("log ✓ {} · epoch {}", snap.admitted(), snap.epoch());
+    let mut out = String::new();
+    let _ = writeln!(out, "log ✓ {} · epoch {}", snap.admitted(), snap.epoch());
     for l in board.lanes() {
         let to = match board.get(&l.latest.brief).map(|e| &e.event.body) {
             Some(Body::Brief { to, .. }) => to.as_str(),
             _ => "?",
         };
-        println!(
+        let _ = writeln!(
+            out,
             "{:<12} {:<22} to {to}  {}",
             l.lane,
             l.latest.label(),
             l.latest.brief
         );
     }
-    Ok(())
+    Ok(out)
 }
 
 /// What is addressed to this session's member and still open.
 pub fn inbox(home: &Path, w: &Where) -> Result<()> {
+    print!("{}", inbox_text(home, w)?);
+    Ok(())
+}
+
+/// [`inbox`] as text, for the MCP tool.
+pub fn inbox_text(home: &Path, w: &Where) -> Result<String> {
+    let mut out = String::new();
     // inbox is always about a flock: name one, and the session must be its own
     w.dir(home)?;
     let (_, me) = w.session(home)?;
@@ -108,7 +123,8 @@ pub fn inbox(home: &Path, w: &Where) -> Result<()> {
             }
             _ => continue,
         };
-        println!(
+        let _ = writeln!(
+            out,
             "{} {:<7} from {:<8} {}  {state}",
             e.id,
             kind_name(e.event.kind),
@@ -116,5 +132,5 @@ pub fn inbox(home: &Path, w: &Where) -> Result<()> {
             detail(e)
         );
     }
-    Ok(())
+    Ok(out)
 }

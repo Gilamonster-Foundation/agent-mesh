@@ -1,7 +1,7 @@
 //! `run -- <cmd>`: a job in the log with the command's real ending.
 
 use super::discover::Where;
-use super::emit::send;
+use super::emit::send_via;
 use agent_mesh_flock::{Body, Kind};
 use anyhow::{bail, Result};
 use std::collections::BTreeMap;
@@ -37,7 +37,7 @@ pub fn run(
     };
     let (socket, _) = w.session(home)?;
     let label = label.unwrap_or_else(|| prog.clone());
-    let (job, _) = send(
+    let (job, _) = send_via(
         &socket,
         Kind::Job,
         BTreeMap::new(),
@@ -61,7 +61,7 @@ pub fn run(
         },
     };
     let refs = BTreeMap::from([("job".to_owned(), job)]);
-    let (end, _) = send(&socket, Kind::JobEnd, refs, Body::JobEnd { code, signal })?;
+    let (end, _) = send_via(&socket, Kind::JobEnd, refs, Body::JobEnd { code, signal })?;
     eprintln!("job-end {end}");
     match failure {
         Some(why) => bail!(why),

@@ -131,6 +131,11 @@ pub enum Command {
         /// the bus's dial-back path.
         #[arg(long)]
         quiet: bool,
+        /// Also offer the `flock_*` tools for this flock session (Unix):
+        /// the session's socket, as printed by `amesh flock session`. Fixed
+        /// at startup; no tool takes a socket.
+        #[arg(long, env = "AMESH_FLOCK_SESSION")]
+        flock_session: Option<PathBuf>,
     },
     /// Bind a QUIC endpoint, announce it on mDNS, accept envelopes.
     ///
@@ -189,7 +194,10 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             timeout,
         } => send::run(home, peer_fp, addr, pubkey, payload, timeout).await,
         Command::Listen { duration } => listen::run(home, duration).await,
-        Command::Mcp { quiet } => mcp::run(home, quiet).await,
+        Command::Mcp {
+            quiet,
+            flock_session,
+        } => mcp::run(home, quiet, flock_session).await,
     }
 }
 
