@@ -5,9 +5,7 @@
 use agent_mesh_protocol::{
     AgentKey, AgentMetadata, Assertion, Caveats, CertChain, Fingerprint, UserKey, UserPublic,
 };
-use content_addressable::canonical::{
-    from_canonical_dagcbor, from_canonical_dagcbor_checked, to_canonical_dagcbor,
-};
+use content_addressable::canonical::{from_canonical_dagcbor_checked, to_canonical_dagcbor};
 use content_addressable::ContentId;
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::{Serialize, Serializer};
@@ -157,7 +155,11 @@ impl<'de> Deserialize<'de> for Item {
     }
 }
 
+// Reading the *shape* of bytes, not a value we then use: the unchecked reader is
+// the right tool, because `Shape` cannot round-trip to the same bytes.
+#[allow(deprecated)]
 fn shape<T: Serialize>(v: &T) -> Shape {
+    use content_addressable::canonical::from_canonical_dagcbor;
     let bytes = to_canonical_dagcbor(v).unwrap();
     from_canonical_dagcbor::<Shape>(&bytes).unwrap()
 }

@@ -6,7 +6,6 @@ mod support;
 use agent_mesh_flock_server::wire::{Req, StreamChallenge};
 use agent_mesh_protocol::agent_key::PossessionChallenge;
 use content_addressable::canonical::to_canonical_dagcbor;
-use content_addressable::ContentAddressable as _;
 use ed25519_dalek::Signature;
 use support::{enroll, Env};
 
@@ -39,7 +38,6 @@ fn wire_keys_nonces_and_proofs_cost_the_same_whatever_their_bytes() {
         proof: Signature::from_bytes(&[b; 64]),
     };
     assert_eq!(len(&finish(lo)), len(&finish(hi)), "challenge and proof");
-    let _ = chal(lo).id().unwrap();
 }
 
 #[test]

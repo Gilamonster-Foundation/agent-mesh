@@ -18,9 +18,6 @@ use std::io::{Read, Write};
 /// The largest message either side will read.
 pub const MAX_MESSAGE: usize = 1 << 20;
 
-/// A session (or the operator) to the server.
-// Transient, one in flight per connection: boxing buys nothing.
-#[allow(clippy::large_enum_variant)]
 /// A signature as a byte string: dalek's own serde writes 64 integers.
 mod sig_bytes {
     use ed25519_dalek::Signature;
@@ -40,6 +37,9 @@ mod sig_bytes {
     }
 }
 
+/// A session (or the operator) to the server.
+// Transient, one in flight per connection: boxing buys nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Req {
     /// Which flock, and at which epoch.
