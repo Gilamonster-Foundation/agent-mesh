@@ -161,6 +161,18 @@ impl Mcp {
         }
     }
 
+    /// The `inputSchema` a client would honour for `name`.
+    fn schema(&mut self, name: &str) -> Value {
+        let r = self.rpc("tools/list", json!({}));
+        r["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("{name} not listed"))["inputSchema"]
+            .clone()
+    }
+
     fn tool_names(&mut self) -> Vec<String> {
         let r = self.rpc("tools/list", json!({}));
         r["result"]["tools"]
@@ -357,4 +369,124 @@ fn server_signed_kinds_are_refused_by_admission_not_by_the_tool() {
         );
     }
     assert_eq!(f.log(&shep), before, "none of them reached the log");
+}
+
+/// A small JSON Schema check, enough for the schemas the flock tools publish:
+/// `type` (one name or several), `properties`, `required` and an
+/// `additionalProperties` schema.
+fn conforms(schema: &Value, v: &Value) -> bool {
+    let is = |t: &str| match t {
+        "object" => v.is_object(),
+        "string" => v.is_string(),
+        "array" => v.is_array(),
+        "integer" | "number" => v.is_number(),
+        "boolean" => v.is_boolean(),
+        "null" => v.is_null(),
+        _ => false,
+    };
+    let typed = match &schema["type"] {
+        Value::String(t) => is(t),
+        Value::Array(ts) => ts.iter().any(|t| is(t.as_str().unwrap_or(""))),
+        _ => true,
+    };
+    if !typed {
+        return false;
+    }
+    let Some(obj) = v.as_object() else {
+        return true;
+    };
+    let required = schema["required"].as_array().cloned().unwrap_or_default();
+    if required
+        .iter()
+        .any(|k| !obj.contains_key(k.as_str().unwrap()))
+    {
+        return false;
+    }
+    obj.iter().all(|(k, x)| match schema["properties"].get(k) {
+        Some(sub) => conforms(sub, x),
+        None => schema
+            .get("additionalProperties")
+            .filter(|a| a.is_object())
+            .is_none_or(|a| conforms(a, x)),
+    })
+}
+
+#[test]
+fn the_published_schema_accepts_every_body_shape_the_tool_takes() {
+    let f = flock();
+    let (shep, h1) = (f.session("shep"), f.session("h1"));
+    let o = f.cli(&shep, &["brief", "--to", "h1", "--lane", "l1"]);
+    let brief = admitted_cid(&String::from_utf8(o.stdout).unwrap());
+    let mut m = f.mcp(Some(&h1));
+    let schema = m.schema("flock_emit");
+
+    // the documented ack: a unit variant is a string
+    let ack = json!({"kind": "ack", "refs": {"of": brief}, "body": "ack"});
+    assert!(
+        conforms(&schema, &ack),
+        "schema rejects the documented ack: {schema}"
+    );
+    // and a struct variant is an object
+    let result = json!({"kind": "result", "refs": {"brief": brief},
+        "body": {"result": {"outcome": "completed"}}});
+    assert!(conforms(&schema, &result));
+    // the check itself can fail
+    assert!(!conforms(&schema, &json!({"kind": "ack", "body": 7})));
+    assert!(!conforms(&schema, &json!({"body": "ack"})));
+
+    // a client that honoured the schema sends it, and it is admitted
+    assert!(m.tool("flock_emit", ack).unwrap().starts_with("admitted "));
+}
+
+#[test]
+fn every_flock_tool_fails_once_the_bound_socket_stops_being_its_session() {
+    let f = flock();
+    let h1 = f.session("h1");
+    // the socket the server is started with is a link under the flock's run/
+    let link = f.dir.join("run").join("session-bound.sock");
+    std::os::unix::fs::symlink(&h1.sock, &link).unwrap();
+    let bound = Sess {
+        _proc: Proc(Command::new("true").spawn().unwrap()),
+        sock: link.clone(),
+    };
+    let mut m = f.mcp(Some(&bound));
+    let args = [
+        ("flock_whoami", json!({})),
+        ("flock_inbox", json!({})),
+        ("flock_status", json!({})),
+        (
+            "flock_emit",
+            json!({"kind": "job", "body": {"job": {"lane": "l", "label": "x"}}}),
+        ),
+    ];
+    for (t, a) in &args {
+        assert!(m.tool(t, a.clone()).is_ok(), "{t} works while bound");
+    }
+
+    // swapped for another flock's live session
+    let other = flock();
+    let theirs = other.session("h1");
+    let before = other.log(&theirs);
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&theirs.sock, &link).unwrap();
+    for (t, a) in &args {
+        assert!(
+            m.tool(t, a.clone()).is_err(),
+            "{t} must fail on another flock's socket"
+        );
+    }
+    assert_eq!(
+        other.log(&theirs),
+        before,
+        "nothing was written to the other flock"
+    );
+
+    // removed
+    std::fs::remove_file(&link).unwrap();
+    for (t, a) in &args {
+        assert!(
+            m.tool(t, a.clone()).is_err(),
+            "{t} must fail with no socket"
+        );
+    }
 }

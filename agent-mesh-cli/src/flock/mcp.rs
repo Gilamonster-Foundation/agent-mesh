@@ -63,7 +63,7 @@ impl FlockTools {
                     "properties": {
                         "kind": { "type": "string" },
                         "refs": { "type": "object", "additionalProperties": { "type": "string" } },
-                        "body": { "type": "object" }
+                        "body": { "type": ["string", "object"] }
                     },
                     "required": ["kind", "body"]
                 }
@@ -73,6 +73,17 @@ impl FlockTools {
 
     /// `None` when `name` is not a flock tool.
     pub fn call(&self, name: &str, args: &Value) -> Option<Result<String>> {
+        if !matches!(
+            name,
+            "flock_whoami" | "flock_inbox" | "flock_status" | "flock_emit"
+        ) {
+            return None;
+        }
+        // The one guard every flock tool passes: the bound socket must still be
+        // a live session of the flock it was started for, on every call.
+        if let Err(e) = self.at.session(&self.home) {
+            return Some(Err(e));
+        }
         Some(match name {
             "flock_whoami" => emit::whoami(&self.home, &self.at).map(|(_, t)| t),
             "flock_inbox" => read::inbox_text(&self.home, &self.at),
