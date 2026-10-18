@@ -215,6 +215,28 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   metadata` unifies features across the workspace and would always see the
   CLI's).
 
+- **`amesh-tui` (step 8b)**, Unix only, a separate crate (`agent-mesh-tui`, bin
+  `amesh-tui`): a read-only terminal view. `amesh-tui --dir <flock dir> --session
+  <session socket> [--once]` follows the log through a verified, saved `Reader`
+  (state under `<flock>/tui/<id of the member's name>/`, private to the user);
+  the stream challenge is signed by the session (`ProveStream`), and the view
+  holds no key and has no emit path. A session of another flock is refused
+  before anything is read. The model is a pure fold of the verified log
+  (`model.rs`); views are newtui components over it. Built: the header (flock,
+  id, member count, `log ✓ N`, epoch, `live` / `stale since #n` / `✗ reason`) and
+  the **Board** (each roster member: role, session state from the log, its own
+  latest `status`, open work: jobs without a `job-end`, lanes briefed to it still
+  submitted or working, unanswered asks; events since it last wrote). Not shown,
+  because the log has no record of them: model, the herdr status tier (step 10),
+  the delegate line (step 13), and refused events (`!`), which live in the
+  server's refusal chain, not on the stream (said in the footer). `--once` prints
+  one frame as text. Proofs: golden text screens (`UPDATE_SNAPSHOTS=1` rewrites),
+  newtui's explorer (selection in range; no key changes the displayed data), a
+  real server and session feeding the model, and the same cargo-tree and
+  compile-probe checks as the read side (`tests_common::readside`) run against
+  the TUI: neither writer feature resolves and no writer API can be named by a
+  consumer of the crate. The Board scrolls to keep the selected member on screen (header and footer fixed). A frame whose checkpoint cannot be saved is rolled back by the reader itself (`Reader::follow` keeps nothing it did not save, and `Reader::open` makes a checkpoint it finds durable (file and directory fsync) before showing it, or does not open: a rename left visible by a failed directory fsync is never presented as saved until it will survive power loss), so the view and `amesh flock watch` only ever show the saved prefix; the TUI header says `cannot save the checkpoint` and keeps the last saved state. Stream, Lane and Waiting views are 8c-8e.
+
 **Planned, not built:** operator approval of a **delegate**
 hand-off (#127's other half; waits on the delegate designation, step 13); device changes
 signed by a listed device (server-signed only today); operator-signed events (`answer`); the rest of

@@ -8,7 +8,7 @@
 
 use crate::fs::{save_atomic, Fs};
 use crate::ReaderError;
-use agent_mesh_flock::{Board, Genesis};
+use agent_mesh_flock::Genesis;
 use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp, StreamChallenge};
 use agent_mesh_flock_server::{FollowError, Follower, Head, Sealed};
 use agent_mesh_protocol::Assertion;
@@ -65,6 +65,18 @@ impl<F: Fs> Reader<F> {
         let frames = match fs.read(&dir.join(FILE))? {
             None => vec![],
             Some(bytes) => {
+                // What is on disk may be visible without being durable: a save
+                // whose directory fsync failed leaves its renamed file in place.
+                // Verifying it proves it is intact, not that it will survive
+                // power loss, so make it durable (the barriers a save ends
+                // with) before it is shown as the saved prefix. If that fails
+                // the reader does not open: nothing older is on hand to show
+                // instead, and a head that might vanish must not be presented
+                // as witnessed.
+                let file = dir.join(FILE);
+                fs.sync_file(&file)
+                    .and_then(|()| fs.sync_dir(dir))
+                    .map_err(ReaderError::Save)?;
                 let cp: Checkpoint = from_canonical_dagcbor_checked(&bytes)
                     .map_err(|e| ReaderError::Invalid(format!("saved state: {e}")))?;
                 for f in &cp.frames {
@@ -100,6 +112,20 @@ impl<F: Fs> Reader<F> {
         Ok(())
     }
 
+    /// Apply a frame and save, as one step: if the save fails the reader goes
+    /// back to the prefix it had, so nothing that was not saved is ever
+    /// visible through [`follower`](Self::follower).
+    fn apply_saved(&mut self, frame: Vec<Sealed>) -> Result<(), ReaderError> {
+        let before = self.follower.clone();
+        self.apply(frame)?;
+        if let Err(e) = self.save() {
+            self.frames.pop();
+            self.follower = before;
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Save atomically; returns the head now witnessed.
     ///
     /// # Errors
@@ -112,7 +138,7 @@ impl<F: Fs> Reader<F> {
             frames: self.frames.clone(),
         })
         .map_err(|e| ReaderError::Invalid(e.to_string()))?;
-        save_atomic(&self.fs, &self.dir, FILE, &bytes)?;
+        save_atomic(&self.fs, &self.dir, FILE, &bytes).map_err(ReaderError::Save)?;
         Ok(self.follower.head().cloned())
     }
 
@@ -149,9 +175,8 @@ impl<F: Fs> Reader<F> {
         loop {
             match w.next_event()? {
                 WatchEvent::Frame(f) => {
-                    self.apply(f.clone())?;
-                    self.save()?;
-                    seen(Seen::Frame(&f, self.follower.board()));
+                    self.apply_saved(f.clone())?;
+                    seen(Seen::Frame(&f, &self.follower));
                 }
                 WatchEvent::Caught(i) => {
                     // the marker must agree with what this reader verified
@@ -161,7 +186,7 @@ impl<F: Fs> Reader<F> {
                             self.follower.admitted()
                         )));
                     }
-                    seen(Seen::Caught(i));
+                    seen(Seen::Caught(i, &self.follower));
                     if once {
                         return Ok("caught up".into());
                     }
@@ -175,10 +200,10 @@ impl<F: Fs> Reader<F> {
 
 /// What [`Reader::follow`] reports, after it is saved.
 pub enum Seen<'a> {
-    /// A verified, saved frame and the board it produced.
-    Frame(&'a [Sealed], &'a Board),
-    /// The replay is over.
-    Caught(u64),
+    /// A verified, saved frame and the verified state after it.
+    Frame(&'a [Sealed], &'a Follower),
+    /// The replay is over, at this index, with the verified state.
+    Caught(u64, &'a Follower),
 }
 
 /// What a stream delivers.

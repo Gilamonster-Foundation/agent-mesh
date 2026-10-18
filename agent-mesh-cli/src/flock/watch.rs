@@ -43,14 +43,19 @@ pub fn watch(home: &Path, w: &Where, from: Option<u64>, once: bool) -> Result<()
     let prove = session_prover(&socket);
     let reason = reader
         .follow(&serve, &prove, once, &mut |seen| match seen {
-            Seen::Frame(frame, board) => {
+            Seen::Frame(frame, follower) => {
                 for s in frame {
-                    if let Some(e) = s.event.content_id().ok().and_then(|id| board.get(&id)) {
+                    if let Some(e) = s
+                        .event
+                        .content_id()
+                        .ok()
+                        .and_then(|id| follower.board().get(&id))
+                    {
                         println!("{}", line(e));
                     }
                 }
             }
-            Seen::Caught(n) => println!("-- caught up at {n} --"),
+            Seen::Caught(n, _) => println!("-- caught up at {n} --"),
         })
         .map_err(|e| anyhow!("{e}"))?;
     if once {

@@ -1,7 +1,7 @@
 //! `frame_fits` is the limit on what a watcher can be sent as one message. A
 //! single event's request now outgrows its frame (the frame cites the author's
 //! certificate), so the boundary is tested on frames directly.
-#![cfg(unix)]
+#![cfg(all(unix, feature = "serve"))]
 mod support;
 
 use agent_mesh_flock::{Body, Kind};
