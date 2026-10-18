@@ -56,6 +56,21 @@ pub fn check_frame_shape(sealed: &[Sealed]) -> Result<(), String> {
 }
 
 impl State {
+    /// The sessions that are live (not ended) and whose member is on the
+    /// current roster.
+    #[must_use]
+    pub fn eligible(&self) -> crate::Eligible {
+        let members = self.board.members();
+        std::sync::Arc::new(
+            self.sessions
+                .live()
+                .filter_map(|(s, _, _)| self.sessions.get(s).map(|i| (s, i)))
+                .filter(|(_, i)| members.iter().any(|m| m.name == i.member))
+                .map(|(s, _)| s.to_owned())
+                .collect(),
+        )
+    }
+
     /// Signer, then the model's table, then the session rules: the order the
     /// log is verified in live and on replay.
     fn vet(

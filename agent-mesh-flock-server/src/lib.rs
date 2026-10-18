@@ -13,8 +13,10 @@
 mod chain;
 mod entry;
 mod error;
+mod follow;
 mod frame;
 mod init;
+mod journal;
 mod keyfile;
 mod lock;
 mod log;
@@ -32,10 +34,12 @@ pub mod wire;
 pub use chain::{verify_record, Chain};
 pub use entry::{Enrolled, Invited};
 pub use error::ServerError;
+pub use follow::{FollowError, Follower};
 pub use frame::{cert_cid, encode, seal, AdmissionRecord, Frame, Sealed};
 pub use init::{
     init, load_genesis, InitSpec, SignedGenesis, GENESIS_FILE, KEY_FILE, LOG_FILE, REFUSALS_FILE,
 };
+pub use journal::{Cursor, Eligible, Head, Journal, Published, Resume};
 pub use keyfile::{load_server_key, store_server_key};
 pub use log::CrashPlan;
 #[cfg(unix)]

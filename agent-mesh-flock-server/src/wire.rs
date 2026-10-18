@@ -4,7 +4,7 @@
 //! as a whole, and every certificate, challenge and event inside is the
 //! protocol's own type.
 
-use crate::ServerError;
+use crate::{Head, Sealed, ServerError};
 use agent_mesh_flock::Event;
 use agent_mesh_protocol::agent_key::PossessionChallenge;
 use agent_mesh_protocol::{Assertion, CertChain};
@@ -72,6 +72,41 @@ pub enum Req {
     },
     /// A clean goodbye: the session is recorded `closed`, not `lost`.
     End,
+    /// Ask for a stream challenge (the first step of `Watch`).
+    WatchBegin,
+    /// Turn this connection into a stream of frames after `from` (from the
+    /// start with none). `proof` is the session key's signature over the
+    /// challenge's id; it is what authorizes the stream, whoever is on the
+    /// other end of the socket.
+    Watch {
+        /// The saved head to resume from.
+        from: Option<Head>,
+        /// The signature over [`StreamChallenge::id`].
+        proof: Box<Assertion>,
+    },
+}
+
+/// What a session signs to open a stream: fresh and bound to this flock and
+/// this connection. Transient: identified by content, never stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamChallenge {
+    /// The flock.
+    pub flock: ContentId,
+    /// Fresh per connection and used once.
+    pub nonce: [u8; 32],
+}
+
+impl StreamChallenge {
+    /// The id the session signs.
+    ///
+    /// # Errors
+    /// Encoding failure.
+    pub fn id(&self) -> Result<ContentId, ServerError> {
+        use content_addressable::ContentAddressable as _;
+        MerkleNode::genesis(self.clone())
+            .content_id()
+            .map_err(|e| ServerError::Encoding(e.to_string()))
+    }
 }
 
 /// The server's answer.
@@ -113,6 +148,29 @@ pub enum Resp {
         index: u64,
         /// It was already there.
         duplicate: bool,
+    },
+    /// A stream challenge to sign.
+    StreamChallenge(StreamChallenge),
+    /// One committed frame of the stream, whole.
+    Frame(Vec<Sealed>),
+    /// The replay is over: everything up to this index has been delivered;
+    /// what follows is live.
+    Caught {
+        /// The last index of the replay.
+        index: u64,
+    },
+    /// The server's history is shorter than the resume token's index.
+    Behind {
+        /// How many events the server has.
+        have: u64,
+    },
+    /// The resume token is not on this server's history: another record at
+    /// that index, or not the end of a frame.
+    Diverged,
+    /// The stream is over.
+    Closed {
+        /// Why.
+        reason: String,
     },
     /// Done.
     Ok,
@@ -160,4 +218,16 @@ pub fn read_msg<T: DeserializeOwned + Serialize>(
     from_canonical_dagcbor_checked(&buf)
         .map(Some)
         .map_err(|e| ServerError::Encoding(e.to_string()))
+}
+
+/// Whether `frame` can be delivered to a watcher as one [`Resp::Frame`]: the
+/// message limit applies to the response, which carries the admission record
+/// and its signature on top of the request that caused it.
+///
+/// # Errors
+/// Encoding failure.
+pub fn frame_fits(frame: &[Sealed]) -> Result<bool, ServerError> {
+    let bytes = to_canonical_dagcbor(&Resp::Frame(frame.to_vec()))
+        .map_err(|e| ServerError::Encoding(e.to_string()))?;
+    Ok(bytes.len() <= MAX_MESSAGE)
 }

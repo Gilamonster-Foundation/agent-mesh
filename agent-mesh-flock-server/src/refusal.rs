@@ -53,6 +53,8 @@ pub enum Reason {
     HeadMismatch,
     /// `replaces` is not the current roster.
     StaleRoster,
+    /// The frame it would commit is too large to deliver to a watcher.
+    TooLarge,
     /// Only a server-signed roster changes operator devices.
     DevicesLocked,
     /// `devices` on a member that is not an operator.
@@ -85,6 +87,7 @@ impl From<&Refusal> for Reason {
             Refusal::AdapterCannotAck => Self::AdapterCannotAck,
             Refusal::HeadMismatch => Self::HeadMismatch,
             Refusal::StaleRoster => Self::StaleRoster,
+            Refusal::TooLarge => Self::TooLarge,
             Refusal::DevicesLocked => Self::DevicesLocked,
             Refusal::DevicesOnNonOperator => Self::DevicesOnNonOperator,
             Refusal::DuplicateMember => Self::DuplicateMember,

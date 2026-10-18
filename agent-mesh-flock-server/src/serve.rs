@@ -7,9 +7,10 @@
 //! server key file anyway). The SSH stream of step 9 authenticates by a fresh
 //! signed challenge instead; nothing here may be read as that.
 
-use crate::wire::{read_msg, write_msg, Req, Resp};
-use crate::{CrashPlan, Server, ServerError};
-use agent_mesh_flock::EndReason;
+use crate::wire::{read_msg, write_msg, Req, Resp, StreamChallenge};
+use crate::{CrashPlan, Head, Journal, Resume, Server, ServerError};
+use agent_mesh_flock::{EndReason, Kind};
+use rand::RngCore as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -87,6 +88,8 @@ impl Signal {
 /// poisons itself), so the loop stops too instead of carrying on half-alive.
 struct Shared {
     server: Mutex<Server>,
+    /// The published log: streams read it without the server's lock.
+    journal: Arc<Journal>,
     path: PathBuf,
     /// The epoch and the first failure, with their condvar.
     signal: Signal,
@@ -108,6 +111,7 @@ impl Serving {
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
+        self.shared.journal.stop();
         end_connections(&self.shared);
         self.failure()
     }
@@ -131,6 +135,13 @@ impl Serving {
         lock(&self.shared.server).plan_crash(plan);
     }
 
+    /// Test-only: run `f` on the served server (an administration primitive
+    /// that has no wire request yet, such as `handoff`).
+    #[doc(hidden)]
+    pub fn with_server<T>(&self, f: impl FnOnce(&mut Server) -> T) -> T {
+        with(&self.shared, f)
+    }
+
     /// Stop accepting, end every connection, and release the log: when this
     /// returns the log's lock is free.
     pub fn stop(mut self) {
@@ -139,6 +150,7 @@ impl Serving {
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
+        self.shared.journal.stop();
         end_connections(&self.shared);
     }
 }
@@ -155,8 +167,10 @@ pub fn serve(server: Server, listener: UnixListener) -> std::io::Result<Serving>
         .ok_or_else(|| std::io::Error::other("unnamed socket"))?;
     let stop = Arc::new(AtomicBool::new(false));
     let signal = Signal::new(server.epoch());
+    let journal = server.journal();
     let shared = Arc::new(Shared {
         server: Mutex::new(server),
+        journal,
         signal,
         path,
         conns: Mutex::new(Vec::new()),
@@ -240,26 +254,43 @@ fn is_fatal(e: &ServerError) -> bool {
 /// session's end. A goodbye is answered `Ok` only once the end is durable.
 fn connection(shared: &Shared, mut conn: UnixStream) {
     let mut bound: Option<String> = None;
+    let mut challenge: Option<StreamChallenge> = None;
     while let Ok(Some(req)) = read_msg::<Req>(&mut conn) {
-        let goodbye = matches!(req, Req::End);
-        let result = if goodbye {
-            bound
-                .take()
-                .map_or(Ok(()), |s| {
-                    with(shared, |srv| srv.end_session(&s, EndReason::Closed))
-                })
-                .map(|()| Resp::Ok)
-        } else {
-            with(shared, |srv| handle(srv, req, &mut bound))
-        };
-        let resp = result.unwrap_or_else(|e| {
-            if is_fatal(&e) {
-                fail(shared, &e);
+        match req {
+            Req::WatchBegin => {
+                let mut nonce = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut nonce);
+                let ch = StreamChallenge {
+                    flock: with(shared, |s| s.flock()),
+                    nonce,
+                };
+                challenge = Some(ch.clone());
+                if write_msg(&mut conn, &Resp::StreamChallenge(ch)).is_err() {
+                    break;
+                }
+                continue;
             }
-            Resp::Err(e.to_string())
-        });
-        if write_msg(&mut conn, &resp).is_err() || goodbye {
-            break;
+            Req::Watch { from, proof } => {
+                // the challenge is spent whatever happens: one try per connection
+                let opened = challenge
+                    .take()
+                    .ok_or_else(|| ServerError::Session("ask for a stream challenge first".into()))
+                    .and_then(|c| c.id())
+                    .and_then(|id| with(shared, |s| s.authorize_stream(&proof, &id)));
+                match opened {
+                    Ok(session) => stream(shared, &mut conn, &session, from.as_ref()),
+                    Err(e) => {
+                        let _ = write_msg(&mut conn, &Resp::Err(e.to_string()));
+                    }
+                }
+                break;
+            }
+            req => {
+                if !step(shared, &mut conn, req, &mut bound) {
+                    break;
+                }
+                continue;
+            }
         }
     }
     if let Some(s) = bound {
@@ -268,6 +299,82 @@ fn connection(shared: &Shared, mut conn: UnixStream) {
             if is_fatal(&e) {
                 fail(shared, &e);
             }
+        }
+    }
+}
+
+/// One ordinary request; false when the connection should end.
+fn step(shared: &Shared, conn: &mut UnixStream, req: Req, bound: &mut Option<String>) -> bool {
+    let goodbye = matches!(req, Req::End);
+    let result = if goodbye {
+        bound
+            .take()
+            .map_or(Ok(()), |s| {
+                with(shared, |srv| srv.end_session(&s, EndReason::Closed))
+            })
+            .map(|()| Resp::Ok)
+    } else {
+        with(shared, |srv| handle(srv, req, bound))
+    };
+    let resp = result.unwrap_or_else(|e| {
+        if is_fatal(&e) {
+            fail(shared, &e);
+        }
+        Resp::Err(e.to_string())
+    });
+    write_msg(conn, &resp).is_ok() && !goodbye
+}
+
+/// Serve the frames after `from`, replay then live, until the session's own
+/// end or the journal stops. Nothing here takes the server's lock.
+fn stream(shared: &Shared, conn: &mut UnixStream, session: &str, from: Option<&Head>) {
+    let mut cursor = match shared.journal.cursor_from(from) {
+        Ok(c) => c,
+        Err(Resume::Behind { have }) => {
+            let _ = write_msg(conn, &Resp::Behind { have });
+            return;
+        }
+        Err(_) => {
+            let _ = write_msg(conn, &Resp::Diverged);
+            return;
+        }
+    };
+    let replay_end = shared.journal.len();
+    // Eligibility is re-checked at epoch boundaries from the frame on, not
+    // for history before this session existed.
+    let from_index = with(shared, |s| s.session_start_index(session)).unwrap_or(0);
+    let mut caught = false;
+    let mut at = cursor.delivered();
+    loop {
+        if !caught && at >= replay_end {
+            caught = true;
+            if write_msg(conn, &Resp::Caught { index: at }).is_err() {
+                return;
+            }
+        }
+        let Some((frame, eligible)) = cursor.next_frame() else {
+            let _ = write_msg(
+                conn,
+                &Resp::Closed {
+                    reason: "the server stopped".into(),
+                },
+            );
+            return;
+        };
+        at = frame.last().map_or(at, |s| s.record.payload.index);
+        let bump = frame.iter().any(|s| s.event.payload.kind == Kind::Epoch);
+        let over = bump && at >= from_index && !eligible.contains(session);
+        if write_msg(conn, &Resp::Frame(frame.to_vec())).is_err() {
+            return;
+        }
+        if over {
+            let _ = write_msg(
+                conn,
+                &Resp::Closed {
+                    reason: "your session ended or its member left the roster".into(),
+                },
+            );
+            return;
         }
     }
 }
@@ -318,6 +425,11 @@ fn handle(server: &mut Server, req: Req, bound: &mut Option<String>) -> Result<R
             }
         }
         Req::End => Resp::Ok,
+        Req::WatchBegin | Req::Watch { .. } => {
+            return Err(ServerError::Session(
+                "a stream is opened by the connection".into(),
+            ))
+        }
     })
 }
 

@@ -19,3 +19,27 @@ pub enum SessionError {
     #[error("cannot protect the key: {0}")]
     Unprotected(String),
 }
+
+/// Why reading a flock failed.
+#[derive(Debug, thiserror::Error)]
+pub enum ReaderError {
+    /// Another reader holds this state directory.
+    #[error("another reader holds this state directory")]
+    Locked,
+    /// The server's history is not an extension of the saved head: shorter,
+    /// rewritten, or with an altered prefix. Never resynchronized silently.
+    #[error("rollback: {0}")]
+    Rollback(String),
+    /// A frame, or the saved state, does not verify.
+    #[error("invalid: {0}")]
+    Invalid(String),
+    /// The stream was refused or ended.
+    #[error("stream: {0}")]
+    Stream(String),
+    /// Socket or file error.
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    /// Wire or encoding error.
+    #[error("{0}")]
+    Wire(#[from] agent_mesh_flock_server::ServerError),
+}

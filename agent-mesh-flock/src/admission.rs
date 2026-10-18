@@ -52,6 +52,8 @@ pub enum Refusal {
     HeadMismatch,
     /// `replaces` is not the current roster.
     StaleRoster,
+    /// The frame this would commit is too large to deliver to a watcher.
+    TooLarge,
     /// Only a server-signed roster changes operator devices.
     DevicesLocked,
     /// `devices` on a member that is not an operator.

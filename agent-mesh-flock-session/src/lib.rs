@@ -8,12 +8,16 @@
 
 mod ctl;
 mod error;
+mod fs;
 mod harden;
 mod locked;
+mod reader;
 mod session;
 
 pub use ctl::{call, CtlReq, CtlResp};
-pub use error::SessionError;
+pub use error::{ReaderError, SessionError};
+pub use fs::{save_atomic, Fs, RealFs};
 pub use harden::{harden, Hardening, Policy};
 pub use locked::Locked;
+pub use reader::{Reader, Watch, WatchEvent};
 pub use session::{run, Session};

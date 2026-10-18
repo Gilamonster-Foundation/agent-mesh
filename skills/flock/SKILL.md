@@ -109,10 +109,33 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   have `prev = handoff`, which the session cannot yet supply: step 7). The
   server's first-link check is unchanged.
 
+- **`watch --from (index, signed head)`** (library and `serve`; the `amesh flock
+  watch` command is step 7). One stream carries the replay, a `Caught` marker,
+  then live frames, each exactly once: the server publishes a frame to a
+  journal only after its fsync, and readers read the journal without the
+  writer's lock. The resume token is the last signed admission record. The
+  reader (`Reader`, in `agent-mesh-flock-session`) verifies every frame from
+  its own saved head, so an older backup, a shorter history, or an altered
+  prefix is refused as a `Rollback` whatever the server says; a server that
+  forks different histories to different readers is not caught by one reader.
+  The reader's state is one file (the verified frames) saved by write temp,
+  fsync, rename, fsync directory; a head is witnessed only after that returns.
+  A stream needs an *active* session of a *current* member signing a fresh
+  challenge bound to the flock and the connection (a certified non-member, a
+  pending or ended session, or a proof from another connection is refused),
+  and it closes right after any epoch-bearing frame after which its session is no
+  longer live or its member is no longer on the roster (a `session-end`, a
+  hand-off away, or an existing bump after a roster change; the roster change
+  alone does not bump yet, step 6b). A request whose frame would not fit one
+  stream message is refused (`TooLarge`) before it is committed, so every
+  admitted frame can be watched. One reader per state directory (locked). Ceilings: the journal is in memory; the reader rewrites its
+  whole file per save.
+
 **Planned, not built:** the epoch bump when a member is removed from the
-roster; operator approval of a **delegate** hand-off (#127's other half; waits on the
-delegate designation, step 13); device changes signed by a listed device
-(server-signed only today); operator-signed events (`answer`); `watch`; the rest of
+roster (until then a dropped member cannot open a stream, but one already
+open is not closed by the roster event; step 6b); operator approval of a **delegate**
+hand-off (#127's other half; waits on the delegate designation, step 13); device changes
+signed by a listed device (server-signed only today); operator-signed events (`answer`); the rest of
 the CLI (`join`, `inbox`, `take`, `result`, `verdict`, `run`, `answer`; only `init`,
 `serve`, `invite`, `session` and `panes` exist); `amesh-tui`; attaching from another host; the
 `amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native
