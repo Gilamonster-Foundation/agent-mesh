@@ -96,6 +96,20 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   flock created before it cannot be opened: re-run `amesh flock init`. Release
   note for agent-mesh-protocol: the Rust API is unchanged, its CBOR encoding is
   not (minor bump);
+- **the attach socket** (`amesh flock serve --attach`, Unix): a second socket,
+  `run/attach.sock` (mode 0600, private directory), the surface a remote host's
+  bridge will connect to (step 9b; the bridge is not built yet). Without
+  `--attach` nothing remote can reach the flock. On it only these requests are
+  offered: `Hello`, `Genesis` (the public genesis node; its hash is the flock
+  id, which a remote attacher checks against the id it was given), enroll,
+  renew, `Head`, `Admit`, the stream challenge and `Watch`, and goodbye. Minting
+  an invite stays on the owner socket; the attach socket answers "not offered on
+  the attach socket". The list has one arm per request and no wildcard, so a new
+  request cannot be added without deciding whether a remote host may make it.
+  Whoever is on the far end still proves membership the usual way (invite token,
+  possession proof, a signature over a fresh challenge bound to flock and
+  connection). v1 attaches same-user hosts only: the host-to-host handshake
+  (the bus's auto-team rule) requires both hosts to belong to one user;
 - **MCP tools** (`amesh mcp --flock-session <sock>` or `AMESH_FLOCK_SESSION`,
   Unix): `flock_whoami`, `flock_inbox`, `flock_status` and `flock_emit{kind,
   refs, body}` join the `mesh_*` tools, only when a session is given. The
@@ -205,7 +219,7 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
 **Planned, not built:** operator approval of a **delegate**
 hand-off (#127's other half; waits on the delegate designation, step 13); device changes
 signed by a listed device (server-signed only today); operator-signed events (`answer`); the rest of
-the CLI's `answer`; `amesh-tui`; attaching from another host; the
+the CLI's `answer`; `amesh-tui`; attaching from another host (9b: the bridge and `attach` proxy; 9c: cited files; 9d: a real-sshd run); the
 `amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native
 newt receive. Until they land, lanes run on files
 as the herdr-flock skill describes. Status: epic #109.
