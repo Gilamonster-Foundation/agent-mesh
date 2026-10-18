@@ -807,7 +807,7 @@ fn a_catch_up_marker_that_disagrees_with_the_verified_head_is_an_error() {
 }
 
 #[test]
-fn a_request_whose_frame_could_not_be_delivered_is_refused_and_one_that_just_fits_is_watchable() {
+fn a_frame_that_nearly_fills_the_message_limit_is_committed_and_watchable() {
     use agent_mesh_flock_server::wire::MAX_MESSAGE;
     use content_addressable::canonical::to_canonical_dagcbor;
     let mut r = rig();
@@ -827,23 +827,11 @@ fn a_request_whose_frame_could_not_be_delivered_is_refused_and_one_that_just_fit
         }
     }
     let size = to_canonical_dagcbor(&Resp::Frame(last)).unwrap().len();
-    let fits = probe + (MAX_MESSAGE - size);
-    let before = r.serving().with_server(|s| s.admitted());
-    // over the limit: refused, nothing committed
-    // (byte strings are CBOR integer arrays, so a frame's size moves by a few
-    // hundred bytes with the random signature bytes: stay well clear of the
-    // edge on both sides)
-    // (the window is the record + its signature, ~850 bytes: the request fits
-    // the wire limit while the frame it would commit does not)
-    const SLACK: usize = 300;
-    let refused = r.try_brief(&mut shep, &"x".repeat(fits + SLACK));
-    assert!(
-        matches!(refused, Resp::Err(ref why) if why.contains("TooLarge")),
-        "{refused:?}"
-    );
-    assert_eq!(r.serving().with_server(|s| s.admitted()), before);
-    // just under the limit: committed, and the stream can carry it
-    let index = r.brief(&mut shep, &"x".repeat(fits - SLACK));
+    // a lane that leaves the frame a few KB under the limit (the request
+    // carries the author's certificate chain, the frame only cites it, so the
+    // request is the larger of the two and the wire limit binds first)
+    let fits = probe + (MAX_MESSAGE - size) - 4_000;
+    let index = r.brief(&mut shep, &"x".repeat(fits));
     let (kinds, _) = kinds_until_closed_or_caught(
         &mut Watch::open(&r.sock, &key_prover(&shep.key), None).unwrap(),
     );
