@@ -50,6 +50,9 @@ mod sig_bytes {
 pub enum Req {
     /// Which flock, and at which epoch.
     Hello,
+    /// The flock's genesis node: the public root a remote attacher checks
+    /// against the flock id it was given.
+    Genesis,
     /// Mint an invite for a member (the local owner's surface).
     #[cfg(feature = "serve")]
     Invite {
@@ -157,6 +160,8 @@ pub enum Resp {
         /// The current epoch.
         epoch: u64,
     },
+    /// Answer to `Genesis`.
+    Genesis(MerkleNode<agent_mesh_flock::Genesis>),
     /// Answer to `Invite`.
     #[cfg(feature = "serve")]
     Invited {
