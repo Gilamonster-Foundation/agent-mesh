@@ -8,7 +8,7 @@
 
 use crate::fs::{save_atomic, Fs};
 use crate::ReaderError;
-use agent_mesh_flock::{Board, Genesis};
+use agent_mesh_flock::Genesis;
 use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp, StreamChallenge};
 use agent_mesh_flock_server::{FollowError, Follower, Head, Sealed};
 use agent_mesh_protocol::Assertion;
@@ -151,7 +151,7 @@ impl<F: Fs> Reader<F> {
                 WatchEvent::Frame(f) => {
                     self.apply(f.clone())?;
                     self.save()?;
-                    seen(Seen::Frame(&f, self.follower.board()));
+                    seen(Seen::Frame(&f, &self.follower));
                 }
                 WatchEvent::Caught(i) => {
                     // the marker must agree with what this reader verified
@@ -161,7 +161,7 @@ impl<F: Fs> Reader<F> {
                             self.follower.admitted()
                         )));
                     }
-                    seen(Seen::Caught(i));
+                    seen(Seen::Caught(i, &self.follower));
                     if once {
                         return Ok("caught up".into());
                     }
@@ -175,10 +175,10 @@ impl<F: Fs> Reader<F> {
 
 /// What [`Reader::follow`] reports, after it is saved.
 pub enum Seen<'a> {
-    /// A verified, saved frame and the board it produced.
-    Frame(&'a [Sealed], &'a Board),
-    /// The replay is over.
-    Caught(u64),
+    /// A verified, saved frame and the verified state after it.
+    Frame(&'a [Sealed], &'a Follower),
+    /// The replay is over, at this index, with the verified state.
+    Caught(u64, &'a Follower),
 }
 
 /// What a stream delivers.

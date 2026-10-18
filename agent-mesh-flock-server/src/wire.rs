@@ -25,6 +25,7 @@ use std::io::{Read, Write};
 pub const MAX_MESSAGE: usize = 1 << 20;
 
 /// A signature as a byte string: dalek's own serde writes 64 integers.
+#[cfg(feature = "serve")]
 mod sig_bytes {
     use ed25519_dalek::Signature;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
