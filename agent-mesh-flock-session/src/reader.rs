@@ -11,7 +11,7 @@ use crate::ReaderError;
 use agent_mesh_flock::{Board, Genesis};
 use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp, StreamChallenge};
 use agent_mesh_flock_server::{FollowError, Follower, Head, Sealed};
-use agent_mesh_protocol::{AgentKey, Assertion};
+use agent_mesh_protocol::Assertion;
 use content_addressable::canonical::{from_canonical_dagcbor_checked, to_canonical_dagcbor};
 use content_addressable::MerkleNode;
 use serde::{Deserialize, Serialize};
@@ -23,13 +23,6 @@ const FILE: &str = "reader.state";
 /// Signs a stream challenge: the session process in production (the key never
 /// leaves it), a held key in tests.
 pub type Prover<'a> = &'a dyn Fn(&StreamChallenge) -> Result<Assertion, ReaderError>;
-
-/// A prover over a key held in this process.
-pub fn key_prover(
-    key: &AgentKey,
-) -> impl Fn(&StreamChallenge) -> Result<Assertion, ReaderError> + '_ {
-    move |ch| Ok(Assertion::sign(key, &ch.id()?))
-}
 
 #[derive(Serialize, Deserialize)]
 struct Checkpoint {

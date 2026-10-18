@@ -24,6 +24,6 @@ pub use fs::{save_atomic, Fs, RealFs};
 pub use harden::{harden, Hardening, Policy};
 #[cfg(feature = "emit")]
 pub use locked::Locked;
-pub use reader::{key_prover, Prover, Reader, Seen, Watch, WatchEvent};
+pub use reader::{Prover, Reader, Seen, Watch, WatchEvent};
 #[cfg(feature = "emit")]
 pub use session::{run, Session};

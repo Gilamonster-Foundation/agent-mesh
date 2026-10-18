@@ -180,7 +180,17 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   `ProveStream` client) and the types. The workspace entries are
   `default-features = false`, so a member that writes asks for the writer
   (the CLI does); a read-only member (the TUI, step 8b) takes them as they
-  stand. `agent-mesh-flock-session/tests/read_side.rs` enforces it from
+  stand. With both off, no signing or mutating API resolves for a consumer:
+  `seal`, `RefusalEntry::sign`, `Server`, `init`, `Session`, the request
+  variants `Invite`/`EnrollBegin`/`EnrollFinish`/`Renew`/`RenewFinish`/`Head`/
+  `Admit`/`End` and `CtlReq::{Emit, Announce, End}` are all gated, and the held-key
+  `key_prover` lives only in test code. What stays is verify, follow and watch
+  (`Snapshot`, `Follower`, `Reader`/`Watch`, `session_prover`, the stream
+  requests, `read_msg`/`write_msg` as plain framing). The session's proof
+  renews its own certificate first (intended). `read_side_api.rs` proves it by
+  compiling a scratch consumer (writer APIs must fail, the same lines must
+  compile with the writer on, the read API must compile), and
+  `agent-mesh-flock-session/tests/read_side.rs` enforces the feature names from
   `cargo tree -p … --format "{p}|{f}"` (per-package resolution; `cargo
   metadata` unifies features across the workspace and would always see the
   CLI's).

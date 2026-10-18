@@ -40,6 +40,7 @@ pub enum CtlReq {
         challenge: StreamChallenge,
     },
     /// Say goodbye and exit.
+    #[cfg(feature = "emit")]
     End,
 }
 
@@ -68,6 +69,7 @@ pub enum CtlResp {
     /// Answer to `ProveStream`.
     Proof(Box<Assertion>),
     /// The session is closing.
+    #[cfg(feature = "emit")]
     Ended,
     /// Refused or failed.
     Err(String),

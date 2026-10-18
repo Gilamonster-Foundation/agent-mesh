@@ -7,7 +7,9 @@
 
 use crate::ServerError;
 use agent_mesh_flock::Refusal;
-use agent_mesh_protocol::{AgentKey, Assertion};
+#[cfg(feature = "serve")]
+use agent_mesh_protocol::AgentKey;
+use agent_mesh_protocol::Assertion;
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
 use serde::{Deserialize, Serialize};
 
@@ -126,6 +128,7 @@ impl RefusalEntry {
     ///
     /// # Errors
     /// Encoding failure.
+    #[cfg(feature = "serve")]
     pub fn sign(
         server: &AgentKey,
         prev: ContentId,

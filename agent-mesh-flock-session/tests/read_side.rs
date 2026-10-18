@@ -109,6 +109,8 @@ fn the_check_can_see_the_writer_when_it_is_on() {
         "{:?}",
         ours(&cli)
     );
+    // the CLI's flock-session dependency is cfg(unix): no session crate on Windows
+    #[cfg(unix)]
     assert!(
         has(&cli, "agent-mesh-flock-session", "emit"),
         "{:?}",

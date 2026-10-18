@@ -7,7 +7,7 @@ use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp};
 use agent_mesh_flock_server::{
     bind_private, init, load_genesis, serve, InitSpec, Sealed, Server, Serving, LOG_FILE,
 };
-use agent_mesh_flock_session::{key_prover, Fs, Reader, ReaderError, RealFs, Watch, WatchEvent};
+use agent_mesh_flock_session::{Fs, Reader, ReaderError, RealFs, Watch, WatchEvent};
 use agent_mesh_protocol::{AgentKey, AgentMetadata, Assertion, Caveats, UserKey};
 use content_addressable::{ContentAddressable, MerkleNode};
 use ed25519_dalek::{Signer, SigningKey};
@@ -22,6 +22,14 @@ struct Rig {
     sock: PathBuf,
     serving: Option<Serving>,
     at: u64,
+}
+
+/// A prover over a key the test holds: test code may sign, the library may not.
+fn key_prover(
+    key: &AgentKey,
+) -> impl Fn(&agent_mesh_flock_server::wire::StreamChallenge) -> Result<Assertion, ReaderError> + '_
+{
+    move |ch| Ok(Assertion::sign(key, &ch.id().unwrap()))
 }
 
 fn spec() -> InitSpec {

@@ -40,7 +40,9 @@ pub use chain::{verify_record, Chain};
 pub use entry::{Enrolled, Invited};
 pub use error::ServerError;
 pub use follow::{FollowError, Follower};
-pub use frame::{cert_cid, encode, seal, AdmissionRecord, Frame, Sealed};
+#[cfg(feature = "serve")]
+pub use frame::seal;
+pub use frame::{cert_cid, encode, AdmissionRecord, Frame, Sealed};
 #[cfg(feature = "serve")]
 pub use init::{init, InitSpec};
 pub use init::{load_genesis, SignedGenesis, GENESIS_FILE, KEY_FILE, LOG_FILE, REFUSALS_FILE};
