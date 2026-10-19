@@ -17,9 +17,10 @@ mod discover;
 mod emit;
 #[cfg(unix)]
 pub(crate) mod mcp;
-// wired by `amesh flock nudge` (step 10c)
-#[allow(dead_code)]
+#[cfg(unix)]
 mod nudge;
+#[cfg(unix)]
+mod nudging;
 mod panes;
 #[cfg(unix)]
 mod read;
@@ -249,6 +250,16 @@ pub enum FlockCommand {
         #[arg(long)]
         once: bool,
     },
+    /// The herdr adapter: prompt a member's pane to `take` a brief or review
+    /// addressed to it, and record that (or why not) in the log. Run it as the
+    /// adapter member's session. Best effort: herdr cannot prompt only if idle.
+    #[cfg(unix)]
+    Nudge {
+        #[command(flatten)]
+        at: Where,
+        #[command(flatten)]
+        opts: nudging::Opts,
+    },
     /// Show the roster next to the herdr panes that carry its members.
     /// Read-only: reads the log without its lock and asks herdr only to list.
     Panes {
@@ -369,6 +380,8 @@ pub async fn run(home: PathBuf, cmd: FlockCommand) -> Result<()> {
         }
         #[cfg(unix)]
         FlockCommand::Watch { at, from, once } => watch::watch(&home, &at, from, once),
+        #[cfg(unix)]
+        FlockCommand::Nudge { at, opts } => nudging::run(&home, &at, &opts),
         FlockCommand::Panes {
             name,
             dir,
