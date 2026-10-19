@@ -319,3 +319,10 @@ fn a_second_answer_is_a_conflict_and_a_relay_closes_nothing() {
     assert_eq!(r.conflict, Some(ConflictKind::SecondCloser { first }));
     assert_eq!(f.server.board().closer_of(&f.ask), Some(first));
 }
+
+#[test]
+fn the_servers_own_certificate_is_not_a_device() {
+    let (mut f, _) = flock();
+    let server_cert = f.env.server_key().cert().clone();
+    assert!(f.server.register_device(server_cert).is_err());
+}
