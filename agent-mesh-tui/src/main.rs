@@ -51,7 +51,7 @@ mod run {
         /// Print one frame as text and exit, instead of opening the terminal.
         #[arg(long)]
         once: bool,
-        /// With --once, the view to print: board, stream or lane.
+        /// With --once, the view to print: board, stream, lane or waiting.
         #[arg(long, default_value = "board", requires = "once")]
         tab: String,
         /// Where a root the events cite is on this host (`name=path`, repeat
@@ -92,6 +92,10 @@ mod run {
         let mut app = App::new(feed.model(link));
         let rows = match tab {
             "board" => app.model().members.len(),
+            "waiting" => {
+                app.handle(Key::Char('4'));
+                app.model().waiting.len() + 2
+            }
             "stream" => {
                 app.handle(Key::Char('2'));
                 app.model().events.len()
@@ -101,7 +105,7 @@ mod run {
                 app.set_drift(check_all(roots, &app.cited_files()));
                 app.model().lanes.len() + app.cited_files().len() + 12
             }
-            other => bail!("no view called {other}: board, stream or lane"),
+            other => bail!("no view called {other}: board, stream, lane or waiting"),
         };
         let height = u16::try_from(rows + 5).unwrap_or(u16::MAX);
         print!("{}", render::to_text(&app, 110, height));

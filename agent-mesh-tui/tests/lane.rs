@@ -309,12 +309,12 @@ fn a_lane_the_log_grows_keeps_its_selection_and_its_known_files() {
 fn tabs_cycle_through_the_lane_view_both_ways() {
     let w = world();
     let mut app = App::new(model_of(&w.f));
-    for want in [Tab::Stream, Tab::Lane, Tab::Board] {
+    for want in [Tab::Stream, Tab::Lane, Tab::Waiting, Tab::Board] {
         app.handle(Key::Tab);
         assert_eq!(app.tab(), want);
     }
     app.handle(Key::BackTab);
-    assert_eq!(app.tab(), Tab::Lane);
+    assert_eq!(app.tab(), Tab::Waiting);
 }
 
 fn alphabet() -> Vec<Key> {

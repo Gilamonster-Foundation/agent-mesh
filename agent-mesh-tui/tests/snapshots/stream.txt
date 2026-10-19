@@ -1,6 +1,6 @@
 amesh-tui · flock fx · id ············ · 7 members
 log ✓ 24 · epoch 1 · live
- Board  [Stream]  Lane
+ Board  [Stream]  Lane   Waiting
       # KIND          MEMBER   LANE     SUMMARY
       1 invite        server   -        for shep
       2 session-start server   -        shep started
