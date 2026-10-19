@@ -129,7 +129,7 @@ pub(crate) fn claims(board: &Board, sessions: &Sessions) -> BTreeMap<String, Str
 
 /// [`claims`] herdr still lists (and that are in `tab`, if one is given).
 fn announced(snap: &Snapshot, live: &[Pane], tab: Option<&str>) -> BTreeMap<String, String> {
-    claims(snap.board(), &snap.sessions())
+    claims(snap.board(), snap.sessions())
         .into_iter()
         .filter(|(_, pane)| {
             live.iter()

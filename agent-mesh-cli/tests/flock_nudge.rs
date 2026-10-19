@@ -356,3 +356,13 @@ fn a_map_and_a_sessions_own_pane_claim_choose_the_pane_when_no_label_does() {
     );
     fake.audit();
 }
+
+#[test]
+fn a_brief_that_already_has_a_result_is_not_nudged() {
+    let f = flock4();
+    let (fake, shep, h1, ad) = (fake(), f.session("shep"), f.session("h1"), f.session("ad"));
+    let brief = f.emit(&shep, &["brief", "--to", "h1", "--lane", "l1"]);
+    f.emit(&h1, &["result", &brief, "--outcome", "completed"]);
+    ok(&nudge(&f, &fake, &ad, &[]));
+    assert!(fake.calls().is_empty(), "a closed brief was nudged");
+}

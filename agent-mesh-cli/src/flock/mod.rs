@@ -17,6 +17,7 @@ mod discover;
 mod emit;
 #[cfg(unix)]
 pub(crate) mod mcp;
+#[cfg(unix)]
 mod nudge;
 #[cfg(unix)]
 mod nudging;
