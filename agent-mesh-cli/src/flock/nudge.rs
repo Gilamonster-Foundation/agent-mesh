@@ -769,7 +769,7 @@ mod tests {
         w[1].name = Some("a".into());
         let f = Fake::new(w);
         f.after("agent get", 2, |w| {
-            w.panes[1].name = Some("\u{1b}[31m\r".into())
+            w.panes[1].name = Some("\u{1b}[31m\r".into());
         });
         let Outcome::Misfire { found, .. } = Ctx::new().run(&f) else {
             panic!()
