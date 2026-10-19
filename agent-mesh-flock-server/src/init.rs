@@ -118,15 +118,14 @@ fn enc(e: content_addressable::ContentError) -> ServerError {
     ServerError::Encoding(e.to_string())
 }
 
-/// Read and re-verify the genesis in `dir`. A restart calls this and never
-/// mints a new one.
+/// The checks every genesis passes, from a file or from the wire: it is a
+/// genesis node, signed by the very certificate it names, with a well-formed
+/// roster, and the signature covers its id.
 ///
 /// # Errors
-/// I/O, a bad signature, or a certificate that is not the signer's.
-pub fn load_genesis(dir: &Path) -> Result<SignedGenesis, ServerError> {
+/// Which check failed.
+pub fn verify_signed_genesis(g: &SignedGenesis) -> Result<(), ServerError> {
     let bad = |why: String| ServerError::BadFiles(format!("genesis: {why}"));
-    let g: SignedGenesis = from_canonical_dagcbor_checked(&std::fs::read(dir.join(GENESIS_FILE))?)
-        .map_err(|e| bad(e.to_string()))?;
     let cert = &g.node.payload.server_cert;
     if g.node.payload.kind != "genesis" || !g.node.parents.is_empty() {
         return Err(bad("not a genesis node".into()));
@@ -145,5 +144,17 @@ pub fn load_genesis(dir: &Path) -> Result<SignedGenesis, ServerError> {
     g.sig
         .verify(&flock, &cert.agent_pubkey, 0)
         .map_err(|e| bad(e.to_string()))?;
+    Ok(())
+}
+
+/// Read and re-verify the genesis in `dir`. A restart calls this and never
+/// mints a new one.
+///
+/// # Errors
+/// I/O, a bad signature, or a certificate that is not the signer's.
+pub fn load_genesis(dir: &Path) -> Result<SignedGenesis, ServerError> {
+    let g: SignedGenesis = from_canonical_dagcbor_checked(&std::fs::read(dir.join(GENESIS_FILE))?)
+        .map_err(|e| ServerError::BadFiles(format!("genesis: {e}")))?;
+    verify_signed_genesis(&g)?;
     Ok(g)
 }

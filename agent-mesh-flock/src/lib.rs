@@ -10,6 +10,7 @@ mod admission;
 mod board;
 mod event;
 mod signer;
+pub mod text;
 
 pub use admission::{admit, roster_well_formed, ConflictKind, Refusal, Verdict};
 pub use board::{AttemptState, AttemptView, Board, Entry, LaneView, LogEntry};
