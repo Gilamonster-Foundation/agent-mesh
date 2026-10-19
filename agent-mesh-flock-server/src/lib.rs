@@ -16,6 +16,8 @@ mod chain;
 #[cfg(feature = "serve")]
 mod entry;
 mod error;
+#[cfg(all(unix, feature = "serve"))]
+mod files;
 mod follow;
 mod frame;
 mod init;

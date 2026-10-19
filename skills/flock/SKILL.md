@@ -133,6 +133,40 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   possession proof, a signature over a fresh challenge bound to flock and
   connection). v1 attaches same-user hosts only: the host-to-host handshake
   (the bus's auto-team rule) requires both hosts to belong to one user;
+- **roots and the cited-file service (step 9c)**, Unix. A roster event may carry
+  `roots`: the *names* of directories members cite files from (never a path;
+  empty roots are not encoded, so every existing id is unchanged). Only a
+  server-signed roster changes them, like operator devices (`roots-locked`),
+  and names are 1-64 of `A-Za-z0-9._-`, not `.`/`..`, unique (`bad-root`). The
+  home host maps name to directory in its own flag, `amesh flock serve --root
+  name=path` (repeatable; the directory must exist; naming a root the roster
+  lacks has the server declare it), so no path is ever in the log. A connection
+  proves membership (`WatchBegin`, then `Prove` with the same signature a
+  `Watch` carries) and may then ask `FileStat{root,path}` (what the file hashes
+  to now) and `File{root,path,id}` (the bytes, **only if they still hash to
+  `id`**; otherwise `ChangedSinceCited{current}`, reported and not served, or
+  `Unavailable{reason}`: unknown root, outside the root, not a regular file,
+  missing, too large). All three are on the attach socket's allow-list.
+  Every request re-checks that the session is still an active one of a current
+  member. The file is opened by `Beneath` (the same helper the TUI's drift
+  check uses): the root is opened once and the path is resolved relative to
+  that descriptor, on Linux by `openat2` with `RESOLVE_BENEATH |
+  RESOLVE_NO_SYMLINKS`, elsewhere by a component walk with `O_NOFOLLOW`, so
+  there is no checked pathname for a swapped directory to make stale. An
+  absolute path or `..` is refused before the file system is touched; **every**
+  symlink on the path is refused, a link that stays inside the root too;
+  mounts and hard links are part of the tree. The open does not block (a fifo
+  cannot hang the server), and the opened file must be a regular file within
+  one message (`MAX_FILE`, a little under 1 MiB; chunking is later).
+  **Limit:** the root is opened by its path, so replacing the mapped
+  directory (or an ancestor) before it is opened is the owner's own mapping
+  changing. On the reader side
+  (`agent_mesh_flock_session::Files`) the bytes are hashed again and must equal
+  the cited id; a server that sends other bytes, bytes past the limit, or
+  "changed" for the id that was cited is refused (`stat` is the server's word:
+  the bytes are not sent). The TUI's drift column asks the server for any root
+  the operator did not map with `--root` (so over a remote attach it asks the
+  home host, through the proxy);
 - **the bridge and `attach` (step 9b)**, Unix, same-user hosts only. `amesh flock
   serve --attach --bridge [--bridge-port N] [--bridge-quiet]` (the home host;
   needs `amesh keygen`) joins the mesh as a bus agent and serves a session
@@ -308,7 +342,7 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
 **Planned, not built:** operator approval of a **delegate**
 hand-off (#127's other half; waits on the delegate designation, step 13); device changes
 signed by a listed device (server-signed only today); operator-signed events (`answer`); the rest of
-the CLI's `answer`; `amesh-tui`; cited-file service for remote hosts (9c) and a real-sshd run of the attach suite (9d); the
+the CLI's `answer`; `amesh-tui`; the TUI drift column over a remote attach (waits on 8d) and a real-sshd run of the attach suite (9d); the
 `amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native
 newt receive. Until they land, lanes run on files
 as the herdr-flock skill describes. Status: epic #109.

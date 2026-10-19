@@ -63,7 +63,10 @@ impl Flock {
             Kind::Roster,
             None,
             &[("replaces", replaces)],
-            Body::Roster { members },
+            Body::Roster {
+                members,
+                roots: vec![],
+            },
         );
         self.server.admit(n, s).map(|_| ())
     }

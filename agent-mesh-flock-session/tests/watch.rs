@@ -196,6 +196,7 @@ impl Rig {
                     devices: vec![],
                     delegate: false,
                 }],
+                roots: vec![],
             },
         }
         .node();
