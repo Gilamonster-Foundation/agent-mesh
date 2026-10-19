@@ -21,10 +21,10 @@ kind=newt; [ -e "$S/swapped" ] && kind=claude
 case "$1 $2" in
 "pane list") cat <<EOF2
 {"result":{"panes":[
-{"pane_id":"w1:p0","tab_id":"w1:t1","label":"ad","agent":"newt","agent_status":"idle"},
-{"pane_id":"w1:p1","tab_id":"w1:t1","label":"h1","agent":"$kind","agent_status":"idle"},
-{"pane_id":"w1:p2","tab_id":"w1:t1","label":"shep","agent":"newt","agent_status":"idle"},
-{"pane_id":"w1:p3","tab_id":"w1:t1","agent":"newt","agent_status":"idle"}]}}
+{"pane_id":"w1:p0","tab_id":"w1:t1","workspace_id":"w1","label":"ad","agent":"newt","agent_status":"idle"},
+{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","label":"h1","agent":"$kind","agent_status":"idle"},
+{"pane_id":"w1:p2","tab_id":"w1:t1","workspace_id":"w1","label":"shep","agent":"newt","agent_status":"idle"},
+{"pane_id":"w1:p3","tab_id":"w1:t1","workspace_id":"w1","agent":"newt","agent_status":"idle"}]}}
 EOF2
 ;;
 "agent get") echo "{\"result\":{\"agent\":{\"terminal_id\":\"t-$3\",\"name\":\"n-$3\",\"agent\":\"$kind\",\"agent_status\":\"idle\",\"pane_id\":\"$3\",\"tab_id\":\"w1:t1\"}}}";;
