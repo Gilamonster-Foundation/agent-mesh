@@ -246,6 +246,53 @@ pub enum FlockCommand {
         #[arg(long)]
         once: bool,
     },
+    /// Operator: mint this machine's answer-signing device. Asks for a
+    /// passphrase twice on the terminal, stores the seed age-encrypted and
+    /// prints the certificate to register.
+    #[cfg(unix)]
+    DeviceInit {
+        /// Where the device lives (default `<home>/operator`).
+        #[arg(long)]
+        device_dir: Option<PathBuf>,
+    },
+    /// Owner: register a device's certificate with the running server. This
+    /// grants nothing until the roster lists the device.
+    #[cfg(unix)]
+    DeviceRegister {
+        /// Flock directory.
+        #[arg(long)]
+        dir: PathBuf,
+        /// The certificate file `device-init` wrote.
+        #[arg(long)]
+        cert: PathBuf,
+    },
+    /// Operator: the answer signer. Run it on your own terminal; it shows each
+    /// answer and signs only after you type `y` and your passphrase.
+    #[cfg(unix)]
+    Sign {
+        /// Flock directory.
+        #[arg(long)]
+        dir: PathBuf,
+        /// Where the device lives (default `<home>/operator`).
+        #[arg(long)]
+        device_dir: Option<PathBuf>,
+    },
+    /// Ask the running signer to sign and admit an answer to an ask.
+    #[cfg(unix)]
+    Answer {
+        /// Flock directory.
+        #[arg(long)]
+        dir: PathBuf,
+        /// The ask's content id.
+        #[arg(long)]
+        ask: String,
+        /// The answer.
+        #[arg(long)]
+        text: String,
+        /// Where the device lives (default `<home>/operator`).
+        #[arg(long)]
+        device_dir: Option<PathBuf>,
+    },
     /// Show the roster next to the herdr panes that carry its members.
     /// Read-only: reads the log without its lock and asks herdr only to list.
     Panes {
@@ -366,6 +413,19 @@ pub async fn run(home: PathBuf, cmd: FlockCommand) -> Result<()> {
         }
         #[cfg(unix)]
         FlockCommand::Watch { at, from, once } => watch::watch(&home, &at, from, once),
+        #[cfg(unix)]
+        FlockCommand::DeviceInit { device_dir } => unix::device_init(&home, device_dir),
+        #[cfg(unix)]
+        FlockCommand::DeviceRegister { dir, cert } => unix::device_register(&dir, &cert),
+        #[cfg(unix)]
+        FlockCommand::Sign { dir, device_dir } => unix::sign(&home, &dir, device_dir),
+        #[cfg(unix)]
+        FlockCommand::Answer {
+            dir,
+            ask,
+            text,
+            device_dir,
+        } => unix::answer(&home, &dir, &ask, text, device_dir),
         FlockCommand::Panes {
             name,
             dir,
@@ -583,6 +643,85 @@ mod unix {
             Some(Resp::Err(why)) => return Err(anyhow!("refused: {why}")),
             _ => return Err(anyhow!("unexpected answer")),
         }
+        Ok(())
+    }
+
+    fn operator_dir(home: &Path, d: Option<PathBuf>) -> PathBuf {
+        d.unwrap_or_else(|| home.join("operator"))
+    }
+
+    pub fn device_init(home: &Path, device_dir: Option<PathBuf>) -> Result<()> {
+        use crate::operator::{Device, TtyUi, Ui as _};
+        let key_path = home.join("user.key");
+        let user = UserKey::load(&key_path)
+            .with_context(|| format!("load {} — run `amesh keygen` first", key_path.display()))?;
+        let mut ui = TtyUi::open()?;
+        let a = ui.passphrase("new device passphrase: ")?;
+        let b = ui.passphrase("again: ")?;
+        {
+            use age::secrecy::ExposeSecret as _;
+            if a.expose_secret() != b.expose_secret() || a.expose_secret().is_empty() {
+                bail!("the passphrases differ, or are empty");
+            }
+        }
+        let dir = operator_dir(home, device_dir);
+        let cert = Device::at(&dir).init(
+            &user,
+            &a,
+            &crate::util::current_hostname(),
+            &crate::util::now_rfc3339(),
+        )?;
+        println!("device fingerprint: {}", cert.agent_fingerprint());
+        println!("certificate: {}", dir.join("device.cert.json").display());
+        println!("register it with `amesh flock device-register`, then list the");
+        println!("fingerprint under the operator in the roster.");
+        Ok(())
+    }
+
+    pub fn device_register(dir: &Path, cert: &Path) -> Result<()> {
+        let cert: agent_mesh_protocol::CertChain =
+            serde_json::from_slice(&std::fs::read(cert)?).context("not a device certificate")?;
+        let mut c = UnixStream::connect(sock(dir)).context("is `amesh flock serve` running?")?;
+        write_msg(&mut c, &Req::RegisterDevice { cert })?;
+        match read_msg::<Resp>(&mut c)? {
+            Some(Resp::Ok) => {
+                println!("registered");
+                Ok(())
+            }
+            Some(Resp::Err(why)) => Err(anyhow!("refused: {why}")),
+            _ => Err(anyhow!("unexpected answer")),
+        }
+    }
+
+    pub fn sign(home: &Path, dir: &Path, device_dir: Option<PathBuf>) -> Result<()> {
+        use crate::operator::{serve_signer, Device, TtyUi};
+        let od = operator_dir(home, device_dir);
+        let device = Device::at(&od);
+        device.cert()?;
+        let mut ui = TtyUi::open()?;
+        let listener = bind_private(&od.join("sign.sock"))?;
+        println!("signer ready on {}", od.join("sign.sock").display());
+        serve_signer(&listener, dir, &device, &mut ui, None)
+    }
+
+    pub fn answer(
+        home: &Path,
+        dir: &Path,
+        ask: &str,
+        text: String,
+        device_dir: Option<PathBuf>,
+    ) -> Result<()> {
+        use crate::operator::{request_answer, SignRequest};
+        let ask: ContentId = ask
+            .parse()
+            .map_err(|e| anyhow!("--ask is not a content id: {e}"))?;
+        let flock = agent_mesh_flock_server::load_genesis(dir)
+            .map_err(|e| anyhow!("read the genesis: {e}"))?
+            .node
+            .content_id()?;
+        let sock = operator_dir(home, device_dir).join("sign.sock");
+        let (event, index) = request_answer(&sock, &SignRequest { flock, ask, text })?;
+        println!("admitted {event} at {index}");
         Ok(())
     }
 

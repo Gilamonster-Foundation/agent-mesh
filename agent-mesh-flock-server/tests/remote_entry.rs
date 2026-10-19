@@ -497,10 +497,7 @@ fn registering_a_device_certificate_is_the_owners_alone() {
     assert!(refused_as_not_offered(&refused), "{refused:?}");
     // another user's certificate is refused even to the owner
     assert!(matches!(ask(&r.owner, &reg(a_cert())), Resp::Err(_)));
-    assert!(matches!(
-        ask(&r.owner, &reg(dev.cert().clone())),
-        Resp::Ok
-    ));
+    assert!(matches!(ask(&r.owner, &reg(dev.cert().clone())), Resp::Ok));
     // and only once
     assert!(matches!(
         ask(&r.owner, &reg(dev.cert().clone())),
