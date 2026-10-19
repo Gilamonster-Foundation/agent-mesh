@@ -473,3 +473,50 @@ fn a_roster_with_devices_has_its_pinned_id_and_differs_from_one_without() {
         "pin this"
     );
 }
+
+fn delegated_roster_node() -> MerkleNode<Event> {
+    use agent_mesh_flock::{Member, Role};
+    let m = |name: &str, role, delegate| Member {
+        name: name.into(),
+        role,
+        devices: vec![],
+        delegate,
+    };
+    event(
+        Kind::Roster,
+        Body::Roster {
+            members: vec![
+                m("shep", Role::Shepherd, false),
+                m("h1", Role::Helper, true),
+            ],
+        },
+        &[("replaces", "roster")],
+    )
+}
+
+#[test]
+fn a_delegated_roster_has_its_pinned_id_and_an_undelegated_one_keeps_its_bytes() {
+    use content_addressable::canonical::to_canonical_dagcbor;
+    let undelegated = |d| agent_mesh_flock::Member {
+        name: "h1".into(),
+        role: agent_mesh_flock::Role::Helper,
+        devices: vec![],
+        delegate: d,
+    };
+    let before = MemberBefore {
+        name: "h1".into(),
+        role: agent_mesh_flock::Role::Helper,
+    };
+    assert_eq!(
+        to_canonical_dagcbor(&undelegated(false)).unwrap(),
+        to_canonical_dagcbor(&before).unwrap()
+    );
+    assert_ne!(
+        to_canonical_dagcbor(&undelegated(true)).unwrap(),
+        to_canonical_dagcbor(&before).unwrap()
+    );
+    assert_eq!(
+        delegated_roster_node().content_id().unwrap().to_string(),
+        "bafyr4igt5lokss6pbi3khm36zcs5jrqgsmnw6bgwy3toqirvp2fumoxoeu"
+    );
+}

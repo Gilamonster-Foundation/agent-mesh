@@ -8,7 +8,7 @@
 
 use crate::chain::Chain;
 use crate::frame::cert_cid;
-use agent_mesh_flock::{Board, Body, Event, Role, Signer, SignerClass};
+use agent_mesh_flock::{Board, Body, Event, Member, Role, Signer, SignerClass};
 use agent_mesh_protocol::{Assertion, Caveats, CertChain, Issuer, Scope};
 use content_addressable::{ContentAddressable, ContentId, RawContentId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -294,13 +294,12 @@ impl Sessions {
                     ev,
                     &[("from", f.start), ("resume", *resume), ("to", t.start)],
                 )?;
-                let role = board
+                let member = board
                     .members()
                     .iter()
                     .find(|m| m.name == a.member)
-                    .map(|m| m.role)
                     .ok_or("member is not on the roster")?;
-                self.approver_ok(role, board, &ap_id, approval_sig, chain, epoch)?;
+                self.approver_ok(member, board, &ap_id, approval_sig, chain, epoch)?;
             }
             _ => {}
         }
@@ -308,12 +307,13 @@ impl Sessions {
     }
 
     /// The roster's hand-off authority signed it: an active shepherd session
-    /// for a helper, or a listed operator device for a shepherd. Everything
-    /// else fails closed. A key merely certified by the flock's user key is
+    /// for a helper, or a listed operator device for a shepherd or for the
+    /// delegate. The delegate test comes first, so a shepherd never approves
+    /// its delegate's replacement. Everything else fails closed. A key merely certified by the flock's user key is
     /// not a device; the roster at this point in the log must list it.
     fn approver_ok(
         &self,
-        role: Role,
+        member: &Member,
         board: &Board,
         ap_id: &ContentId,
         sig: &Assertion,
@@ -334,12 +334,16 @@ impl Sessions {
             }
             sig.verify_user(ap_id, &chain.user, epoch)
                 .map_err(|e| format!("approval: {e}"))?;
-            return if role == Role::Shepherd {
+            return if member.delegate || member.role == Role::Shepherd {
                 Ok(())
             } else {
-                Err("an operator device approves a shepherd hand-off only".into())
+                Err("an operator device approves a shepherd or delegate hand-off only".into())
             };
         }
+        if member.delegate {
+            return Err("the delegate's hand-off needs an operator device's approval".into());
+        }
+        let role = member.role;
         let signer = self.resolve(sig, ap_id, &chain.server_pub, epoch)?;
         let SignerClass::Session {
             member,
