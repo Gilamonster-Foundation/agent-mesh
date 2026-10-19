@@ -98,7 +98,7 @@ impl Files {
             &Req::File {
                 root: root.into(),
                 path: path.into(),
-                id: id.clone(),
+                id: *id,
             },
         )?;
         match read_msg::<Resp>(&mut self.conn)? {

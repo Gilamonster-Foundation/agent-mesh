@@ -1199,7 +1199,7 @@ async fn a_remote_member_reads_a_cited_file_through_the_proxy_and_a_changed_one_
         };
         let mut f = Files::open(&sock, &prove).unwrap();
         let cited = content_addressable::RawContentId::from_content(b"as cited");
-        assert_eq!(f.stat("notes", "brief.md").unwrap(), Ok(cited.clone()));
+        assert_eq!(f.stat("notes", "brief.md").unwrap(), Ok(cited));
         assert_eq!(
             f.read("notes", "brief.md", &cited).unwrap(),
             Cited::Bytes(b"as cited".to_vec())
