@@ -231,6 +231,18 @@ fn a_session_that_stops_being_a_member_loses_the_files() {
 }
 
 #[test]
+fn a_session_that_has_ended_loses_the_files() {
+    let r = rig();
+    std::fs::write(r.notes.join("a.md"), b"x").unwrap();
+    let mut c = member(&r);
+    assert!(matches!(stat(&mut c, "a.md"), Resp::FileId { .. }));
+    r.serving
+        .with_server(|s| s.end_session(&r.shep.session, agent_mesh_flock::EndReason::Closed))
+        .unwrap();
+    assert!(matches!(stat(&mut c, "a.md"), Resp::Err(_)));
+}
+
+#[test]
 fn paths_that_leave_the_root_are_refused() {
     let r = rig();
     std::fs::write(r.notes.join("a.md"), b"x").unwrap();

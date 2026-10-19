@@ -26,6 +26,18 @@ fn unavailable(why: &str) -> String {
 
 /// The bytes at `rel` under `root`, or why not.
 pub(crate) fn read_under(root: &Path, rel: &str) -> Result<Vec<u8>, String> {
+    read_under_with(root, rel, &mut || {}, &mut || {})
+}
+
+/// [`read_under`], calling `after_resolve` between resolving the path and
+/// opening it, and `after_open` between opening it and the re-check: the two
+/// windows the module comment names, so that a test can land a swap in each.
+fn read_under_with(
+    root: &Path,
+    rel: &str,
+    after_resolve: &mut dyn FnMut(),
+    after_open: &mut dyn FnMut(),
+) -> Result<Vec<u8>, String> {
     if rel.is_empty() || rel.contains('\0') {
         return Err(unavailable("not a usable path"));
     }
@@ -49,6 +61,7 @@ pub(crate) fn read_under(root: &Path, rel: &str) -> Result<Vec<u8>, String> {
     if !path.starts_with(&root) {
         return Err(unavailable("outside the root"));
     }
+    after_resolve();
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -61,6 +74,7 @@ pub(crate) fn read_under(root: &Path, rel: &str) -> Result<Vec<u8>, String> {
     if meta.len() > MAX_FILE as u64 {
         return Err(unavailable("too large"));
     }
+    after_open();
     let same = std::fs::canonicalize(&joined).is_ok_and(|again| again == path)
         && std::fs::symlink_metadata(&path)
             .is_ok_and(|now| now.dev() == meta.dev() && now.ino() == meta.ino());
@@ -76,4 +90,57 @@ pub(crate) fn read_under(root: &Path, rel: &str) -> Result<Vec<u8>, String> {
         return Err(unavailable("too large"));
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_under_with;
+    use std::os::unix::fs::symlink;
+
+    /// A root with `d/f`, and a sibling directory with its own `f`.
+    fn tree() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("root");
+        let other = t.path().join("other");
+        std::fs::create_dir_all(root.join("d")).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(root.join("d").join("f"), b"inside").unwrap();
+        std::fs::write(other.join("f"), b"outside").unwrap();
+        (t, root, other)
+    }
+
+    #[test]
+    fn a_directory_swapped_for_a_link_after_the_path_was_resolved_is_caught() {
+        let (_t, root, other) = tree();
+        let got = read_under_with(
+            &root,
+            "d/f",
+            &mut || {
+                std::fs::rename(root.join("d"), root.join("d.old")).unwrap();
+                symlink(&other, root.join("d")).unwrap();
+            },
+            &mut || {},
+        );
+        assert_eq!(got, Err("changed while it was being opened".to_owned()));
+    }
+
+    #[test]
+    fn a_file_replaced_between_the_open_and_the_re_check_is_caught() {
+        let (_t, root, _other) = tree();
+        let f = root.join("d").join("f");
+        let got = read_under_with(&root, "d/f", &mut || {}, &mut || {
+            std::fs::write(root.join("d").join("new"), b"another file").unwrap();
+            std::fs::rename(root.join("d").join("new"), &f).unwrap();
+        });
+        assert_eq!(got, Err("changed while it was being opened".to_owned()));
+    }
+
+    #[test]
+    fn without_a_swap_the_hooks_change_nothing() {
+        let (_t, root, _other) = tree();
+        assert_eq!(
+            read_under_with(&root, "d/f", &mut || {}, &mut || {}),
+            Ok(b"inside".to_vec())
+        );
+    }
 }
