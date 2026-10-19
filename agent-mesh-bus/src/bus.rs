@@ -1015,13 +1015,25 @@ fn spawn_accept_loop(
                 }
             });
         }
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
+        abort_and_drain(&mut tasks).await;
         // `Bus::close` has dropped the shutdown sender before asking us to
         // stop, so every session is ending; wait for its handler to finish.
-        while session_tasks.join_next().await.is_some() {}
+        drain(&mut session_tasks).await;
         tracing::debug!("bus accept loop: stopped");
     })
+}
+
+/// Wait for every task in `set` to finish.
+async fn drain(set: &mut JoinSet<()>) {
+    while set.join_next().await.is_some() {}
+}
+
+/// Cancel every task in `set` and wait until each future has been dropped:
+/// aborting alone only schedules the drop, and what the task held (a
+/// connection, a clone of the endpoint) is released when it happens.
+async fn abort_and_drain(set: &mut JoinSet<()>) {
+    set.abort_all();
+    drain(set).await;
 }
 
 /// Dial the peer a reply is destined for: dial-back first, mDNS second.
@@ -1264,8 +1276,7 @@ impl Transport for IrohTransport {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        replies.abort_all();
-        while replies.join_next().await.is_some() {}
+        abort_and_drain(&mut replies).await;
         // Close the endpoint, not just the loops: that ends every open
         // connection. The socket itself is released as the endpoint's last
         // `Arc` drops, which nothing but this transport can now hold.
@@ -1351,8 +1362,7 @@ fn spawn_iroh_accept_loop(
                 }
             });
         }
-        conns.abort_all();
-        while conns.join_next().await.is_some() {}
+        abort_and_drain(&mut conns).await;
     })
 }
 
@@ -1519,6 +1529,50 @@ mod tests {
                 .await
                 .expect("bus keeps capture transport alive")
         }
+    }
+
+    /// Sets the flag when dropped.
+    struct Gone(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Gone {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// With nothing else allowed to run, the futures are already dropped when
+    /// `abort_and_drain` returns: the abort alone would only schedule that.
+    #[tokio::test]
+    async fn abort_and_drain_returns_only_after_the_futures_are_dropped() {
+        let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut set = JoinSet::new();
+        let (g, started) = (Gone(gone.clone()), Arc::new(Notify::new()));
+        let s = started.clone();
+        set.spawn(async move {
+            let _g = g;
+            s.notify_one();
+            std::future::pending::<()>().await;
+        });
+        started.notified().await;
+        abort_and_drain(&mut set).await;
+        assert!(gone.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(set.is_empty());
+    }
+
+    /// `drain` waits for tasks it did not cancel: the flag is set by the task
+    /// itself, after the point where the caller would otherwise have moved on.
+    #[tokio::test]
+    async fn drain_waits_for_tasks_to_finish() {
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut set = JoinSet::new();
+        let (d, go) = (done.clone(), Arc::new(Notify::new()));
+        let g = go.clone();
+        set.spawn(async move {
+            g.notified().await;
+            d.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        go.notify_one();
+        drain(&mut set).await;
+        assert!(done.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[async_trait]
