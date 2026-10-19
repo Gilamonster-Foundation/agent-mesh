@@ -149,6 +149,7 @@ mod tests {
                         name: n.into(),
                         role: serde_json::from_value(r.into()).unwrap(),
                         devices: vec![],
+                        delegate: false,
                     }
                 })
                 .collect(),

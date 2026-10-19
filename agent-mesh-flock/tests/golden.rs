@@ -421,11 +421,13 @@ fn roster_node(devices: Vec<agent_mesh_protocol::Fingerprint>) -> MerkleNode<Eve
             name: "shep".into(),
             role: Role::Shepherd,
             devices: vec![],
+            delegate: false,
         },
         Member {
             name: "op".into(),
             role: Role::Operator,
             devices,
+            delegate: false,
         },
     ];
     event(
@@ -442,6 +444,7 @@ fn a_member_without_devices_encodes_as_it_did_before_devices_existed() {
         name: "shep".into(),
         role: agent_mesh_flock::Role::Shepherd,
         devices: vec![],
+        delegate: false,
     };
     let before = MemberBefore {
         name: "shep".into(),

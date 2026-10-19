@@ -27,6 +27,7 @@ fn member(name: &str, role: Role) -> Member {
         name: name.into(),
         role,
         devices: vec![],
+        delegate: false,
     }
 }
 

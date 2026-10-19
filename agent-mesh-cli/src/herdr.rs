@@ -205,6 +205,7 @@ mod tests {
                 name: n.into(),
                 role,
                 devices: vec![],
+                delegate: false,
             })
             .collect()
     }

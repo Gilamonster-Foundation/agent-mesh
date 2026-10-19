@@ -418,6 +418,7 @@ mod tests {
                     name: "shep".into(),
                     role: agent_mesh_flock::Role::Shepherd,
                     devices: vec![],
+                    delegate: false,
                 }],
             },
         }
