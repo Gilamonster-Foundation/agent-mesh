@@ -1,6 +1,7 @@
 //! `amesh flock panes`: the roster joined to herdr's pane list.
 
 use crate::herdr::{self, Gap, Herdr, Pane};
+use agent_mesh_flock::text::{inert, inert_lines};
 use agent_mesh_flock::{AttemptView, Body};
 use agent_mesh_flock_server::{Snapshot, Status};
 use anyhow::{anyhow, Context, Result};
@@ -26,7 +27,7 @@ pub(super) fn panes(
     let snap =
         Snapshot::read(&dir).with_context(|| format!("read the log in {}", dir.display()))?;
     let live = Herdr(herdr::System).panes()?;
-    print!("{}", render(&snap, &live, &explicit, tab)?);
+    print!("{}", inert_lines(&render(&snap, &live, &explicit, tab)?));
     Ok(())
 }
 
@@ -82,12 +83,12 @@ fn render(
         let _ = writeln!(
             out,
             "{:<10} {:<9} {:<8} {:<8} {:<16} {}",
-            member.name,
+            inert(&member.name),
             format!("{:?}", member.role).to_lowercase(),
-            id,
+            inert(&id),
             via,
-            claimed,
-            flock_state(snap, &member.name)
+            inert(&claimed),
+            inert(&flock_state(snap, &member.name))
         );
     }
     Ok(out)
@@ -418,6 +419,7 @@ mod tests {
                     name: "shep".into(),
                     role: agent_mesh_flock::Role::Shepherd,
                     devices: vec![],
+                    delegate: false,
                 }],
             },
         }

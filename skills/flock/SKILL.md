@@ -89,6 +89,16 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   Devices change only in a server-signed `roster` event (`replace_roster`) or
   genesis; a shepherd's roster must leave them as they are. Operator members
   only. Rosters without devices encode as before;
+- **the delegate** (step 13a): at most one roster member has `delegate: true`
+  (the member that holds the operator's screen; omitted from the encoding when
+  false, so every existing id is unchanged). It is set only by a server-signed
+  `roster` (`replace_roster`) or genesis; a shepherd's roster must leave it as it
+  is (`DelegateLocked`), and two delegates are refused (`MultipleDelegates`).
+  The delegate's hand-off needs a **listed operator device** approval whatever
+  its role, checked before the shepherd-approves-helper rule, so a shepherd
+  cannot approve its delegate's replacement. Approvals are judged at their own
+  index on replay. The delegate gains no operator authority. No signing gesture
+  or `answer` yet (13b/13c);
 - **byte strings**: keys, signatures, fingerprints and nonces are CBOR byte
   strings in the canonical encoding and on the session wire (they were arrays of
   one integer per byte: about 22% larger frames, and a size that varied with the
@@ -111,7 +121,7 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   this cannot be opened either: new flock, fresh directory;
 - **the attach socket** (`amesh flock serve --attach`, Unix): a second socket,
   `run/attach.sock` (mode 0600, private directory), the surface a remote host's
-  bridge will connect to (step 9b; the bridge is not built yet). Without
+  bridge connects to (step 9b, below). Without
   `--attach` nothing remote can reach the flock. On it only these requests are
   offered: `Hello`, `Genesis` (the public genesis node; its hash is the flock
   id, which a remote attacher checks against the id it was given), enroll,
@@ -123,6 +133,50 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   possession proof, a signature over a fresh challenge bound to flock and
   connection). v1 attaches same-user hosts only: the host-to-host handshake
   (the bus's auto-team rule) requires both hosts to belong to one user;
+- **the bridge and `attach` (step 9b)**, Unix, same-user hosts only. `amesh flock
+  serve --attach --bridge [--bridge-port N] [--bridge-quiet]` (the home host;
+  needs `amesh keygen`) joins the mesh as a bus agent and serves a session
+  stream per remote on topic `flock/<flock id>`; each stream is piped to the
+  attach socket, so the allow-list applies and `Invite` is never offered
+  remotely. It prints `bridge <agent fingerprint> <agent pubkey> <port>`.
+  `amesh flock attach --dir D --id <flock id> --peer <pubkey>@<ip:port | fingerprint>`
+  (the remote host, the same user's key) fetches the genesis, **refuses unless
+  its hash is the `--id` you were given** (the id is the out-of-band anchor, like
+  a fingerprint) and unless it verifies as a genesis, all in memory before
+  anything is written. `D` must be a private directory (created 0700, or an
+  existing one that is ours and closed to others) and is held by an exclusive
+  lock while `attach` runs, so a second `attach` on it is refused. The genesis
+  is kept as `D/genesis` through a fresh temporary file (fsync, rename, fsync
+  of the directory); an existing pin for the same flock is left exactly as it is,
+  one for another flock, a symlink or anything that is not a regular file is
+  refused, never replaced. `attach` then serves `D/run/serve.sock`: every flock
+  tool (`session`, `watch`, `join`, the TUI, a `Reader`) runs unchanged against
+  `D`, one bus stream per local connection. The proxy holds no flock-member key
+  (it does use this host's mesh identity, its user key's agent) and has no emit path; the wire is the
+  server's own `Req`/`Resp`, one session message per wire message, and a body
+  that is not exactly one wire message (up to 1 MiB) is dropped with the
+  connection. Enrolling uses a token the owner mints at home; the key is made
+  and stays on the remote. A session that was quiet across epoch bumps renews
+  through the proxy; two flocks at different epochs (one topic each, on one bus
+  on each side) do not touch each other. Today each session stream is its own
+  QUIC connection; nothing is shared between streams, and the tests do not
+  claim a single carrier. A connection that
+  drops without goodbye is recorded `lost` at home as before. What the bus
+  handshake proves is only that the two hosts belong to the same user; the
+  proofs above (token, possession, a stream signature) are what admit a member.
+  `--peer <fingerprint>` finds the home by mDNS; `pubkey@addr` dials directly.
+  Open streams are counted before anything is connected: at the home, in all
+  (default 64) and per peer (default 16), a stream over its share is refused
+  ("too many open sessions") without touching the attach socket; the proxy caps
+  its local connections the same way (an excess connection simply ends) and
+  tracks its tasks, so capacity returns when a stream ends, fails or is
+  cancelled. A held-open but idle admitted stream keeps its place until its
+  peer closes it (no application-progress deadline yet). A place is held until
+  the home's backend connection has really closed, not only until the bridge is
+  done: the server watches each watch's socket for its end and wakes the worker
+  waiting for the next record, so a reader that vanishes ends its worker even
+  when nothing is ever published; the server also closes a finished connection
+  completely (it keeps no duplicate handle), which is what lets a place go back.
 - **MCP tools** (`amesh mcp --flock-session <sock>` or `AMESH_FLOCK_SESSION`,
   Unix): `flock_whoami`, `flock_inbox`, `flock_status` and `flock_emit{kind,
   refs, body}` join the `mesh_*` tools, only when a session is given. The
@@ -249,12 +303,12 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   real server and session feeding the model, and the same cargo-tree and
   compile-probe checks as the read side (`tests_common::readside`) run against
   the TUI: neither writer feature resolves and no writer API can be named by a
-<<<<<<< HEAD
-  consumer of the crate. The Board scrolls to keep the selected member on screen (header and footer fixed). A frame whose checkpoint cannot be saved is rolled back by the reader itself (`Reader::follow` keeps nothing it did not save, and `Reader::open` makes a checkpoint it finds durable (file and directory fsync) before showing it, or does not open: a rename left visible by a failed directory fsync is never presented as saved until it will survive power loss), so the view and `amesh flock watch` only ever show the saved prefix; the TUI header says `cannot save the checkpoint` and keeps the last saved state. **Stream (step 8c)**: a second tab (`Tab`, or `1`/`2`) lists every admitted event in order (index, kind, signer, lane, one-line summary; conflicts marked) with kind / lane / member filters (`k` `l` `m` cycle through what the log has and back to all, `c` clears) and a follow mode (on at the start; moving up leaves it, `f` or `End` returns). An event's lane is its own or that of the event it answers. `Enter` opens the raw view: id, "✓ signature, session certificate and admission checked", signer (member and session fingerprint), lane, claimed time, parents (`prev` then references, numbered; `1`-`9` jump to one, `Backspace` returns; a filter that hides the parent is cleared), cited files and the pretty-printed body. Everything is folded from the verified board; nothing is fetched or checked again, and the event list is shared and extended between models. Everything drawn passes one function, `inert` (`ui/inert.rs`), which spells out control characters (C0 including ESC/BEL/CR/TAB, DEL, C1 including U+009B, and line/bidi/zero-width controls) as `\x1b`, `\r`, `\x9b` ...: a signature says who spoke, not that the text is safe to print, so a member's status, lane, label, file path or name cannot send the operator's terminal a command (tests: the screens carry no control character, and the bytes sent through a real crossterm backend carry only the renderer's own escapes). A signer is shown as member and session, with no role (the log knows only today's roster). `amesh flock log`/`watch`/`inbox` print member text raw and need the same treatment (follow-up). **Lane (step 8d)**: a third tab (`3`; `Tab`/`BackTab` cycle all three) lists each lane with its latest attempt (`completed, job open` verbatim from the fold), how many older attempts it has and one mark per cited file; the selected lane shows its older attempts, conflicts aimed at an attempt, its reviews and verdicts (head, and `newer result since #n` when the lane has a later non-conflict result: the reviewed head may be stale; the flock cannot see git, so this is the author's head against the log's order) and every file its events cite, first cited first. **Changed since cited**: `--root name=path` (repeatable, home-local; the roster declares no roots yet) maps a cited root to a directory; each file is opened **beneath** it with no pathname re-resolution (`agent_mesh_flock_server::Beneath`: the root is opened once and the file is opened relative to that descriptor, on Linux by one `openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`, elsewhere by a component walk of `openat` with `O_NOFOLLOW`, so a directory swapped for a link after a check cannot lead out; a path with `..` or an absolute path is refused before the file system is touched; **every** symlink on the path is refused, one that stays inside the root too, which shows as `?`; mounts and hard links are not links, and `NO_XDEV` is not set; the open does not block on a FIFO), read (at most 64 MiB, never written, created or touched) and hashed with the same raw content id: `✓` equal, `⚠ changed since cited` (cited and current ids shown), `?` unavailable with the reason (root not mapped, path leaves its root or crosses a link, file missing or unreadable, not a regular file, too big), `…` not checked yet. Files are checked on a worker thread, again when the log cites something new or on `r`; `amesh-tui --once --tab lane` checks synchronously. Everything drawn still passes `inert` (lane, root, path, head). Waiting is 8e. **Waiting (step 8e)**: a fourth tab (`4`) lists what waits for someone, oldest first, with its age in events (events admitted since) and the member it waits on: asks nobody answered (waiting on whoever briefed the work they are about; a file the ask cites is named as `[draft: root/path]`, not read), reviews with no verdict (waiting on the reviewer), and briefs nobody has taken (a lane's latest attempt still only submitted; waiting on the addressee). It answers nothing and has no way to: it is read-only like the other views. All four views (Board, Stream, Lane, Waiting) are built; the TUI still uses its own copy of `inert` until the shared one lands in `agent-mesh-flock`.
+  consumer of the crate. The Board scrolls to keep the selected member on screen (header and footer fixed). A frame whose checkpoint cannot be saved is rolled back by the reader itself (`Reader::follow` keeps nothing it did not save, and `Reader::open` makes a checkpoint it finds durable (file and directory fsync) before showing it, or does not open: a rename left visible by a failed directory fsync is never presented as saved until it will survive power loss), so the view and `amesh flock watch` only ever show the saved prefix; the TUI header says `cannot save the checkpoint` and keeps the last saved state. **Stream (step 8c)**: a second tab (`Tab`, or `1`/`2`) lists every admitted event in order (index, kind, signer, lane, one-line summary; conflicts marked) with kind / lane / member filters (`k` `l` `m` cycle through what the log has and back to all, `c` clears) and a follow mode (on at the start; moving up leaves it, `f` or `End` returns). An event's lane is its own or that of the event it answers. `Enter` opens the raw view: id, "✓ signature, session certificate and admission checked", signer (member and session fingerprint), lane, claimed time, parents (`prev` then references, numbered; `1`-`9` jump to one, `Backspace` returns; a filter that hides the parent is cleared), cited files and the pretty-printed body. Everything is folded from the verified board; nothing is fetched or checked again, and the event list is shared and extended between models. Everything drawn passes one function, `inert` (`ui/inert.rs`), which spells out control characters (C0 including ESC/BEL/CR/TAB, DEL, C1 including U+009B, and line/bidi/zero-width controls) as `\x1b`, `\r`, `\x9b` ...: a signature says who spoke, not that the text is safe to print, so a member's status, lane, label, file path or name cannot send the operator's terminal a command (tests: the screens carry no control character, and the bytes sent through a real crossterm backend carry only the renderer's own escapes). A signer is shown as member and session, with no role (the log knows only today's roster). `amesh flock log`/`watch`/`inbox` print member text raw and need the same treatment (follow-up). **Lane (step 8d)**: a third tab (`3`; `Tab`/`BackTab` cycle all three) lists each lane with its latest attempt (`completed, job open` verbatim from the fold), how many older attempts it has and one mark per cited file; the selected lane shows its older attempts, conflicts aimed at an attempt, its reviews and verdicts (head, and `newer result since #n` when the lane has a later non-conflict result: the reviewed head may be stale; the flock cannot see git, so this is the author's head against the log's order) and every file its events cite, first cited first. **Changed since cited**: `--root name=path` (repeatable, home-local; the roster declares no roots yet) maps a cited root to a directory; each file is opened **beneath** it with no pathname re-resolution (`agent_mesh_flock_server::Beneath`: the root is opened once and the file is opened relative to that descriptor, on Linux by one `openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`, elsewhere by a component walk of `openat` with `O_NOFOLLOW`, so a directory swapped for a link after a check cannot lead out; a path with `..` or an absolute path is refused before the file system is touched; **every** symlink on the path is refused, one that stays inside the root too, which shows as `?`; mounts and hard links are not links, and `NO_XDEV` is not set; the open does not block on a FIFO), read (at most 64 MiB, never written, created or touched) and hashed with the same raw content id: `✓` equal, `⚠ changed since cited` (cited and current ids shown), `?` unavailable with the reason (root not mapped, path leaves its root or crosses a link, file missing or unreadable, not a regular file, too big), `…` not checked yet. Files are checked on a worker thread, again when the log cites something new or on `r`; `amesh-tui --once --tab lane` checks synchronously. Everything drawn still passes `inert` (lane, root, path, head). Waiting is 8e. **Waiting (step 8e)**: a fourth tab (`4`) lists what waits for someone, oldest first, with its age in events (events admitted since) and the member it waits on: asks nobody answered (waiting on whoever briefed the work they are about; a file the ask cites is named as `[draft: root/path]`, not read), reviews with no verdict (waiting on the reviewer), and briefs nobody has taken (a lane's latest attempt still only submitted; waiting on the addressee). It answers nothing and has no way to: it is read-only like the other views. All four views (Board, Stream, Lane, Waiting) are built; everything drawn passes the shared `agent_mesh_flock::text::inert`.
+
 **Planned, not built:** operator approval of a **delegate**
 hand-off (#127's other half; waits on the delegate designation, step 13); device changes
 signed by a listed device (server-signed only today); operator-signed events (`answer`); the rest of
-the CLI's `answer`; `amesh-tui`; attaching from another host (9b: the bridge and `attach` proxy; 9c: cited files; 9d: a real-sshd run); the
+the CLI's `answer`; `amesh-tui`; cited-file service for remote hosts (9c) and a real-sshd run of the attach suite (9d); the
 `amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native
 newt receive. Until they land, lanes run on files
 as the herdr-flock skill describes. Status: epic #109.

@@ -40,6 +40,7 @@ content-addressable.workspace = true
 rand.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
 agent-mesh-flock-session = { workspace = true, features = ["emit"] }
 
 [dev-dependencies]
