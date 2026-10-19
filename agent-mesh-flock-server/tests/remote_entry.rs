@@ -116,11 +116,11 @@ fn genesis_is_served_on_both_and_hashes_to_the_flock_id() {
         panic!("hello")
     };
     for sock in [&r.attach, &r.owner] {
-        let Resp::Genesis(node) = ask(sock, &Req::Genesis) else {
+        let Resp::Genesis(g) = ask(sock, &Req::Genesis) else {
             panic!("genesis on {}", sock.display())
         };
-        assert_eq!(node.content_id().unwrap(), flock);
-        assert_eq!(node.content_id().unwrap(), r.env.flock);
+        assert_eq!(g.node.content_id().unwrap(), flock);
+        assert_eq!(g.node.content_id().unwrap(), r.env.flock);
     }
 }
 
@@ -292,4 +292,170 @@ fn serve_without_attach_has_no_attach_socket_to_reach() {
     let s = serve(env.open(), bind_private(&sock).unwrap()).unwrap();
     assert!(!env.tmp.path().join("run").join("attach.sock").exists());
     s.stop();
+}
+
+#[test]
+fn a_client_that_half_closes_sees_the_server_close_its_end() {
+    // The server keeps a duplicate of each connection so `stop` can cut it, so
+    // simply dropping its handle did not close the socket: a client that had
+    // finished writing waited for an end that never came. (A bridge holds a
+    // place for such a connection; it must be able to see it end.)
+    use std::os::unix::net::UnixStream;
+    let r = rig();
+    for sock in [&r.owner, &r.attach] {
+        let mut c = UnixStream::connect(sock).unwrap();
+        write_msg(&mut c, &Req::Hello).unwrap();
+        assert!(matches!(
+            read_msg::<Resp>(&mut c),
+            Ok(Some(Resp::Hello { .. }))
+        ));
+        c.shutdown(std::net::Shutdown::Write).unwrap();
+        // the server's side is closed: a clean end of stream, not a hang (the
+        // timeout only turns a server that never closes into a failure)
+        c.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        // print what the read gave: a platform's end-of-stream differs
+        let end = read_msg::<Resp>(&mut c);
+        assert!(matches!(end, Ok(None)), "{sock:?}: read gave {end:?}");
+    }
+}
+
+#[test]
+fn a_watch_that_disconnects_ends_its_worker_with_nothing_published() {
+    use agent_mesh_flock_server::wire::StreamChallenge;
+    // A member session stays alive; a reader opens a watch, catches up and
+    // goes away, over and over, with no new record and no server stop. Each
+    // time the server must end the worker that was waiting for the next frame
+    // (the count of running connection threads is the proof; a place in a
+    // bridge's gate is not).
+    let r = rig();
+    let serving = r.serving.as_ref().unwrap();
+    let Resp::Invited { token } = ask(
+        &r.owner,
+        &Req::Invite {
+            member: "shep".into(),
+        },
+    ) else {
+        panic!("invite")
+    };
+    let sk = SigningKey::generate(&mut OsRng);
+    let mut conn = UnixStream::connect(&r.attach).unwrap();
+    write_msg(
+        &mut conn,
+        &Req::EnrollBegin {
+            token,
+            member: "shep".into(),
+            pubkey: sk.verifying_key().to_bytes(),
+        },
+    )
+    .unwrap();
+    let Some(Resp::Challenge(ch)) = read_msg::<Resp>(&mut conn).unwrap() else {
+        panic!("challenge")
+    };
+    write_msg(
+        &mut conn,
+        &Req::EnrollFinish {
+            proof: sk.sign(&ch.signing_bytes()),
+            challenge: ch,
+        },
+    )
+    .unwrap();
+    let Some(Resp::Enrolled { cert, .. }) = read_msg::<Resp>(&mut conn).unwrap() else {
+        panic!("enrolled")
+    };
+    let key = AgentKey::from_seed_and_cert(&sk.to_bytes(), cert).unwrap();
+    // the enrolling connection is the one live worker
+    let baseline = serving.live_connections();
+    assert_eq!(baseline, 1);
+    for _ in 0..8 {
+        let mut w = UnixStream::connect(&r.attach).unwrap();
+        write_msg(&mut w, &Req::WatchBegin).unwrap();
+        let Some(Resp::StreamChallenge(sc)) = read_msg::<Resp>(&mut w).unwrap() else {
+            panic!("stream challenge")
+        };
+        let proof = Assertion::sign(&key, &StreamChallenge::id(&sc).unwrap());
+        write_msg(
+            &mut w,
+            &Req::Watch {
+                from: None,
+                proof: Box::new(proof),
+            },
+        )
+        .unwrap();
+        // through the replay to Caught: the worker now waits for news
+        while !matches!(read_msg::<Resp>(&mut w).unwrap(), Some(Resp::Caught { .. })) {}
+        assert_eq!(serving.live_connections(), baseline + 1);
+        drop(w);
+        serving.wait_connections_at_most(baseline);
+    }
+    drop(conn);
+}
+
+/// Stopping needs no new descriptor for a connection it already holds. The
+/// limit is lowered in a child process (the test re-runs itself), so the
+/// rest of the suite keeps its descriptors.
+#[test]
+fn stop_with_no_spare_descriptors_still_ends_every_connection() {
+    const CHILD: &str = "AMESH_STOP_FD_CHILD";
+    const NAME: &str = "stop_with_no_spare_descriptors_still_ends_every_connection";
+    if std::env::var_os(CHILD).is_none() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
+    let mut r = rig();
+    let serving = r.serving.take().unwrap();
+    let mut clients = vec![];
+    for i in 0..12 {
+        let mut c = UnixStream::connect(if i % 2 == 0 { &r.owner } else { &r.attach }).unwrap();
+        write_msg(&mut c, &Req::Hello).unwrap();
+        assert!(matches!(
+            read_msg::<Resp>(&mut c),
+            Ok(Some(Resp::Hello { .. }))
+        ));
+        // Set the read guard while the socket is live: macOS refuses
+        // SO_RCVTIMEO (EINVAL) on a socket the server has already shut down.
+        c.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        clients.push(c);
+    }
+    // 12 idle workers are running (each answered, so each was accepted)
+    assert_eq!(serving.live_connections(), 12);
+    // Leave exactly one free descriptor number, which is what stop's wake of
+    // a listener needs (a duplicate per connection would need twelve more).
+    // The lowest free number is where a new descriptor lands, so a probe
+    // names it; nothing below it is free, and nothing above it may be used.
+    let probe = std::fs::File::open("/dev/null").unwrap();
+    let limit = u64::try_from(std::os::fd::AsRawFd::as_raw_fd(&probe)).unwrap() + 1;
+    drop(probe);
+    rustix::process::setrlimit(
+        rustix::process::Resource::Nofile,
+        rustix::process::Rlimit {
+            current: Some(limit),
+            // the hard limit stays as it was
+            maximum: rustix::process::getrlimit(rustix::process::Resource::Nofile).maximum,
+        },
+    )
+    .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        serving.stop();
+        let _ = tx.send(());
+    });
+    // only a guard: a stop that cannot end a worker would wait forever
+    rx.recv_timeout(std::time::Duration::from_secs(30))
+        .expect("stop did not complete");
+    for mut c in clients {
+        let end = read_msg::<Resp>(&mut c);
+        assert!(matches!(end, Ok(None) | Err(_)), "{end:?}");
+    }
 }

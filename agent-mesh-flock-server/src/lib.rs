@@ -45,7 +45,10 @@ pub use frame::seal;
 pub use frame::{cert_cid, encode, AdmissionRecord, Frame, Sealed};
 #[cfg(feature = "serve")]
 pub use init::{init, InitSpec};
-pub use init::{load_genesis, SignedGenesis, GENESIS_FILE, KEY_FILE, LOG_FILE, REFUSALS_FILE};
+pub use init::{
+    load_genesis, verify_signed_genesis, SignedGenesis, GENESIS_FILE, KEY_FILE, LOG_FILE,
+    REFUSALS_FILE,
+};
 #[cfg(feature = "serve")]
 pub use journal::{Cursor, Eligible, Journal, Published};
 pub use journal::{Head, Resume};

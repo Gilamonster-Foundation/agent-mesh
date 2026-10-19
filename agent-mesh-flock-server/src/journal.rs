@@ -167,6 +167,7 @@ impl Journal {
         Ok(Cursor {
             journal: self.clone(),
             next,
+            cancelled: Arc::default(),
         })
     }
 }
@@ -176,6 +177,27 @@ impl Journal {
 pub struct Cursor {
     journal: Arc<Journal>,
     next: usize,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Ends one [`Cursor`]'s wait from another thread.
+#[cfg(feature = "serve")]
+pub struct Canceller {
+    journal: Arc<Journal>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(feature = "serve")]
+impl Canceller {
+    /// Wake the cursor: its `next_frame` returns `None`.
+    pub fn cancel(&self) {
+        // set under the journal's lock, so a cursor between its check and its
+        // wait cannot miss it
+        let _g = self.journal.lock();
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.journal.more.notify_all();
+    }
 }
 
 #[cfg(feature = "serve")]
@@ -190,11 +212,23 @@ impl Cursor {
         }
     }
 
+    /// A handle that ends this cursor's wait.
+    #[must_use]
+    pub fn canceller(&self) -> Canceller {
+        Canceller {
+            journal: self.journal.clone(),
+            cancelled: self.cancelled.clone(),
+        }
+    }
+
     /// The next frame, blocking until one is published; `None` once the
-    /// journal is stopped and drained.
+    /// journal is stopped and drained, or the cursor is cancelled.
     pub fn next_frame(&mut self) -> Option<Published> {
         let mut g = self.journal.lock();
         loop {
+            if self.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                return None;
+            }
             if let Some(f) = g.frames.get(self.next) {
                 self.next += 1;
                 return Some(f.clone());

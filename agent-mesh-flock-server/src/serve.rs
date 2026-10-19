@@ -12,6 +12,7 @@
 //! signature over a fresh challenge bound to this flock and connection to
 //! watch.
 
+use crate::journal::Cursor;
 use crate::wire::{read_msg, write_msg, Req, Resp, StreamChallenge};
 use crate::{CrashPlan, Head, Journal, Resume, Server, ServerError};
 use agent_mesh_flock::{EndReason, Kind};
@@ -99,8 +100,40 @@ struct Shared {
     paths: Vec<PathBuf>,
     /// The epoch and the first failure, with their condvar.
     signal: Signal,
-    /// Every connection thread, so a stop can end and join them all.
-    conns: Mutex<Vec<(UnixStream, JoinHandle<()>)>>,
+    /// Every connection thread, so a stop can join them all.
+    conns: Mutex<Vec<JoinHandle<()>>>,
+    /// A duplicate of every open connection, so a stop can cut them. A
+    /// connection removes its own when it ends, so that closing it really
+    /// closes the socket (a duplicate keeps it open).
+    socks: Mutex<std::collections::HashMap<u64, UnixStream>>,
+    next_id: std::sync::atomic::AtomicU64,
+    /// How many connection threads are running, with the condvar that
+    /// announces it falling.
+    live: Mutex<usize>,
+    live_cv: Condvar,
+}
+
+/// Counts one running connection thread; ends it on drop.
+struct Live(Arc<Shared>);
+
+impl Live {
+    fn new(s: &Arc<Shared>) -> Self {
+        *s.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+        Self(s.clone())
+    }
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        *self
+            .0
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+        self.0.live_cv.notify_all();
+    }
 }
 
 /// A running server loop.
@@ -167,6 +200,34 @@ impl Serving {
     /// that moves it.
     pub fn wait_epoch(&self, n: u64) -> bool {
         self.shared.signal.wait_epoch(n, || {})
+    }
+
+    /// Test-only: how many connection threads are running.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn live_connections(&self) -> usize {
+        *self
+            .shared
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Test-only: block until at most `n` connection threads are running.
+    #[doc(hidden)]
+    pub fn wait_connections_at_most(&self, n: usize) {
+        let mut g = self
+            .shared
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *g > n {
+            g = self
+                .shared
+                .live_cv
+                .wait(g)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
     }
 
     /// The first failure to persist, if one happened.
@@ -243,6 +304,10 @@ fn start(server: Server, listeners: Vec<(UnixListener, Class)>) -> std::io::Resu
         paths,
         signal,
         conns: Mutex::new(Vec::new()),
+        socks: Mutex::new(std::collections::HashMap::new()),
+        next_id: std::sync::atomic::AtomicU64::new(0),
+        live: Mutex::new(0),
+        live_cv: Condvar::new(),
     });
     let joins = listeners
         .into_iter()
@@ -268,14 +333,26 @@ fn accept_loop(listener: &UnixListener, class: Class, flag: &AtomicBool, state: 
             continue;
         }
         let Ok(mine) = conn.try_clone() else { continue };
-        let st = state.clone();
-        let handle = std::thread::spawn(move || connection(&st, conn, class));
+        let id = state
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        state
+            .socks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, mine);
+        // counted before the thread starts, so a count read after accept
+        // cannot miss it
+        let live = Live::new(state);
+        let handle = std::thread::spawn(move || {
+            connection(&live.0, conn, class, id);
+        });
         let mut conns = state
             .conns
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        conns.retain(|(_, h)| !h.is_finished());
-        conns.push((mine, handle));
+        conns.retain(|h| !h.is_finished());
+        conns.push(handle);
     }
 }
 
@@ -298,14 +375,25 @@ fn failed(s: &Shared) -> bool {
 /// Shut every connection and wait for its thread, so nothing still holds the
 /// server (and so its log lock) afterwards.
 fn end_connections(s: &Shared) {
+    // Shut the handles the registry already owns: no descriptor is allocated
+    // here (a duplicate per connection could fail under pressure and leave a
+    // worker blocked, which the joins below would wait on forever). The lock
+    // is held only for the shutdowns, never across a join.
+    for stream in s
+        .socks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+    {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    }
     let conns = std::mem::take(
         &mut *s
             .conns
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
-    for (stream, handle) in conns {
-        let _ = stream.shutdown(std::net::Shutdown::Both);
+    for handle in conns {
         let _ = handle.join();
     }
 }
@@ -330,12 +418,28 @@ fn is_fatal(e: &ServerError) -> bool {
 
 /// One connection carries at most one session, and its end is that
 /// session's end. A goodbye is answered `Ok` only once the end is durable.
-fn connection(shared: &Shared, mut conn: UnixStream, class: Class) {
+fn connection(shared: &Shared, mut conn: UnixStream, class: Class, id: u64) {
+    serve_connection(shared, &mut conn, class);
+    // The server keeps a duplicate of every connection so `stop` can cut them,
+    // so dropping this handle does not close the socket: the peer would never
+    // see the end it is waiting for (a bridge would hold the connection, and
+    // its place, forever). Close it for every holder.
+    let _ = conn.shutdown(std::net::Shutdown::Both);
+    // and drop the duplicate, so this is the last handle: the socket closes
+    // whatever the platform does with a shutdown after the peer's
+    shared
+        .socks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&id);
+}
+
+fn serve_connection(shared: &Shared, conn: &mut UnixStream, class: Class) {
     let mut bound: Option<String> = None;
     let mut challenge: Option<StreamChallenge> = None;
-    while let Ok(Some(req)) = read_msg::<Req>(&mut conn) {
+    while let Ok(Some(req)) = read_msg::<Req>(conn) {
         if !offered(class, &req) {
-            if write_msg(&mut conn, &Resp::Err(NOT_OFFERED.into())).is_err() {
+            if write_msg(conn, &Resp::Err(NOT_OFFERED.into())).is_err() {
                 break;
             }
             continue;
@@ -349,7 +453,7 @@ fn connection(shared: &Shared, mut conn: UnixStream, class: Class) {
                     nonce,
                 };
                 challenge = Some(ch.clone());
-                if write_msg(&mut conn, &Resp::StreamChallenge(ch)).is_err() {
+                if write_msg(conn, &Resp::StreamChallenge(ch)).is_err() {
                     break;
                 }
                 continue;
@@ -362,15 +466,15 @@ fn connection(shared: &Shared, mut conn: UnixStream, class: Class) {
                     .and_then(|c| c.id())
                     .and_then(|id| with(shared, |s| s.authorize_stream(&proof, &id)));
                 match opened {
-                    Ok(session) => stream(shared, &mut conn, &session, from.as_ref()),
+                    Ok(session) => stream(shared, conn, &session, from.as_ref()),
                     Err(e) => {
-                        let _ = write_msg(&mut conn, &Resp::Err(e.to_string()));
+                        let _ = write_msg(conn, &Resp::Err(e.to_string()));
                     }
                 }
                 break;
             }
             req => {
-                if !step(shared, &mut conn, req, &mut bound, class) {
+                if !step(shared, conn, req, &mut bound, class) {
                     break;
                 }
                 continue;
@@ -429,6 +533,24 @@ fn stream(shared: &Shared, conn: &mut UnixStream, session: &str, from: Option<&H
             return;
         }
     };
+    // A peer that goes away must end this worker even though nothing is ever
+    // published: watch the socket for its end and cancel the cursor's wait.
+    let canceller = cursor.canceller();
+    let Ok(mut peer) = conn.try_clone() else {
+        return;
+    };
+    let watcher = std::thread::spawn(move || {
+        let mut sink = [0u8; 256];
+        while matches!(std::io::Read::read(&mut peer, &mut sink), Ok(n) if n > 0) {}
+        canceller.cancel();
+    });
+    stream_frames(shared, conn, session, &mut cursor);
+    // the loop is over: closing wakes the watcher if it still waits
+    let _ = conn.shutdown(std::net::Shutdown::Both);
+    let _ = watcher.join();
+}
+
+fn stream_frames(shared: &Shared, conn: &mut UnixStream, session: &str, cursor: &mut Cursor) {
     let replay_end = shared.journal.len();
     // Eligibility is re-checked at epoch boundaries from the frame on, not
     // for history before this session existed.
@@ -481,7 +603,7 @@ fn handle(
             flock: server.flock(),
             epoch: server.epoch(),
         },
-        Req::Genesis => Resp::Genesis(server.genesis().clone()),
+        Req::Genesis => Resp::Genesis(server.signed_genesis().clone()),
         Req::Invite { member } => Resp::Invited {
             token: server.invite(&member)?.token,
         },

@@ -56,6 +56,37 @@ pub enum FlockCommand {
         /// reach this flock.
         #[arg(long)]
         attach: bool,
+        /// Also offer this flock to other hosts of the same user over the
+        /// mesh: each stream a remote opens is piped to the attach socket (so
+        /// the allow-list applies). Needs `--attach` and a user key
+        /// (`amesh keygen`). Prints `bridge <agent fingerprint> <agent pubkey>
+        /// <port>`, what a remote's `attach --peer` needs.
+        #[arg(long, requires = "attach")]
+        bridge: bool,
+        /// The UDP port the bridge listens on (0 = any).
+        #[arg(long, default_value_t = 0, requires = "bridge")]
+        bridge_port: u16,
+        /// Do not announce the bridge on mDNS: peers must dial it with
+        /// `--peer <pubkey>@<addr>`.
+        #[arg(long, requires = "bridge")]
+        bridge_quiet: bool,
+    },
+    /// Attach to a flock served by another host of the same user: fetch its
+    /// genesis (refused unless it is the flock `--id` names), then serve
+    /// `<dir>/run/serve.sock` for the local session, reader and TUI, piping
+    /// each connection to the home over the mesh. Holds no key.
+    #[cfg(unix)]
+    Attach {
+        /// Where to keep the flock locally.
+        #[arg(long)]
+        dir: PathBuf,
+        /// The flock's id (the genesis hash): the anchor you were given.
+        #[arg(long)]
+        id: String,
+        /// The home bridge: `<agent pubkey hex>@<ip:port>` to dial it, or its
+        /// agent fingerprint to find it on the local network.
+        #[arg(long)]
+        peer: String,
     },
     /// Mint an invite for a member through the running server; prints the
     /// token once.
@@ -229,11 +260,22 @@ pub enum FlockCommand {
 }
 
 /// Dispatch a flock subcommand.
-pub fn run(home: PathBuf, cmd: FlockCommand) -> Result<()> {
+pub async fn run(home: PathBuf, cmd: FlockCommand) -> Result<()> {
     match cmd {
         FlockCommand::Init { name, members, dir } => init(home, name, &members, dir),
         #[cfg(unix)]
-        FlockCommand::Serve { dir, attach } => unix::serve(&dir, attach),
+        FlockCommand::Serve {
+            dir,
+            attach,
+            bridge,
+            bridge_port,
+            bridge_quiet,
+        } => {
+            let bridge = bridge.then_some((bridge_port, !bridge_quiet));
+            unix::serve(&home, &dir, attach, bridge).await
+        }
+        #[cfg(unix)]
+        FlockCommand::Attach { dir, id, peer } => unix::attach(&home, &dir, &id, &peer).await,
         #[cfg(unix)]
         FlockCommand::Invite { dir, member } => unix::invite(&dir, &member),
         #[cfg(unix)]
@@ -371,9 +413,13 @@ fn init(home: PathBuf, name: String, members: &[String], dir: Option<PathBuf>) -
 #[cfg(unix)]
 mod unix {
     use super::{anyhow, Context, PathBuf, Result};
+    use crate::flock_bridge;
+    use agent_mesh_bus::{Bus, BusOptions, PeerEndpoint};
     use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp};
     use agent_mesh_flock_server::{bind_private, serve as serve_log, serve_with_attach, Server};
     use agent_mesh_flock_session::Policy;
+    use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, Fingerprint, UserKey};
+    use content_addressable::{ContentAddressable as _, ContentId};
     use std::os::unix::net::UnixStream;
     use std::path::Path;
 
@@ -385,8 +431,33 @@ mod unix {
         dir.join("run").join("attach.sock")
     }
 
-    pub fn serve(dir: &Path, attach: bool) -> Result<()> {
+    /// The bus identity this host uses for the flock: its user key's agent.
+    fn bus_identity(home: &Path, role: &str) -> Result<(UserKey, AgentKey)> {
+        let key_path = home.join("user.key");
+        let user = UserKey::load(&key_path)
+            .with_context(|| format!("load {} — run `amesh keygen` first", key_path.display()))?;
+        let agent = AgentKey::issue(
+            &user,
+            AgentMetadata {
+                role: role.into(),
+                host: crate::util::current_hostname(),
+                capabilities: vec![],
+                issued_at: crate::util::now_rfc3339(),
+                expires_at: None,
+                caveats: Caveats::top(),
+            },
+        );
+        Ok((user, agent))
+    }
+
+    pub async fn serve(
+        home: &Path,
+        dir: &Path,
+        attach: bool,
+        bridge: Option<(u16, bool)>,
+    ) -> Result<()> {
         let server = Server::open(dir).with_context(|| format!("open {}", dir.display()))?;
+        let id = server.genesis().content_id()?;
         // The log lock is ours, so any socket file left behind is stale.
         let listener = bind_private(&sock(dir))?;
         let serving = if attach {
@@ -398,10 +469,60 @@ mod unix {
             println!("serving {}", sock(dir).display());
             serve_log(server, listener)?
         };
-        match serving.wait() {
+        let _bus = match bridge {
+            Some((port, announce)) => {
+                let (user, agent) = bus_identity(home, "amesh-flock-bridge")?;
+                let (fp, pubkey) = (agent.fingerprint(), agent.public_bytes());
+                let bus = Bus::bind_with(&user, agent, port, BusOptions { announce }).await?;
+                flock_bridge::serve_home(
+                    &bus,
+                    flock_bridge::topic(user.fingerprint(), &id),
+                    attach_sock(dir),
+                    flock_bridge::Gate::new(flock_bridge::Limits::default()),
+                );
+                println!("bridge {fp} {} {}", hex::encode(pubkey), bus.local_port());
+                Some(bus)
+            }
+            None => None,
+        };
+        match tokio::task::spawn_blocking(move || serving.wait()).await? {
             Some(why) => Err(anyhow!("stopped: could not persist: {why}")),
             None => Ok(()),
         }
+    }
+
+    pub async fn attach(home: &Path, dir: &Path, id: &str, peer: &str) -> Result<()> {
+        let id: ContentId = id
+            .parse()
+            .map_err(|e| anyhow!("--id is not a content id: {e}"))?;
+        let peer = match peer.split_once('@') {
+            Some((pubkey, addr)) => {
+                let key: [u8; 32] = hex::decode(pubkey)
+                    .ok()
+                    .and_then(|b| b.try_into().ok())
+                    .ok_or_else(|| anyhow!("--peer: the part before @ is not a 32-byte hex key"))?;
+                let addr: std::net::SocketAddr = addr
+                    .parse()
+                    .map_err(|e| anyhow!("--peer: the part after @ is not ip:port: {e}"))?;
+                flock_bridge::Peer::Direct(PeerEndpoint::new(key, addr))
+            }
+            None => flock_bridge::Peer::Known(
+                peer.parse::<Fingerprint>()
+                    .map_err(|e| anyhow!("--peer is neither pubkey@addr nor a fingerprint: {e}"))?,
+            ),
+        };
+        let (user, agent) = bus_identity(home, "amesh-flock-attach")?;
+        let bus = std::sync::Arc::new(Bus::bind_outbound_only(&user, agent).await?);
+        let topic = flock_bridge::topic(user.fingerprint(), &id);
+        let signed = flock_bridge::fetch_genesis(&bus, &peer, &topic).await?;
+        // the directory is ours (private, locked) for as long as this runs
+        let _attachment = flock_bridge::pin_genesis(dir, &id, &signed)?;
+        let listener = bind_private(&sock(dir))?;
+        listener.set_nonblocking(true)?;
+        let listener = tokio::net::UnixListener::from_std(listener)?;
+        println!("serving {}", sock(dir).display());
+        let gate = flock_bridge::Gate::new(flock_bridge::Limits::default());
+        flock_bridge::serve_proxy(bus, peer, topic, listener, gate).await
     }
 
     pub fn invite(dir: &Path, member: &str) -> Result<()> {

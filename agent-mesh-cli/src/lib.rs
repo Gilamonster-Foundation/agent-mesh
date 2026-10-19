@@ -11,6 +11,8 @@ use std::path::PathBuf;
 mod announce;
 mod bind;
 mod flock;
+#[cfg(unix)]
+pub mod flock_bridge;
 mod herdr;
 mod keygen;
 mod listen;
@@ -173,7 +175,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Bind { target } => match target {
             BindTarget::Github { ssh_key, username } => bind::github(home, ssh_key, username),
         },
-        Command::Flock { command } => flock::run(home, command),
+        Command::Flock { command } => flock::run(home, command).await,
         Command::Whoami => whoami::run(home),
         Command::Verify {
             binding,
