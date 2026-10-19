@@ -46,6 +46,7 @@ pub fn spec() -> InitSpec {
                 name: (*n).into(),
                 role: *r,
                 devices: vec![],
+                delegate: false,
             })
             .collect(),
         salt: "s".into(),

@@ -61,6 +61,10 @@ pub enum Reason {
     DevicesLocked,
     /// `devices` on a member that is not an operator.
     DevicesOnNonOperator,
+    /// Only a server-signed roster changes who the delegate is.
+    DelegateLocked,
+    /// More than one roster member is the delegate.
+    MultipleDelegates,
     /// Two roster members share a name.
     DuplicateMember,
     /// A pane or tab claim that is empty, too long or not printable.
@@ -93,6 +97,8 @@ impl From<&Refusal> for Reason {
             Refusal::StaleRoster => Self::StaleRoster,
             Refusal::TooLarge => Self::TooLarge,
             Refusal::DevicesLocked => Self::DevicesLocked,
+            Refusal::DelegateLocked => Self::DelegateLocked,
+            Refusal::MultipleDelegates => Self::MultipleDelegates,
             Refusal::DevicesOnNonOperator => Self::DevicesOnNonOperator,
             Refusal::DuplicateMember => Self::DuplicateMember,
             Refusal::BadClaim => Self::BadClaim,

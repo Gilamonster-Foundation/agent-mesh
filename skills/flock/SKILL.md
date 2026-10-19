@@ -89,6 +89,16 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   Devices change only in a server-signed `roster` event (`replace_roster`) or
   genesis; a shepherd's roster must leave them as they are. Operator members
   only. Rosters without devices encode as before;
+- **the delegate** (step 13a): at most one roster member has `delegate: true`
+  (the member that holds the operator's screen; omitted from the encoding when
+  false, so every existing id is unchanged). It is set only by a server-signed
+  `roster` (`replace_roster`) or genesis; a shepherd's roster must leave it as it
+  is (`DelegateLocked`), and two delegates are refused (`MultipleDelegates`).
+  The delegate's hand-off needs a **listed operator device** approval whatever
+  its role, checked before the shepherd-approves-helper rule, so a shepherd
+  cannot approve its delegate's replacement. Approvals are judged at their own
+  index on replay. The delegate gains no operator authority. No signing gesture
+  or `answer` yet (13b/13c);
 - **byte strings**: keys, signatures, fingerprints and nonces are CBOR byte
   strings in the canonical encoding and on the session wire (they were arrays of
   one integer per byte: about 22% larger frames, and a size that varied with the
