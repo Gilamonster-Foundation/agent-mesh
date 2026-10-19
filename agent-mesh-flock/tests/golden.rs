@@ -371,6 +371,28 @@ fn certificate_bearing_bodies_bind_the_certificate() {
     };
     assert_ne!(renew(&a, 1), renew(&a, 2));
     assert_ne!(renew(&a, 1), renew(&b, 1));
+    let device = |k: &AgentKey| {
+        event(
+            Kind::DeviceCert,
+            Body::DeviceCert {
+                cert: k.cert().clone(),
+            },
+            &[],
+        )
+        .content_id()
+        .unwrap()
+    };
+    assert_eq!(device(&a), device(&a));
+    assert_ne!(device(&a), device(&b));
+}
+
+/// The new kind's wire name is part of every id that carries it.
+#[test]
+fn the_device_cert_kind_has_its_pinned_wire_name() {
+    assert_eq!(
+        content_addressable::canonical::to_canonical_dagcbor(&Kind::DeviceCert).unwrap(),
+        content_addressable::canonical::to_canonical_dagcbor(&"device-cert").unwrap()
+    );
 }
 
 fn approval() -> MerkleNode<HandoffApproval> {

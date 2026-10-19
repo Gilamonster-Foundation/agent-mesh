@@ -5,7 +5,7 @@
 use agent_mesh_flock::{
     Board, Body, Event, Genesis, Kind, LogEntry, Member, Role, Signer, SignerClass, Verdict,
 };
-use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, UserKey};
+use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, Fingerprint, UserKey};
 use content_addressable::{ContentAddressable, ContentId, MerkleNode};
 use std::collections::BTreeMap;
 
@@ -47,7 +47,7 @@ fn issue(user: &UserKey, label: &str) -> AgentKey {
     )
 }
 
-pub fn genesis_of(server: &AgentKey) -> MerkleNode<Genesis> {
+pub fn genesis_of(server: &AgentKey, op: Fingerprint) -> MerkleNode<Genesis> {
     Genesis {
         kind: "genesis".into(),
         name: "fixture".into(),
@@ -60,6 +60,13 @@ pub fn genesis_of(server: &AgentKey) -> MerkleNode<Genesis> {
                 devices: vec![],
                 delegate: false,
             })
+            // the operator, whose one device is the fixture's "op" key
+            .chain([Member {
+                name: "op".into(),
+                role: Role::Operator,
+                devices: vec![op],
+                delegate: false,
+            }])
             .collect(),
         salt: "s".into(),
     }
@@ -70,7 +77,7 @@ impl Fx {
     pub fn new() -> Self {
         let user = user();
         let server = issue(&user, "server");
-        let genesis = genesis_of(&server);
+        let genesis = genesis_of(&server, issue(&user, "op").fingerprint());
         let board = Board::new(&genesis).unwrap();
         let flock = board.flock();
         Self {

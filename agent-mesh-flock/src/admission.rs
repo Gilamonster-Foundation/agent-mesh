@@ -58,6 +58,9 @@ pub enum Refusal {
     DevicesLocked,
     /// `devices` on a member that is not an operator.
     DevicesOnNonOperator,
+    /// An operator `answer` signed by a key the roster does not list as a
+    /// device.
+    NotAListedDevice,
     /// Only a server-signed roster changes who the delegate is.
     DelegateLocked,
     /// More than one roster member is the delegate.
@@ -191,6 +194,14 @@ fn check_devices(board: &Board, new: &[Member], signer: &Signer) -> Result<(), R
     Ok(())
 }
 
+/// Whether the roster's operator members list `device`, as of `board`.
+fn listed_device(board: &Board, device: &agent_mesh_protocol::Fingerprint) -> bool {
+    board
+        .members()
+        .iter()
+        .any(|m| m.role == Role::Operator && m.devices.contains(device))
+}
+
 /// Root names the roster may declare.
 fn check_roots(board: &Board, new: &[String], signer: &Signer) -> Result<(), Refusal> {
     if !roots_well_formed(new) {
@@ -231,6 +242,7 @@ fn signer_member<'a>(
             K::Roster
             | K::Epoch
             | K::Renewal
+            | K::DeviceCert
             | K::SessionStart
             | K::SessionEnd
             | K::Handoff
@@ -238,7 +250,8 @@ fn signer_member<'a>(
             _ => Err(Refusal::NotAllowed),
         },
         SignerClass::Operator => match kind {
-            K::Answer => Ok(None),
+            K::Answer if listed_device(board, &signer.fingerprint) => Ok(None),
+            K::Answer => Err(Refusal::NotAListedDevice),
             _ => Err(Refusal::NotAllowed),
         },
         SignerClass::Session { member, pending } => {
@@ -265,6 +278,7 @@ fn signer_member<'a>(
                 K::Answer
                 | K::Epoch
                 | K::Renewal
+                | K::DeviceCert
                 | K::SessionStart
                 | K::SessionEnd
                 | K::Handoff
@@ -337,6 +351,7 @@ fn is_server_kind(kind: Kind) -> bool {
         kind,
         Kind::Epoch
             | Kind::Renewal
+            | Kind::DeviceCert
             | Kind::SessionStart
             | Kind::SessionEnd
             | Kind::Handoff
