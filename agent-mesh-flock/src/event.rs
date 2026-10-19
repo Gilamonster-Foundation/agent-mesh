@@ -36,6 +36,8 @@ pub enum Kind {
     Status,
     /// Adapter nudge record.
     Nudged,
+    /// Adapter: a nudge may have reached the wrong pane.
+    NudgeMisfire,
     /// A session's claim of the herdr pane it runs in.
     Pane,
     /// Server: epoch bump.
@@ -84,6 +86,13 @@ pub struct Member {
     /// roster without devices has the bytes it always had.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<agent_mesh_protocol::Fingerprint>,
+    /// The flock's one human delegate: the member that holds the operator's
+    /// screen. At most one member; changed only by a server-signed `roster`
+    /// event. Not encoded when false, so a roster without a delegate has the
+    /// bytes it always had. Grants no authority of its own; it only decides
+    /// who may approve this member's hand-off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delegate: bool,
 }
 
 /// How a brief ended.
@@ -146,6 +155,13 @@ pub enum Body {
     Roster {
         /// All members.
         members: Vec<Member>,
+        /// The names of the file roots a member may cite from: a name only,
+        /// never a path (each home host maps its names to directories in its
+        /// own config). Changed only by a server-signed `roster` event. Empty
+        /// roots are not encoded, so a roster without roots has the bytes it
+        /// always had.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        roots: Vec<String>,
     },
     /// A brief for `to` in `lane`.
     Brief {
@@ -219,10 +235,21 @@ pub enum Body {
         /// Status text.
         text: String,
     },
-    /// Adapter nudge.
+    /// Adapter nudge. May cite (`of`) the brief or review it was about.
     Nudged {
         /// Target the nudge went to.
         target: String,
+    },
+    /// Adapter: the pane that was prompted may not be `target`'s. The
+    /// adapter's own claim about what it saw; it may cite (`of`) the brief or
+    /// review the nudge was about.
+    NudgeMisfire {
+        /// The roster member the nudge was meant for.
+        target: String,
+        /// What the pane was when it was chosen.
+        expected: String,
+        /// What it was when the prompt had been sent.
+        found: String,
     },
     /// A session's claim of where it runs. The signature proves the session
     /// said it; nothing proves the pane is real or still that pane.
@@ -317,6 +344,7 @@ impl Body {
                 | (Self::RelayedAnswer { .. }, K::RelayedAnswer)
                 | (Self::Status { .. }, K::Status)
                 | (Self::Nudged { .. }, K::Nudged)
+                | (Self::NudgeMisfire { .. }, K::NudgeMisfire)
                 | (Self::Pane { .. }, K::Pane)
                 | (Self::Invite { .. }, K::Invite)
                 | (Self::SessionStart { .. }, K::SessionStart)

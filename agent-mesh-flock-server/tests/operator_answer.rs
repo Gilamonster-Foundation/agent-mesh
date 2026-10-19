@@ -324,3 +324,71 @@ fn the_servers_own_certificate_is_not_a_device() {
     let server_cert = f.env.server_key().cert().clone();
     assert!(f.server.register_device(server_cert).is_err());
 }
+
+#[test]
+fn a_generation_bounded_device_is_refused_once_the_epoch_passes_and_its_earlier_answer_replays() {
+    use agent_mesh_protocol::{AgentMetadata, Caveats, Scope};
+    let (mut f, _) = bare();
+    let epoch = f.server.epoch();
+    let mut meta: AgentMetadata = support::meta("operator");
+    meta.caveats = Caveats {
+        valid_for_generation: Scope::only([epoch]),
+        ..Caveats::top()
+    };
+    let dev = AgentKey::issue(&f.env.user, meta);
+    set_devices(&mut f.server, vec![dev.fingerprint()]);
+    f.server.register_device(dev.cert().clone()).unwrap();
+    let (n, s) = f.env.event(
+        &f.h1.key,
+        Kind::Ask,
+        Some(f.ask),
+        &[],
+        Body::Ask {
+            lane: None,
+            text: "and then?".into(),
+        },
+    );
+    let second = id(&n);
+    f.server.admit(n, s).unwrap();
+    f.admit_answer(&dev, "yes").unwrap();
+    let first = f.server.board().closer_of(&f.ask).unwrap();
+    // a dropped member bumps the epoch past the device's bound
+    let _h3 = enroll(&mut f.server, "herdr");
+    let mut ms = f.server.board().members().to_vec();
+    ms.retain(|m| m.name != "herdr");
+    f.server.replace_roster(ms).unwrap();
+    assert!(f.server.epoch() > epoch);
+    f.ask = second;
+    let w = signer_err(f.admit_answer(&dev, "later"));
+    assert!(w.contains("generation"), "{w}");
+    let dir = f.env.dir();
+    drop(f.server);
+    let snap = Snapshot::read(&dir).unwrap();
+    assert_eq!(
+        snap.board().closer_of(&f.ask),
+        None,
+        "the late answer is not in the log"
+    );
+    assert!(snap.board().get(&first).is_some());
+    assert!(Server::open(&dir).is_ok());
+}
+
+#[test]
+fn a_live_follower_takes_an_operator_answer_and_its_registration() {
+    use agent_mesh_flock_server::Follower;
+    let (mut f, dev) = flock();
+    f.admit_answer(&dev, "yes").unwrap();
+    let genesis = agent_mesh_flock_server::load_genesis(f.env.tmp.path())
+        .unwrap()
+        .node;
+    let mut fol = Follower::new(&genesis).unwrap();
+    for fr in support::read_frames(&f.env) {
+        fol.apply(&fr.sealed).unwrap();
+    }
+    assert_eq!(fol.admitted(), f.server.admitted());
+    assert_eq!(
+        fol.board().closer_of(&f.ask),
+        f.server.board().closer_of(&f.ask)
+    );
+    assert!(fol.board().closer_of(&f.ask).is_some());
+}

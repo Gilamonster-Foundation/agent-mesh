@@ -16,6 +16,7 @@ use crate::journal::Cursor;
 use crate::wire::{read_msg, write_msg, Req, Resp, StreamChallenge};
 use crate::{CrashPlan, Head, Journal, Resume, Server, ServerError};
 use agent_mesh_flock::{EndReason, Kind};
+use content_addressable::RawContentId;
 use rand::RngCore as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -170,6 +171,9 @@ fn offered(class: Class, req: &Req) -> bool {
         Req::End => true,
         Req::WatchBegin => true,
         Req::Watch { .. } => true,
+        Req::Prove { .. } => true,
+        Req::FileStat { .. } => true,
+        Req::File { .. } => true,
         Req::Invite { .. } => false,
     }
 }
@@ -437,6 +441,7 @@ fn connection(shared: &Shared, mut conn: UnixStream, class: Class, id: u64) {
 fn serve_connection(shared: &Shared, conn: &mut UnixStream, class: Class) {
     let mut bound: Option<String> = None;
     let mut challenge: Option<StreamChallenge> = None;
+    let mut proven: Option<String> = None;
     while let Ok(Some(req)) = read_msg::<Req>(conn) {
         if !offered(class, &req) {
             if write_msg(conn, &Resp::Err(NOT_OFFERED.into())).is_err() {
@@ -473,6 +478,39 @@ fn serve_connection(shared: &Shared, conn: &mut UnixStream, class: Class) {
                 }
                 break;
             }
+            Req::Prove { proof } => {
+                // spent whatever happens, as a watch's challenge is
+                let opened = challenge
+                    .take()
+                    .ok_or_else(|| ServerError::Session("ask for a stream challenge first".into()))
+                    .and_then(|c| c.id())
+                    .and_then(|id| with(shared, |s| s.authorize_stream(&proof, &id)));
+                let resp = match opened {
+                    Ok(session) => {
+                        proven = Some(session);
+                        Resp::Proved
+                    }
+                    Err(e) => Resp::Err(e.to_string()),
+                };
+                if write_msg(conn, &resp).is_err() {
+                    break;
+                }
+                continue;
+            }
+            Req::FileStat { root, path } => {
+                let resp = file_resp(shared, proven.as_deref(), &root, &path, None);
+                if write_msg(conn, &resp).is_err() {
+                    break;
+                }
+                continue;
+            }
+            Req::File { root, path, id } => {
+                let resp = file_resp(shared, proven.as_deref(), &root, &path, Some(id));
+                if write_msg(conn, &resp).is_err() {
+                    break;
+                }
+                continue;
+            }
             req => {
                 if !step(shared, conn, req, &mut bound, class) {
                     break;
@@ -486,6 +524,45 @@ fn serve_connection(shared: &Shared, conn: &mut UnixStream, class: Class) {
         if let Err(e) = with(shared, |srv| srv.end_session(&s, EndReason::Lost)) {
             if is_fatal(&e) {
                 fail(shared, &e);
+            }
+        }
+    }
+}
+
+/// Answer a file request from a connection that proved membership. The
+/// session must still be an active one of a current member, the root declared
+/// by the roster and mapped on this host; the file is read outside the
+/// server's lock.
+fn file_resp(
+    shared: &Shared,
+    session: Option<&str>,
+    root: &str,
+    path: &str,
+    cited: Option<RawContentId>,
+) -> Resp {
+    let Some(session) = session else {
+        return Resp::Err("prove membership first".into());
+    };
+    let dir = with(shared, |s| {
+        s.session_may_read(session).then(|| s.root_dir(root))
+    });
+    let dir = match dir {
+        None => return Resp::Err("this session may no longer read files".into()),
+        Some(None) => {
+            return Resp::Unavailable {
+                reason: "unknown root".into(),
+            }
+        }
+        Some(Some(d)) => d,
+    };
+    match crate::files::read_under(&dir, path) {
+        Err(reason) => Resp::Unavailable { reason },
+        Ok(bytes) => {
+            let current = RawContentId::from_content(&bytes);
+            match cited {
+                None => Resp::FileId { id: current },
+                Some(id) if id == current => Resp::File { bytes },
+                Some(_) => Resp::ChangedSinceCited { current },
             }
         }
     }
@@ -643,7 +720,11 @@ fn handle(
             }
         }
         Req::End => Resp::Ok,
-        Req::WatchBegin | Req::Watch { .. } => {
+        Req::WatchBegin
+        | Req::Watch { .. }
+        | Req::Prove { .. }
+        | Req::FileStat { .. }
+        | Req::File { .. } => {
             return Err(ServerError::Session(
                 "a stream is opened by the connection".into(),
             ))

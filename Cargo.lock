@@ -75,6 +75,7 @@ dependencies = [
  "agent-mesh-flock-session",
  "agent-mesh-protocol",
  "agent-mesh-transport",
+ "agent-mesh-transport-ssh",
  "anyhow",
  "assert_cmd",
  "chrono",

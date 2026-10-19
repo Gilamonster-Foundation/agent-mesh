@@ -16,13 +16,17 @@ through a session process, verifies every event, and saves its place under
 depends on the read side of the flock crates only, and its tests check that.
 
 - Unix only (the flock server and session are Unix-only).
-- Two views, `Tab` (or `1`/`2`) to switch: the **Board** (who is on the roster
+- Four views, `Tab` (or `1`-`4`) to switch: the **Board** (who is on the roster
   and what is open against them) and the **Stream** (every admitted event in
   order). On the Stream: `↑↓` select, `f` follow the newest event, `k` `l` `m`
   cycle the kind / lane / member filter, `c` clear them, `Enter` opens the raw
   view of an event (payload, signer, what was checked, its parents), `1`-`9`
-  jump to a parent, `Backspace` goes back, `Esc` closes. The Lane and Waiting
-  views come next.
+  jump to a parent, `Backspace` goes back, `Esc` closes. The **Lane** view shows
+  each lane's attempts and reviews and whether the files its events cite still
+  have the bytes they were cited with (`--root name=path` says where a cited
+  root is on this host; files are only read; `r` checks again). The **Waiting**
+  view lists open asks, reviews with no verdict and briefs nobody has taken,
+  with their age in events and who they wait on; it answers nothing.
 - A closed stream shows the view as stale since the last verified event; it does
   not reconnect. Refused events are not on the stream and are not shown.
 

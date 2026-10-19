@@ -1,6 +1,6 @@
 amesh-tui · flock fx · id ············ · 7 members
 log ✓ 24 · epoch 1 · stale since #9
-[Board]  Stream
+[Board]  Stream   Lane   Waiting
   MEMBER     ROLE      SESSION    SELF           OPEN                   QUIET
 ▸ shep       shepherd  active     -              -                      9 events
   h1         helper    active +1  -              1 job, 1 lane, 1 ask   7 events

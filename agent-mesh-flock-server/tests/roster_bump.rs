@@ -66,7 +66,10 @@ fn a_shepherds_roster_event_that_drops_a_member_is_sealed_with_the_bump() {
         Kind::Roster,
         None,
         &[("replaces", replaces)],
-        Body::Roster { members: roster },
+        Body::Roster {
+            members: roster,
+            roots: vec![],
+        },
     );
     server.admit(n, s).unwrap();
     let all = frames(&server);
@@ -84,6 +87,7 @@ fn a_roster_that_only_adds_a_member_needs_no_bump() {
         name: "h2".into(),
         role: agent_mesh_flock::Role::Helper,
         devices: vec![],
+        delegate: false,
     });
     server.replace_roster(roster).unwrap();
     let all = frames(&server);
@@ -177,6 +181,7 @@ fn swapping_one_member_for_another_still_drops_a_name_and_bumps() {
         name: "h2".into(),
         role: agent_mesh_flock::Role::Helper,
         devices: vec![],
+        delegate: false,
     });
     server.replace_roster(roster).unwrap();
     let all = frames(&server);

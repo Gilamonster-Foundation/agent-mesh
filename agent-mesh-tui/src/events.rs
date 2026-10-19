@@ -77,6 +77,8 @@ fn summary(body: &Body) -> String {
         },
         Body::Ask { text, .. } | Body::Status { text } | Body::Answer { text } => text.clone(),
         Body::Pane { pane, tab } => format!("pane {pane} tab {tab}"),
+        Body::Nudged { target } => format!("nudged {target}"),
+        Body::NudgeMisfire { target, .. } => format!("{target}: may have reached the wrong pane"),
         Body::Epoch { epoch } => format!("epoch {epoch}"),
         Body::Invite { member, .. } => format!("for {member}"),
         Body::SessionStart { member, .. } => format!("{member} started"),

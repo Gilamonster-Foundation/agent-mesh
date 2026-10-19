@@ -8,6 +8,7 @@
 
 mod ctl;
 mod error;
+mod files;
 mod fs;
 #[cfg(feature = "emit")]
 mod harden;
@@ -19,6 +20,7 @@ mod session;
 
 pub use ctl::{call, session_prover, CtlReq, CtlResp};
 pub use error::{ReaderError, SessionError};
+pub use files::{Cited, Files};
 pub use fs::{save_atomic, Fs, RealFs};
 #[cfg(feature = "emit")]
 pub use harden::{harden, Hardening, Policy};

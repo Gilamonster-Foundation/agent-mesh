@@ -58,12 +58,14 @@ pub fn genesis_of(server: &AgentKey, op: Fingerprint) -> MerkleNode<Genesis> {
                 name: (*n).into(),
                 role: *r,
                 devices: vec![],
+                delegate: false,
             })
             // the operator, whose one device is the fixture's "op" key
             .chain([Member {
                 name: "op".into(),
                 role: Role::Operator,
                 devices: vec![op],
+                delegate: false,
             }])
             .collect(),
         salt: "s".into(),

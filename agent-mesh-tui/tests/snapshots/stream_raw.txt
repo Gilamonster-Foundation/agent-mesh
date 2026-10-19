@@ -1,6 +1,6 @@
 amesh-tui · flock fx · id ············ · 7 members
 log ✓ 24 · epoch 1 · live
- Board  [Stream]
+ Board  [Stream]  Lane   Waiting
 event #13  <cid>
 ✓ signature, session certificate and admission checked; admitted at #13
 kind ack · signed by h1; session <session>

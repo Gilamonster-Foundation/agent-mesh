@@ -61,8 +61,16 @@ pub enum Refusal {
     /// An operator `answer` signed by a key the roster does not list as a
     /// device.
     NotAListedDevice,
+    /// Only a server-signed roster changes who the delegate is.
+    DelegateLocked,
+    /// More than one roster member is the delegate.
+    MultipleDelegates,
     /// Two roster members share a name.
     DuplicateMember,
+    /// A roster that changes the file roots, signed by anyone but the server.
+    RootsLocked,
+    /// A root name that is empty, too long, not plain, or declared twice.
+    BadRoot,
     /// A claim (pane, tab) that is empty, too long or not printable.
     BadClaim,
     /// A `job-end` that does not say exactly one of an exit code and a signal.
@@ -120,8 +128,9 @@ fn decide(board: &Board, node: &MerkleNode<Event>, signer: &Signer) -> Result<Ve
         return Err(Refusal::BodyKindMismatch);
     }
     let member = signer_member(board, ev.kind, signer)?;
-    if let Body::Roster { members } = &ev.body {
+    if let Body::Roster { members, roots } = &ev.body {
         check_devices(board, members, signer)?;
+        check_roots(board, roots, signer)?;
     }
     writer_chain(board, ev, signer)?;
     let target = check_refs(board, ev)?;
@@ -133,14 +142,21 @@ fn decide(board: &Board, node: &MerkleNode<Event>, signer: &Signer) -> Result<Ve
 }
 
 /// A roster is well formed when member names are unique (bindings are by
-/// name) and devices belong to operator members only. Every reader of a
+/// name), devices belong to operator members only and at most one member is
+/// the delegate. Every reader of a
 /// roster (init, the genesis loader, roster admission) uses this one rule.
 #[must_use]
 pub fn roster_well_formed(members: &[Member]) -> bool {
     let mut names = std::collections::BTreeSet::new();
-    members.iter().all(|m| {
-        names.insert(m.name.as_str()) && (m.role == Role::Operator || m.devices.is_empty())
-    })
+    members.iter().filter(|m| m.delegate).count() <= 1
+        && members.iter().all(|m| {
+            names.insert(m.name.as_str()) && (m.role == Role::Operator || m.devices.is_empty())
+        })
+}
+
+/// The designated delegate's name, if any.
+fn delegate_of(ms: &[Member]) -> Option<&str> {
+    ms.iter().find(|m| m.delegate).map(|m| m.name.as_str())
 }
 
 /// Device bindings by member name, each list sorted: roster order and device
@@ -163,6 +179,12 @@ fn check_devices(board: &Board, new: &[Member], signer: &Signer) -> Result<(), R
     if !new.iter().all(|m| names.insert(m.name.as_str())) {
         return Err(Refusal::DuplicateMember);
     }
+    if new.iter().filter(|m| m.delegate).count() > 1 {
+        return Err(Refusal::MultipleDelegates);
+    }
+    if signer.class != SignerClass::Server && delegate_of(new) != delegate_of(board.members()) {
+        return Err(Refusal::DelegateLocked);
+    }
     if !roster_well_formed(new) {
         return Err(Refusal::DevicesOnNonOperator);
     }
@@ -178,6 +200,34 @@ fn listed_device(board: &Board, device: &agent_mesh_protocol::Fingerprint) -> bo
         .members()
         .iter()
         .any(|m| m.role == Role::Operator && m.devices.contains(device))
+}
+
+/// Root names the roster may declare.
+fn check_roots(board: &Board, new: &[String], signer: &Signer) -> Result<(), Refusal> {
+    if !roots_well_formed(new) {
+        return Err(Refusal::BadRoot);
+    }
+    let as_set = |r: &[String]| r.iter().cloned().collect::<BTreeSet<String>>();
+    if signer.class != SignerClass::Server && as_set(new) != as_set(board.roots()) {
+        return Err(Refusal::RootsLocked);
+    }
+    Ok(())
+}
+
+/// Root names are plain and unique: 1 to 64 of `A-Za-z0-9._-`, and not `.`
+/// or `..` (a name is looked up in the home host's own map, never joined to a
+/// path, but a name that reads as a path invites the mistake).
+#[must_use]
+pub fn roots_well_formed(roots: &[String]) -> bool {
+    let mut seen = BTreeSet::new();
+    roots.iter().all(|r| {
+        (1..=64).contains(&r.len())
+            && r.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            && r != "."
+            && r != ".."
+            && seen.insert(r.as_str())
+    })
 }
 
 /// The signing member (name, role) for session signers, after the class gate.
@@ -216,7 +266,7 @@ fn signer_member<'a>(
                 .ok_or(Refusal::UnknownMember)?;
             let allowed = match kind {
                 K::Roster | K::Brief | K::Review => role == Role::Shepherd,
-                K::Status | K::Nudged => role == Role::Adapter,
+                K::Status | K::Nudged | K::NudgeMisfire => role == Role::Adapter,
                 K::Ack
                 | K::Result
                 | K::Verdict
@@ -290,6 +340,8 @@ fn ref_spec(kind: Kind) -> &'static [(&'static str, &'static [Kind], bool)] {
         K::JobEnd => &[("job", &[K::Job], true)],
         K::Ask => &[("about", &[K::Brief], false)],
         K::Answer | K::RelayedAnswer => &[("ask", &[K::Ask], true)],
+        // what a nudge was about; optional, so a nudge needs no event to cite
+        K::Nudged | K::NudgeMisfire => &[("of", &[K::Brief, K::Review], false)],
         _ => &[],
     }
 }
@@ -427,8 +479,44 @@ fn apply_table(
             }
         }
         (_, Kind::Answer) => Ok(target),
+        (Body::Nudged { target: to }, Kind::Nudged) => nudge_ok(board, to, target_entry, &[]),
+        (
+            Body::NudgeMisfire {
+                target: to,
+                expected,
+                found,
+            },
+            Kind::NudgeMisfire,
+        ) => nudge_ok(board, to, target_entry, &[expected, found]),
         _ => Ok(None),
     }
+}
+
+/// A nudge (or a misfire) is about a roster member, and, if it cites a brief
+/// or review, about that one's addressee: the adapter cannot say it nudged
+/// someone about work addressed to someone else. It closes nothing.
+fn nudge_ok(
+    board: &Board,
+    target: &str,
+    about: Option<&crate::board::Entry>,
+    texts: &[&String],
+) -> Result<Option<ContentId>, Refusal> {
+    if !board.members().iter().any(|m| m.name == target) {
+        return Err(Refusal::UnknownMember);
+    }
+    if let Some(entry) = about {
+        let to = match &entry.event.body {
+            Body::Brief { to, .. } | Body::Review { to, .. } => to,
+            _ => return Err(Refusal::WrongRefKind("of")),
+        };
+        if to != target {
+            return Err(Refusal::NotAddressee);
+        }
+    }
+    if !texts.iter().all(|t| claim_ok(t)) {
+        return Err(Refusal::BadClaim);
+    }
+    Ok(None)
 }
 
 /// A claimed id is short and printable: it ends up on an operator's screen.
