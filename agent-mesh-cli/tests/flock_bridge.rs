@@ -1020,3 +1020,111 @@ async fn the_proxy_caps_its_local_connections_and_takes_them_back() {
     assert!(served);
     task.abort();
 }
+
+/// Open a watch over `sock`, read through the replay to `Caught` (the server
+/// worker now waits for news), and hand back its connection.
+fn watch_caught_up(sock: &Path, key: &AgentKey) -> UnixStream {
+    let (mut c, _, proof) = stream_proof(sock, key);
+    write_msg(
+        &mut c,
+        &Req::Watch {
+            from: None,
+            proof: Box::new(proof),
+        },
+    )
+    .unwrap();
+    while !matches!(read_msg::<Resp>(&mut c).unwrap(), Some(Resp::Caught { .. })) {}
+    c
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_watch_that_goes_away_ends_the_home_worker_and_its_place_not_only_the_place() {
+    // One place for the member's session and one for a watch. A reader opens
+    // a watch, catches up and disconnects over and over; nothing is ever
+    // published and the server never stops. The place coming back is not
+    // enough: the server's worker must be gone too, or repeats accumulate
+    // threads while the gate looks empty.
+    let w = world().await;
+    let gate = Gate::new(Limits {
+        total: 2,
+        per_peer: 2,
+    });
+    let h = home_gated(&w.user, &w.home_bus, "f", gate.clone());
+    let a = attach(&w.user, &w.remote_bus, w.home_at, &h).await;
+    let token = h.invite("h1");
+    let sock = a.sock.clone();
+    let (member_conn, key, _, _) = blocking(move || enrol_by_hand(&sock, &token, "h1")).await;
+    let key = Arc::new(key);
+    let baseline = h.serving().live_connections();
+    assert_eq!(baseline, 1);
+    for _ in 0..8 {
+        let (sock, key) = (a.sock.clone(), key.clone());
+        let watch = blocking(move || watch_caught_up(&sock, &key)).await;
+        assert_eq!(gate.open(), 2);
+        drop(watch);
+        gate.wait_open_at_most(1).await;
+        let serving = h.serving.as_ref().unwrap();
+        blocking_ref(serving, baseline).await;
+    }
+    // and the proxy going away (cancelled) takes a caught-up watch with it
+    let (sock, k2) = (a.sock.clone(), key.clone());
+    let watch = blocking(move || watch_caught_up(&sock, &k2)).await;
+    a.task.abort();
+    gate.wait_open_at_most(1).await;
+    blocking_ref(h.serving.as_ref().unwrap(), baseline).await;
+    drop((watch, member_conn));
+}
+
+/// Wait, off the async workers, until the server has at most `n` connection
+/// threads.
+async fn blocking_ref(serving: &Serving, n: usize) {
+    tokio::task::block_in_place(|| serving.wait_connections_at_most(n));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_home_place_is_held_until_the_backend_connection_is_closed() {
+    // A backend that does not close until told. The remote goes away; the
+    // bridge tells the backend it is done (the backend reads the end), and
+    // the place must still be held: it covers the backend's worker, so it is
+    // released only when the backend has closed its end.
+    let w = world().await;
+    let (id, _) = some_genesis(&w.user, "f");
+    let t = topic(w.user.fingerprint(), &id);
+    let dir = tempfile::tempdir().unwrap();
+    let attach = dir.path().join("attach.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&attach).unwrap();
+    let gate = Gate::new(Limits {
+        total: 1,
+        per_peer: 1,
+    });
+    serve_home(&w.home_bus, t.clone(), attach, gate.clone());
+    const ROUNDS: usize = 24;
+    // Several rounds: without the guarantee the place can still read as held
+    // at the moment the end is seen, so one round proves little.
+    let (saw_end, mut saw_end_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let backend = std::thread::spawn(move || {
+        for _ in 0..ROUNDS {
+            let (mut c, _) = listener.accept().unwrap();
+            let mut sink = [0u8; 64];
+            while std::io::Read::read(&mut c, &mut sink).is_ok_and(|n| n > 0) {}
+            let _ = saw_end.send(());
+            let _ = release_rx.recv();
+            // dropping `c` closes the backend's end
+        }
+    });
+    for _ in 0..ROUNDS {
+        let s = w
+            .remote_bus
+            .open_session_direct(w.home_at, &t)
+            .await
+            .unwrap();
+        assert_eq!(gate.open(), 1);
+        drop(s);
+        saw_end_rx.recv().await.unwrap();
+        assert_eq!(gate.open(), 1, "the place went before the backend closed");
+        release.send(()).unwrap();
+        gate.wait_open_at_most(0).await;
+    }
+    backend.join().unwrap();
+}

@@ -314,6 +314,79 @@ fn a_client_that_half_closes_sees_the_server_close_its_end() {
         // timeout only turns a server that never closes into a failure)
         c.set_read_timeout(Some(std::time::Duration::from_secs(10)))
             .unwrap();
-        assert!(matches!(read_msg::<Resp>(&mut c), Ok(None)));
+        // print what the read gave: a platform's end-of-stream differs
+        let end = read_msg::<Resp>(&mut c);
+        assert!(matches!(end, Ok(None)), "{sock:?}: read gave {end:?}");
     }
+}
+
+#[test]
+fn a_watch_that_disconnects_ends_its_worker_with_nothing_published() {
+    use agent_mesh_flock_server::wire::StreamChallenge;
+    // A member session stays alive; a reader opens a watch, catches up and
+    // goes away, over and over, with no new record and no server stop. Each
+    // time the server must end the worker that was waiting for the next frame
+    // (the count of running connection threads is the proof; a place in a
+    // bridge's gate is not).
+    let r = rig();
+    let serving = r.serving.as_ref().unwrap();
+    let Resp::Invited { token } = ask(
+        &r.owner,
+        &Req::Invite {
+            member: "shep".into(),
+        },
+    ) else {
+        panic!("invite")
+    };
+    let sk = SigningKey::generate(&mut OsRng);
+    let mut conn = UnixStream::connect(&r.attach).unwrap();
+    write_msg(
+        &mut conn,
+        &Req::EnrollBegin {
+            token,
+            member: "shep".into(),
+            pubkey: sk.verifying_key().to_bytes(),
+        },
+    )
+    .unwrap();
+    let Some(Resp::Challenge(ch)) = read_msg::<Resp>(&mut conn).unwrap() else {
+        panic!("challenge")
+    };
+    write_msg(
+        &mut conn,
+        &Req::EnrollFinish {
+            proof: sk.sign(&ch.signing_bytes()),
+            challenge: ch,
+        },
+    )
+    .unwrap();
+    let Some(Resp::Enrolled { cert, .. }) = read_msg::<Resp>(&mut conn).unwrap() else {
+        panic!("enrolled")
+    };
+    let key = AgentKey::from_seed_and_cert(&sk.to_bytes(), cert).unwrap();
+    // the enrolling connection is the one live worker
+    let baseline = serving.live_connections();
+    assert_eq!(baseline, 1);
+    for _ in 0..8 {
+        let mut w = UnixStream::connect(&r.attach).unwrap();
+        write_msg(&mut w, &Req::WatchBegin).unwrap();
+        let Some(Resp::StreamChallenge(sc)) = read_msg::<Resp>(&mut w).unwrap() else {
+            panic!("stream challenge")
+        };
+        let proof = Assertion::sign(&key, &StreamChallenge::id(&sc).unwrap());
+        write_msg(
+            &mut w,
+            &Req::Watch {
+                from: None,
+                proof: Box::new(proof),
+            },
+        )
+        .unwrap();
+        // through the replay to Caught: the worker now waits for news
+        while !matches!(read_msg::<Resp>(&mut w).unwrap(), Some(Resp::Caught { .. })) {}
+        assert_eq!(serving.live_connections(), baseline + 1);
+        drop(w);
+        serving.wait_connections_at_most(baseline);
+    }
+    drop(conn);
 }

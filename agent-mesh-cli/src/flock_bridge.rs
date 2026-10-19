@@ -196,7 +196,7 @@ fn check_frame(body: &[u8]) -> Result<()> {
 async fn pipe(session: Session, conn: UnixStream) -> Result<()> {
     let (tx, mut rx) = session.split();
     let (mut from_socket, mut to_socket) = conn.into_split();
-    let up = async move {
+    let up = async {
         while let Some(frame) = read_frame(&mut from_socket).await? {
             tx.send(frame).await?;
         }
@@ -204,7 +204,7 @@ async fn pipe(session: Session, conn: UnixStream) -> Result<()> {
         tx.close().await?;
         Ok::<(), anyhow::Error>(())
     };
-    let down = async move {
+    let down = async {
         while let Some(body) = rx.recv().await? {
             check_frame(&body)?;
             to_socket.write_all(&body).await?;
@@ -212,8 +212,14 @@ async fn pipe(session: Session, conn: UnixStream) -> Result<()> {
         to_socket.shutdown().await?;
         Ok::<(), anyhow::Error>(())
     };
-    tokio::try_join!(up, down)?;
-    Ok(())
+    let done = tokio::try_join!(up, down).map(|_| ());
+    // Whatever ended it, the backend connection is ours to see closed: tell
+    // the server we are done and wait for it to close its end, so the caller's
+    // place is held until the backend worker is really gone.
+    let _ = to_socket.shutdown().await;
+    let mut sink = [0u8; 512];
+    while matches!(from_socket.read(&mut sink).await, Ok(n) if n > 0) {}
+    done
 }
 
 /// Home side: serve this flock's sessions by piping each to the server's

@@ -161,9 +161,12 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   its local connections the same way (an excess connection simply ends) and
   tracks its tasks, so capacity returns when a stream ends, fails or is
   cancelled. A held-open but idle admitted stream keeps its place until its
-  peer closes it (no application-progress deadline yet). The server now also closes a
-  finished connection for its peer (it kept a duplicate handle, so a half-closed
-  connection never reached an end), which is what lets a place be given back.
+  peer closes it (no application-progress deadline yet). A place is held until
+  the home's backend connection has really closed, not only until the bridge is
+  done: the server watches each watch's socket for its end and wakes the worker
+  waiting for the next record, so a reader that vanishes ends its worker even
+  when nothing is ever published; the server also closes a finished connection
+  completely (it keeps no duplicate handle), which is what lets a place go back.
 - **MCP tools** (`amesh mcp --flock-session <sock>` or `AMESH_FLOCK_SESSION`,
   Unix): `flock_whoami`, `flock_inbox`, `flock_status` and `flock_emit{kind,
   refs, body}` join the `mesh_*` tools, only when a session is given. The
