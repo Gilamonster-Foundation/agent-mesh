@@ -38,12 +38,20 @@ serde_json.workspace = true
 hex.workspace = true
 content-addressable.workspace = true
 rand.workspace = true
+age = { version = "0.11", features = ["armor"] }
+zeroize.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "termios", "stdio"] }
 agent-mesh-flock-session = { workspace = true, features = ["emit"] }
 
+[features]
+# A signer UI that confirms by itself, for tests only. Never in `default`, and
+# nothing in the binary names it.
+test-ui = []
+
 [dev-dependencies]
+agent-mesh-cli = { path = ".", features = ["test-ui"] }
 tempfile.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true

@@ -17,6 +17,8 @@ mod herdr;
 mod keygen;
 mod listen;
 mod mcp;
+#[cfg(unix)]
+pub mod operator;
 mod peers;
 mod send;
 mod util;

@@ -113,6 +113,25 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   cannot approve its delegate's replacement. Approvals are judged at their own
   index on replay. The delegate gains no operator authority. No signing gesture
   or `answer` yet (13b/13c);
+- **the operator's answer signer** (step 13c): `amesh flock device-init`
+  (terminal, passphrase twice) mints a device seed certified directly by the
+  user key and stores it **age-encrypted** (scrypt passphrase, armored, `0600`
+  in a `0700` directory); `device-register` sends the certificate to the owner
+  socket (`Req::RegisterDevice`, never offered on the attach socket), and the
+  roster must still list the fingerprint under the operator. `amesh flock sign`
+  is a separate foreground process that **refuses to start unless stdin is a
+  TTY**. `amesh flock answer --ask <cid> --text ...` sends it one typed request
+  (flock, ask, text): the signer re-reads the verified log, refuses another
+  flock, a non-ask, an already-answered ask or an empty/oversized text **before
+  any prompt**, shows flock, ask id and text (escaped), lane and the exact
+  answer on `/dev/tty`, and only on `y` asks for the passphrase there (no env
+  var, no flag), signs that one event id, drops the key, and admits it as-is.
+  Each untrusted field (ask text, lane, answer) is escaped on its own, so none can forge the signer's headings; the passphrase prompt turns echo off before it appears. `device-init` refuses an existing device directory that others can enter. The terminal paths are tested through the production binary on a pty. There is no "sign these bytes" request and no blanket consent. An agent
+  never holds the key. **Limits:** the signer socket and files are `0600`,
+  which keeps out other users, not a process of the same user that can read
+  your terminal, ptrace the signer or replace the binary; the passphrase is
+  only as strong as you make it. A test-only auto-confirming UI exists behind
+  the `test-ui` feature, which no default build or binary path names;
 - **byte strings**: keys, signatures, fingerprints and nonces are CBOR byte
   strings in the canonical encoding and on the session wire (they were arrays of
   one integer per byte: about 22% larger frames, and a size that varied with the
