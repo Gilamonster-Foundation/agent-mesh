@@ -105,6 +105,8 @@ fn fetch(c: &mut UnixStream, path: &str, id: RawContentId) -> Resp {
     )
 }
 
+const LINK: &str = "outside the root or through a link";
+
 fn id_of(b: &[u8]) -> RawContentId {
     RawContentId::from_content(b)
 }
@@ -259,6 +261,7 @@ fn paths_that_leave_the_root_are_refused() {
         ("dotdot inside", "sub/../../notes-secret/key".to_owned()),
         ("absolute", outside.display().to_string()),
         ("absolute root", "/etc/passwd".to_owned()),
+        ("the root itself", ".".to_owned()),
     ] {
         let resp = stat(&mut c, &path);
         assert_eq!(unavailable(&resp), "outside the root", "{what}");
@@ -290,7 +293,7 @@ fn a_symlink_out_of_the_root_is_refused_file_or_directory() {
     ] {
         let resp = stat(&mut c, path);
         assert!(
-            matches!(&resp, Resp::Unavailable { reason } if reason == "outside the root"),
+            matches!(&resp, Resp::Unavailable { reason } if reason == LINK),
             "{path}: {resp:?}"
         );
         let resp = fetch(&mut c, path, id_of(b"do not serve"));
@@ -299,15 +302,16 @@ fn a_symlink_out_of_the_root_is_refused_file_or_directory() {
 }
 
 #[test]
-fn a_link_that_stays_inside_the_root_is_followed() {
+fn a_link_that_stays_inside_the_root_is_refused_too() {
     let r = rig();
-    std::fs::write(r.notes.join("real.md"), b"real").unwrap();
-    symlink("real.md", r.notes.join("alias.md")).unwrap();
+    std::fs::create_dir(r.notes.join("real")).unwrap();
+    std::fs::write(r.notes.join("real/a.md"), b"real").unwrap();
+    symlink("real/a.md", r.notes.join("alias.md")).unwrap();
+    symlink("real", r.notes.join("dir-alias")).unwrap();
     let mut c = member(&r);
-    let Resp::FileId { id } = stat(&mut c, "alias.md") else {
-        panic!("alias")
-    };
-    assert_eq!(id, id_of(b"real"));
+    for path in ["alias.md", "dir-alias/a.md"] {
+        assert_eq!(unavailable(&stat(&mut c, path)), LINK, "{path}");
+    }
 }
 
 #[test]
@@ -320,7 +324,7 @@ fn only_a_regular_file_is_served() {
     assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
     let mut c = member(&r);
     // the fifo has no writer: opening it for reading must not wait for one
-    for path in ["dir", "fifo", "."] {
+    for path in ["dir", "fifo"] {
         assert_eq!(
             unavailable(&stat(&mut c, path)),
             "not a regular file",

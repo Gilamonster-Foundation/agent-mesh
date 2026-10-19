@@ -138,22 +138,25 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   `Unavailable{reason}`: unknown root, outside the root, not a regular file,
   missing, too large). All three are on the attach socket's allow-list.
   Every request re-checks that the session is still an active one of a current
-  member. The path is refused if absolute or naming `..`; the root and the
-  joined path are canonicalized and the result must stay under the root (a
-  link out, in any component, is refused; a link that stays inside is
-  followed); the file is opened without following a final link and without
-  blocking (so a fifo cannot hang the server), must be a regular file within
-  one message (`MAX_FILE`, a little under 1 MiB; chunking is later), and the
-  path is resolved again after the open and must still name the same file.
-  **Limit:** a directory component swapped for a link between the first
-  canonicalization and the open is caught by the re-check unless it is swapped
-  back before it; someone who can write inside the root can race this. Roots
-  are the owner's own directories. On the reader side
+  member. The file is opened by `Beneath` (the same helper the TUI's drift
+  check uses): the root is opened once and the path is resolved relative to
+  that descriptor, on Linux by `openat2` with `RESOLVE_BENEATH |
+  RESOLVE_NO_SYMLINKS`, elsewhere by a component walk with `O_NOFOLLOW`, so
+  there is no checked pathname for a swapped directory to make stale. An
+  absolute path or `..` is refused before the file system is touched; **every**
+  symlink on the path is refused, a link that stays inside the root too;
+  mounts and hard links are part of the tree. The open does not block (a fifo
+  cannot hang the server), and the opened file must be a regular file within
+  one message (`MAX_FILE`, a little under 1 MiB; chunking is later).
+  **Limit:** the root is opened by its path, so replacing the mapped
+  directory (or an ancestor) before it is opened is the owner's own mapping
+  changing. On the reader side
   (`agent_mesh_flock_session::Files`) the bytes are hashed again and must equal
   the cited id; a server that sends other bytes, bytes past the limit, or
   "changed" for the id that was cited is refused (`stat` is the server's word:
-  the bytes are not sent). The TUI's drift column over a remote attach is
-  wired in a follow-up that needs #157 (8d);
+  the bytes are not sent). The TUI's drift column asks the server for any root
+  the operator did not map with `--root` (so over a remote attach it asks the
+  home host, through the proxy);
 - **the bridge and `attach` (step 9b)**, Unix, same-user hosts only. `amesh flock
   serve --attach --bridge [--bridge-port N] [--bridge-quiet]` (the home host;
   needs `amesh keygen`) joins the mesh as a bus agent and serves a session
