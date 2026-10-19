@@ -43,6 +43,7 @@ fn home() -> Home {
                 name: "shep".into(),
                 role: Role::Shepherd,
                 devices: vec![],
+                delegate: false,
             }],
             salt: "00".into(),
             host: "h".into(),

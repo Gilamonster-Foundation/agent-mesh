@@ -495,6 +495,7 @@ fn delegated_roster_node() -> MerkleNode<Event> {
                 m("shep", Role::Shepherd, false),
                 m("h1", Role::Helper, true),
             ],
+            roots: vec![],
         },
         &[("replaces", "roster")],
     )
