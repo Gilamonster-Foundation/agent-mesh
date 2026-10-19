@@ -12,6 +12,8 @@ use rand::RngCore;
 use std::path::PathBuf;
 
 #[cfg(unix)]
+mod cite;
+#[cfg(unix)]
 mod discover;
 #[cfg(unix)]
 mod emit;
@@ -31,6 +33,21 @@ mod watch;
 
 #[cfg(unix)]
 use discover::Where;
+
+/// Files a brief or review cites.
+#[cfg(unix)]
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct Cites {
+    /// Cite a file by `root:path` (repeatable): the CLI hashes it under the
+    /// root and the event carries root, path and the id of the bytes. The
+    /// roster must declare the root and `--root` must map it on this host.
+    #[arg(long = "cite")]
+    pub files: Vec<String>,
+    /// Map a declared root to a directory on this host, `name=path` (the same
+    /// mapping as `serve --root`).
+    #[arg(long = "root")]
+    pub roots: Vec<String>,
+}
 
 /// `amesh flock` subcommands.
 #[derive(Subcommand, Debug)]
@@ -169,6 +186,8 @@ pub enum FlockCommand {
         /// The lane.
         #[arg(long)]
         lane: String,
+        #[command(flatten)]
+        cites: Cites,
     },
     /// Shepherd: ask a member to review a head.
     #[cfg(unix)]
@@ -184,6 +203,8 @@ pub enum FlockCommand {
         /// The head under review.
         #[arg(long)]
         head: String,
+        #[command(flatten)]
+        cites: Cites,
     },
     /// Acknowledge a brief or review (an `ack`).
     #[cfg(unix)]
@@ -364,15 +385,24 @@ pub async fn run(home: PathBuf, cmd: FlockCommand) -> Result<()> {
         #[cfg(unix)]
         FlockCommand::Log { at, from } => read::log(&home, &at, from),
         #[cfg(unix)]
-        FlockCommand::Brief { at, to, lane } => {
-            emit::emit(&home, &at, Kind::Brief, &[], Body::Brief { to, lane })
-        }
+        FlockCommand::Brief {
+            at,
+            to,
+            lane,
+            cites,
+        } => emit::emit_citing(&home, &at, Kind::Brief, &cites, Body::Brief { to, lane }),
         #[cfg(unix)]
-        FlockCommand::Review { at, to, lane, head } => emit::emit(
+        FlockCommand::Review {
+            at,
+            to,
+            lane,
+            head,
+            cites,
+        } => emit::emit_citing(
             &home,
             &at,
             Kind::Review,
-            &[],
+            &cites,
             Body::Review { to, lane, head },
         ),
         #[cfg(unix)]

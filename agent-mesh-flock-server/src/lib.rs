@@ -13,6 +13,8 @@
 #[cfg(unix)]
 mod beneath;
 mod chain;
+#[cfg(unix)]
+mod cite;
 #[cfg(feature = "serve")]
 mod entry;
 mod error;
@@ -42,6 +44,8 @@ pub mod wire;
 #[cfg(unix)]
 pub use beneath::Beneath;
 pub use chain::{verify_record, Chain};
+#[cfg(unix)]
+pub use cite::{file_id, MAX_CITED_BYTES};
 #[cfg(feature = "serve")]
 pub use entry::{Enrolled, Invited};
 pub use error::ServerError;

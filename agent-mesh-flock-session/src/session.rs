@@ -3,7 +3,7 @@
 
 use crate::ctl::{CtlReq, CtlResp};
 use crate::{harden, Locked, Policy, SessionError};
-use agent_mesh_flock::{Body, Event, Kind};
+use agent_mesh_flock::{Body, Event, FileRef, Kind};
 use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp, StreamChallenge};
 use agent_mesh_protocol::{AgentKey, Assertion};
 use content_addressable::{ContentAddressable, ContentId};
@@ -132,6 +132,22 @@ impl Session {
         refs: BTreeMap<String, ContentId>,
         body: Body,
     ) -> Result<(ContentId, u64), SessionError> {
+        self.emit_citing(kind, refs, Vec::new(), body)
+    }
+
+    /// [`emit`](Self::emit), citing `files` (root, path and the id of the
+    /// bytes as the caller hashed them). Admission does not read them; a
+    /// reader checks them against the bytes it can see.
+    ///
+    /// # Errors
+    /// As [`emit`](Self::emit).
+    pub fn emit_citing(
+        &mut self,
+        kind: Kind,
+        refs: BTreeMap<String, ContentId>,
+        files: Vec<FileRef>,
+        body: Body,
+    ) -> Result<(ContentId, u64), SessionError> {
         self.renew()?;
         let head = Req::Head {
             session: self.session.clone(),
@@ -145,7 +161,7 @@ impl Session {
             author: self.session.clone(),
             prev,
             refs,
-            files: vec![],
+            files,
             at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
@@ -298,8 +314,13 @@ fn handle(s: &mut Session, mut conn: UnixStream) -> bool {
             },
             false,
         ),
-        CtlReq::Emit { kind, refs, body } => (
-            s.emit(kind, refs, body).map_or_else(
+        CtlReq::Emit {
+            kind,
+            refs,
+            body,
+            files,
+        } => (
+            s.emit_citing(kind, refs, files, body).map_or_else(
                 |e| CtlResp::Err(e.to_string()),
                 |(event, index)| CtlResp::Admitted { event, index },
             ),

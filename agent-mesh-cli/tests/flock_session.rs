@@ -167,6 +167,7 @@ fn a_clean_end_records_closed_and_the_cli_can_use_the_key() {
     let CtlResp::Admitted { index, .. } = call(
         &sock,
         &CtlReq::Emit {
+            files: Vec::new(),
             kind: Kind::Brief,
             refs: Default::default(),
             body: Body::Brief {

@@ -146,7 +146,15 @@ impl Ctx<'_> {
             );
             let (kind, refs, body) = record(id, outcome);
             let said = format!("{kind:?}");
-            match call(self.socket, &CtlReq::Emit { kind, refs, body }) {
+            match call(
+                self.socket,
+                &CtlReq::Emit {
+                    kind,
+                    refs,
+                    body,
+                    files: Vec::new(),
+                },
+            ) {
                 Ok(CtlResp::Admitted { event, index }) => {
                     println!("{said} of {id}: admitted {event} at {index}");
                 }
