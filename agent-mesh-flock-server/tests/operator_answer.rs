@@ -150,19 +150,17 @@ fn an_indirect_certificate_cannot_be_registered() {
 fn a_session_cannot_sign_an_answer() {
     let (mut f, _) = flock();
     let key = f.env.server_key();
-    for k in [&f.h1.key] {
-        let (n, s) = f.env.event(
-            k,
-            Kind::Answer,
-            None,
-            &[("ask", f.ask)],
-            Body::Answer { text: "no".into() },
-        );
-        assert_eq!(
-            refused(f.server.admit(n, s).map(|_| ())),
-            Refusal::NotAllowed
-        );
-    }
+    let (n, s) = f.env.event(
+        &f.h1.key,
+        Kind::Answer,
+        None,
+        &[("ask", f.ask)],
+        Body::Answer { text: "no".into() },
+    );
+    assert_eq!(
+        refused(f.server.admit(n, s).map(|_| ())),
+        Refusal::NotAllowed
+    );
     let (n, s) = f.env.event(
         &key,
         Kind::Answer,
