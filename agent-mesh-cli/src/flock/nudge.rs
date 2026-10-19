@@ -1077,6 +1077,27 @@ mod tests {
     }
 
     #[test]
+    fn a_protected_members_stale_claim_is_still_protected_when_a_map_overrides_it() {
+        // the operator's session once claimed p6; --map now says p9, so join
+        // never looks at p6 for the operator, but it may still be theirs
+        let mut w = world();
+        w.push(p("w1:p6", "other"));
+        let mut c = Ctx::new();
+        c.claims.insert("op".into(), "w1:p6".into());
+        c.explicit.insert("op".into(), "w1:p9".into());
+        c.explicit.insert("h1".into(), "w1:p6".into());
+        refused(&c, &Fake::new(w), "protected");
+    }
+
+    #[test]
+    fn a_description_is_never_empty() {
+        assert_eq!(describe(""), "?");
+        assert_eq!(describe("abc"), "abc");
+        let long = describe(&"é".repeat(100));
+        assert!(long.len() <= 128 && long.ends_with('…'));
+    }
+
+    #[test]
     fn a_workspace_rule_uses_the_workspace_herdr_reports_and_fails_closed_without_it() {
         let ws = |w: Option<&'static str>| {
             let mut v = world();
