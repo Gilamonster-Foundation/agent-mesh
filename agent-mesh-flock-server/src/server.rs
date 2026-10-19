@@ -143,6 +143,7 @@ impl Server {
                 proof,
                 challenge,
                 &self.st.chain.server_pub,
+                &self.st.chain.user,
                 self.st.chain.epoch,
             )
             .map_err(ServerError::Signer)?;

@@ -89,6 +89,20 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   Devices change only in a server-signed `roster` event (`replace_roster`) or
   genesis; a shepherd's roster must leave them as they are. Operator members
   only. Rosters without devices encode as before;
+- **operator `answer` verification** (step 13b; the verifying side only, there is
+  no signer or `amesh flock answer` yet): an `answer` is accepted when its
+  signature chains **directly** to the flock's user key (assertion domain, valid
+  generation), its author is that device, the device's certificate was
+  **registered** in the log (`Server::register_device`, a server-only
+  `device-cert` event holding the existing `CertChain`, kept after removal), and
+  the roster lists the device at that index (`NotAListedDevice` otherwise). The
+  same check runs at admission and on replay, so a revoked device is refused now
+  while its earlier answers still verify, and a logged answer whose certificate
+  is missing fails replay. Registration grants nothing; an indirect or
+  other-user certificate cannot be registered. `Req::Admit` already carries the
+  caller's signature unchanged, so an externally signed answer is admitted as-is
+  and never re-signed by a member key. A `relayed-answer` is a member's copy and
+  closes nothing; a second `answer` is a `SecondCloser` conflict;
 - **byte strings**: keys, signatures, fingerprints and nonces are CBOR byte
   strings in the canonical encoding and on the session wire (they were arrays of
   one integer per byte: about 22% larger frames, and a size that varied with the

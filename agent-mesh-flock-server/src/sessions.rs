@@ -9,7 +9,7 @@
 use crate::chain::Chain;
 use crate::frame::cert_cid;
 use agent_mesh_flock::{Board, Body, Event, Role, Signer, SignerClass};
-use agent_mesh_protocol::{Assertion, Caveats, CertChain, Issuer, Scope};
+use agent_mesh_protocol::{Assertion, Caveats, CertChain, Issuer, Scope, UserPublic};
 use content_addressable::{ContentAddressable, ContentId, RawContentId};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -149,11 +149,26 @@ impl Sessions {
         sig: &Assertion,
         event: &ContentId,
         server: &[u8; 32],
+        user: &UserPublic,
         epoch: u64,
     ) -> Result<Signer, String> {
         let fingerprint = sig.author().agent_fingerprint();
         let class = if &sig.author().agent_pubkey == server {
             SignerClass::Server
+        } else if matches!(sig.author().issuer, Issuer::User(_)) {
+            // an operator device: certified directly by the flock's user key
+            // and registered in the log, so replay can find the certificate.
+            // Whether the roster lists it is the admission table's question.
+            let presented = cert_cid(sig.author()).map_err(|e| e.to_string())?;
+            if !self.chains.contains_key(&presented) {
+                return Err("device certificate is not registered in the log".into());
+            }
+            sig.verify_user(event, user, epoch)
+                .map_err(|e| e.to_string())?;
+            return Ok(Signer {
+                fingerprint,
+                class: SignerClass::Operator,
+            });
         } else {
             let s = self
                 .sessions
@@ -253,6 +268,22 @@ impl Sessions {
                 }
                 cert_ok(cert, session, epoch, server)?;
             }
+            Body::DeviceCert { cert } => {
+                refs_are(ev, &[])?;
+                match &cert.issuer {
+                    Issuer::User(u) if *u == chain.user => {}
+                    _ => return Err("not a device certificate of this flock's user".into()),
+                }
+                if &cert.agent_pubkey == server {
+                    return Err("the server key is not an operator device".into());
+                }
+                cert.verify_at(epoch)
+                    .map_err(|e| format!("certificate: {e}"))?;
+                let cid = cert_cid(cert).map_err(|e| e.to_string())?;
+                if self.chains.contains_key(&cid) {
+                    return Err("device certificate already registered".into());
+                }
+            }
             Body::Handoff {
                 from,
                 to,
@@ -340,7 +371,7 @@ impl Sessions {
                 Err("an operator device approves a shepherd hand-off only".into())
             };
         }
-        let signer = self.resolve(sig, ap_id, &chain.server_pub, epoch)?;
+        let signer = self.resolve(sig, ap_id, &chain.server_pub, &chain.user, epoch)?;
         let SignerClass::Session {
             member,
             pending: false,
@@ -459,6 +490,10 @@ impl Sessions {
                     s.activated_by = Some(id);
                     self.holders.insert(s.member.clone(), to.clone());
                 }
+            }
+            Body::DeviceCert { cert } => {
+                let cid = cert_cid(cert).map_err(|e| e.to_string())?;
+                self.chains.insert(cid, cert.clone());
             }
             Body::Renewal {
                 session,

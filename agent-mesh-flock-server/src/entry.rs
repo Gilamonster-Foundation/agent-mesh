@@ -253,6 +253,22 @@ impl Server {
         Ok(cert)
     }
 
+    /// Record an operator device's certificate in the log, so an `answer` it
+    /// signs verifies on replay. Registration grants no authority: the
+    /// roster's `devices` decide which keys count.
+    ///
+    /// # Errors
+    /// A certificate that is not a device certificate of this flock's user,
+    /// one already registered, or I/O.
+    pub fn register_device(&mut self, cert: CertChain) -> Result<ContentId, ServerError> {
+        let ids = self.transact(vec![Spec {
+            kind: Kind::DeviceCert,
+            refs: vec![],
+            body: Body::DeviceCert { cert },
+        }])?;
+        Ok(ids[0])
+    }
+
     /// Replace the roster with a server-signed `roster` event. This is the
     /// only way operator `devices` change (the shepherd's roster events must
     /// leave them as they are).

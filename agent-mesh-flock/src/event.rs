@@ -44,6 +44,9 @@ pub enum Kind {
     Renewal,
     /// Server: session started.
     SessionStart,
+    /// Server: an operator device's certificate registered, so a later
+    /// `answer` it signed can be verified from the log alone.
+    DeviceCert,
     /// Server: session ended.
     SessionEnd,
     /// Server: role hand-off.
@@ -285,6 +288,13 @@ pub enum Body {
         /// The renewed certificate.
         cert: CertChain,
     },
+    /// Server: an operator device's certificate (issued directly by the
+    /// flock's user key), kept for replay. Grants nothing: the roster decides
+    /// which devices count.
+    DeviceCert {
+        /// The device's certificate.
+        cert: CertChain,
+    },
 }
 
 impl Body {
@@ -314,6 +324,7 @@ impl Body {
                 | (Self::Handoff { .. }, K::Handoff)
                 | (Self::Epoch { .. }, K::Epoch)
                 | (Self::Renewal { .. }, K::Renewal)
+                | (Self::DeviceCert { .. }, K::DeviceCert)
         )
     }
 }

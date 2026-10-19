@@ -61,6 +61,8 @@ pub enum Reason {
     DevicesLocked,
     /// `devices` on a member that is not an operator.
     DevicesOnNonOperator,
+    /// See [`Refusal::NotAListedDevice`].
+    NotAListedDevice,
     /// Two roster members share a name.
     DuplicateMember,
     /// A pane or tab claim that is empty, too long or not printable.
@@ -94,6 +96,7 @@ impl From<&Refusal> for Reason {
             Refusal::TooLarge => Self::TooLarge,
             Refusal::DevicesLocked => Self::DevicesLocked,
             Refusal::DevicesOnNonOperator => Self::DevicesOnNonOperator,
+            Refusal::NotAListedDevice => Self::NotAListedDevice,
             Refusal::DuplicateMember => Self::DuplicateMember,
             Refusal::BadClaim => Self::BadClaim,
             Refusal::BadExit => Self::BadExit,
