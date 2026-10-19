@@ -51,8 +51,8 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex};
-use tokio::task::JoinHandle;
+use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex, Notify};
+use tokio::task::{JoinHandle, JoinSet};
 
 /// The dial-back route observed on an inbound iroh connection — the peer's
 /// TLS-authenticated key and the UDP source address; `None` when no source
@@ -176,6 +176,9 @@ pub struct Bus {
     sessions: Arc<SessionHandlers>,
     /// Dropped with the bus, which ends every session it opened or accepted.
     shutdown: watch::Sender<()>,
+    /// Asks the receive loop to stop: it then aborts and awaits every
+    /// per-inbound task it spawned (see [`Bus::close`]).
+    stop: Arc<Notify>,
     /// The bus-level receive loop: pulls each inbound envelope off the
     /// transport, runs it through the inbox, and ships any reply back.
     accept_task: JoinHandle<()>,
@@ -353,12 +356,14 @@ impl Bus {
         let sequence = Arc::new(sequence);
         let sessions = Arc::new(SessionHandlers::default());
         let (shutdown, _) = watch::channel(());
+        let stop = Arc::new(Notify::new());
         let accept_task = spawn_accept_loop(
             transport.clone(),
             agent.clone(),
             inbox.clone(),
             sequence.clone(),
             (sessions.clone(), shutdown.subscribe()),
+            stop.clone(),
         );
         Ok(Self {
             agent,
@@ -368,6 +373,7 @@ impl Bus {
             sequence,
             sessions,
             shutdown,
+            stop,
             accept_task,
         })
     }
@@ -587,10 +593,30 @@ impl Bus {
         self.sessions.register(&topic, handler);
     }
 
-    /// Graceful shutdown. Stops the bus receive loop and releases the
-    /// transport (which closes the endpoint / leaves the switchboard).
+    /// How long an accepted session's handler may keep running once
+    /// [`Self::close`] has told its session it is over, before the handler is
+    /// cancelled (default five seconds). A handler waiting in session I/O ends
+    /// at once and reports how; a handler blocked on something else (a full
+    /// channel, a lock) is cancelled when the grace is up, so `close` never
+    /// waits on application code. Zero cancels it as soon as close starts.
+    #[must_use]
+    pub fn with_session_shutdown_grace(self, grace: Duration) -> Self {
+        self.sessions.set_shutdown_grace(grace);
+        self
+    }
+
+    /// Graceful shutdown. Stops the bus receive loop, aborts and **awaits**
+    /// every task it spawned for an inbound message (each holds a clone of the
+    /// transport, so of the endpoint and its socket), then releases the
+    /// transport (which closes the endpoint / leaves the switchboard). When
+    /// this returns nothing of this bus still holds the socket: the same port
+    /// can be bound at once.
     pub async fn close(self) -> Result<()> {
-        self.accept_task.abort();
+        // First tell every session it is over (the shutdown sender dropping is
+        // that signal), then stop the loop, which waits for their handlers.
+        drop(self.shutdown);
+        self.stop.notify_one();
+        let _ = self.accept_task.await;
         self.transport.close().await;
         Ok(())
     }
@@ -902,16 +928,41 @@ fn spawn_accept_loop(
     inbox: Arc<Inbox>,
     sequence: Arc<Sequencer>,
     (sessions, shutdown): (Arc<SessionHandlers>, watch::Receiver<()>),
+    stop: Arc<Notify>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(inbound) = transport.recv().await {
+        // Every inbound task lives in one of these sets, so stopping can wait
+        // for all of them: each holds a clone of the transport or a stream of
+        // the endpoint. Request/reply work is aborted; an accepted session is
+        // told by the shutdown signal to end, and its handler is awaited, not
+        // cut off (it reports how the session ended).
+        let mut tasks: JoinSet<()> = JoinSet::new();
+        let mut session_tasks: JoinSet<()> = JoinSet::new();
+        loop {
+            let inbound = tokio::select! {
+                biased;
+                () = stop.notified() => break,
+                Some(_) = tasks.join_next(), if !tasks.is_empty() => continue,
+                Some(_) = session_tasks.join_next(), if !session_tasks.is_empty() => continue,
+                inbound = transport.recv() => match inbound {
+                    Some(inbound) => inbound,
+                    None => break,
+                },
+            };
             let transport = transport.clone();
             let agent = agent.clone();
             let inbox = inbox.clone();
             let sequence = sequence.clone();
             let (sessions, shutdown) = (sessions.clone(), shutdown.clone());
             // One task per inbound so a slow handler/reply can't stall the loop.
-            tokio::spawn(async move {
+            let opens_session = inbound.stream.is_some()
+                && crate::session::open_request(&inbound.envelope).is_some();
+            let set = if opens_session {
+                &mut session_tasks
+            } else {
+                &mut tasks
+            };
+            set.spawn(async move {
                 let Inbound {
                     envelope,
                     provenance,
@@ -925,9 +976,14 @@ fn spawn_accept_loop(
                 {
                     let timing = Timing::default();
                     match IncomingSession::admit(
-                        agent, &envelope, provenance, stream, timing, shutdown,
+                        agent,
+                        &envelope,
+                        provenance,
+                        stream,
+                        timing,
+                        shutdown.clone(),
                     ) {
-                        Ok(incoming) => sessions.dispatch(incoming).await,
+                        Ok(incoming) => sessions.dispatch(incoming, shutdown).await,
                         Err(e) => tracing::warn!(error = %e, "bus: session open rejected"),
                     }
                     return;
@@ -959,8 +1015,25 @@ fn spawn_accept_loop(
                 }
             });
         }
-        tracing::debug!("bus accept loop: transport closed");
+        abort_and_drain(&mut tasks).await;
+        // `Bus::close` has dropped the shutdown sender before asking us to
+        // stop, so every session is ending; wait for its handler to finish.
+        drain(&mut session_tasks).await;
+        tracing::debug!("bus accept loop: stopped");
     })
+}
+
+/// Wait for every task in `set` to finish.
+async fn drain(set: &mut JoinSet<()>) {
+    while set.join_next().await.is_some() {}
+}
+
+/// Cancel every task in `set` and wait until each future has been dropped:
+/// aborting alone only schedules the drop, and what the task held (a
+/// connection, a clone of the endpoint) is released when it happens.
+async fn abort_and_drain(set: &mut JoinSet<()>) {
+    set.abort_all();
+    drain(set).await;
 }
 
 /// Dial the peer a reply is destined for: dial-back first, mDNS second.
@@ -1023,7 +1096,12 @@ pub struct IrohTransport {
     inbound: AsyncMutex<mpsc::UnboundedReceiver<Inbound>>,
     /// Feeds replies read off connections this transport dialed.
     inbound_tx: mpsc::UnboundedSender<Inbound>,
-    accept_task: JoinHandle<()>,
+    /// Asks the accept loop to stop; it aborts and awaits its connection tasks.
+    stop: Arc<Notify>,
+    accept_task: std::sync::Mutex<Option<JoinHandle<()>>>,
+    /// The reply readers [`Self::await_reply_on`] started: each holds a
+    /// connection, so `close` aborts and awaits them too.
+    reply_tasks: std::sync::Mutex<JoinSet<()>>,
 }
 
 impl IrohTransport {
@@ -1075,8 +1153,14 @@ impl IrohTransport {
         };
 
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
-        let accept_task =
-            spawn_iroh_accept_loop(endpoint.clone(), agent.clone(), inbound_tx.clone(), posture);
+        let stop = Arc::new(Notify::new());
+        let accept_task = spawn_iroh_accept_loop(
+            endpoint.clone(),
+            agent.clone(),
+            inbound_tx.clone(),
+            posture,
+            stop.clone(),
+        );
 
         Ok(Self {
             endpoint,
@@ -1086,7 +1170,9 @@ impl IrohTransport {
             _announcer: announcer,
             inbound: AsyncMutex::new(inbound_rx),
             inbound_tx,
-            accept_task,
+            stop,
+            accept_task: std::sync::Mutex::new(Some(accept_task)),
+            reply_tasks: std::sync::Mutex::new(JoinSet::new()),
         })
     }
 }
@@ -1172,12 +1258,28 @@ impl Transport for IrohTransport {
     }
 
     async fn close(&self) {
-        self.accept_task.abort();
-        // Close the endpoint, not just the accept loop: that ends every open
-        // connection, including one a request's reply window still holds
-        // (`await_reply_on`), whose task would otherwise keep the connection —
-        // and the UDP socket — alive until the window lapses. The socket
-        // itself is released as the endpoint's last `Arc` drops.
+        // Stop the accept loop and wait for it: it aborts and awaits every
+        // connection task, each of which holds a connection to the endpoint.
+        self.stop.notify_one();
+        let accept = self
+            .accept_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(accept) = accept {
+            let _ = accept.await;
+        }
+        // The reply readers hold connections too (a request's reply window).
+        let mut replies = std::mem::take(
+            &mut *self
+                .reply_tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        abort_and_drain(&mut replies).await;
+        // Close the endpoint, not just the loops: that ends every open
+        // connection. The socket itself is released as the endpoint's last
+        // `Arc` drops, which nothing but this transport can now hold.
         self.endpoint.close().await;
     }
 }
@@ -1197,7 +1299,13 @@ impl IrohTransport {
     /// *reply* is verified and admitted, then finds no waiter to wake.
     fn await_reply_on(&self, conn: Connection, window: Duration) {
         let (agent, inbound_tx) = (self.agent.clone(), self.inbound_tx.clone());
-        tokio::spawn(async move {
+        let mut tasks = self
+            .reply_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // forget the finished ones, so the set does not grow with every request
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(async move {
             let route: ReplyRoute = Arc::new(IrohReplyRoute {
                 conn: conn.clone(),
                 reverse: None,
@@ -1224,10 +1332,20 @@ fn spawn_iroh_accept_loop(
     agent: Arc<AgentKey>,
     inbound_tx: mpsc::UnboundedSender<Inbound>,
     posture: Posture,
+    stop: Arc<Notify>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        // Each accepted connection is a task holding that connection; keeping
+        // them here lets a stop abort and await all of them.
+        let mut conns: JoinSet<()> = JoinSet::new();
         loop {
-            let Some(incoming) = endpoint.accept().await else {
+            let incoming = tokio::select! {
+                biased;
+                () = stop.notified() => break,
+                Some(_) = conns.join_next(), if !conns.is_empty() => continue,
+                incoming = endpoint.accept() => incoming,
+            };
+            let Some(incoming) = incoming else {
                 tracing::debug!("iroh transport accept loop: endpoint closed");
                 break;
             };
@@ -1238,12 +1356,13 @@ fn spawn_iroh_accept_loop(
             }
             let agent = agent.clone();
             let inbound_tx = inbound_tx.clone();
-            tokio::spawn(async move {
+            conns.spawn(async move {
                 if let Err(e) = accept_conn(incoming, agent, inbound_tx).await {
                     tracing::warn!(error = %e, "iroh transport: incoming connection error");
                 }
             });
         }
+        abort_and_drain(&mut conns).await;
     })
 }
 
@@ -1410,6 +1529,50 @@ mod tests {
                 .await
                 .expect("bus keeps capture transport alive")
         }
+    }
+
+    /// Sets the flag when dropped.
+    struct Gone(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Gone {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// With nothing else allowed to run, the futures are already dropped when
+    /// `abort_and_drain` returns: the abort alone would only schedule that.
+    #[tokio::test]
+    async fn abort_and_drain_returns_only_after_the_futures_are_dropped() {
+        let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut set = JoinSet::new();
+        let (g, started) = (Gone(gone.clone()), Arc::new(Notify::new()));
+        let s = started.clone();
+        set.spawn(async move {
+            let _g = g;
+            s.notify_one();
+            std::future::pending::<()>().await;
+        });
+        started.notified().await;
+        abort_and_drain(&mut set).await;
+        assert!(gone.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(set.is_empty());
+    }
+
+    /// `drain` waits for tasks it did not cancel: the flag is set by the task
+    /// itself, after the point where the caller would otherwise have moved on.
+    #[tokio::test]
+    async fn drain_waits_for_tasks_to_finish() {
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut set = JoinSet::new();
+        let (d, go) = (done.clone(), Arc::new(Notify::new()));
+        let g = go.clone();
+        set.spawn(async move {
+            g.notified().await;
+            d.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        go.notify_one();
+        drain(&mut set).await;
+        assert!(done.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[async_trait]

@@ -74,6 +74,7 @@ fn other_user_cannot_use_the_socket() {
             name: "shep".into(),
             role: Role::Shepherd,
             devices: vec![],
+            delegate: false,
         }],
         salt: "00".into(),
         host: "h".into(),

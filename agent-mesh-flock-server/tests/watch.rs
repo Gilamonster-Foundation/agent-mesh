@@ -310,6 +310,7 @@ fn a_member_the_roster_dropped_may_not_open_a_stream_though_its_session_is_still
                 _ => Role::Operator,
             },
             devices: vec![],
+            delegate: false,
         })
         .collect();
     let prev = server.board().head_of(&shep.key.fingerprint().hex());

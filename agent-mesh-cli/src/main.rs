@@ -16,5 +16,16 @@ async fn main() -> Result<()> {
         )
         .init();
     let cli = agent_mesh_cli::Cli::parse();
-    agent_mesh_cli::dispatch(cli).await
+    match agent_mesh_cli::dispatch(cli).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // an error can quote what a member wrote (a server's reason, a
+            // stream's close reason, a path): print it as inert text
+            eprintln!(
+                "Error: {}",
+                agent_mesh_flock::text::inert(&format!("{e:#}"))
+            );
+            std::process::exit(1);
+        }
+    }
 }

@@ -390,6 +390,7 @@ fn parse_member(spec: &str) -> Result<Member> {
         name: name.into(),
         role,
         devices: vec![],
+        delegate: false,
     })
 }
 
@@ -566,7 +567,19 @@ mod unix {
             },
         )?;
         match read_msg::<Resp>(&mut c)? {
-            Some(Resp::Invited { token }) => println!("{token}"),
+            // The server mints 32 random bytes as lowercase hex. Anything else is
+            // not an invite, and is not ours to print to a terminal.
+            Some(Resp::Invited { token })
+                if token.len() == 64
+                    && token
+                        .bytes()
+                        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) =>
+            {
+                println!("{token}");
+            }
+            Some(Resp::Invited { .. }) => {
+                return Err(anyhow!("the server answered with a malformed invite token"))
+            }
             Some(Resp::Err(why)) => return Err(anyhow!("refused: {why}")),
             _ => return Err(anyhow!("unexpected answer")),
         }

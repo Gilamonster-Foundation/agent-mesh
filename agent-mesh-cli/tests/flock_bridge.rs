@@ -85,6 +85,7 @@ fn home_with_roots(
         name: n.into(),
         role,
         devices: vec![],
+        delegate: false,
     };
     let spec = InitSpec {
         name: name.into(),
@@ -766,6 +767,7 @@ fn some_genesis(user: &UserKey, name: &str) -> (ContentId, agent_mesh_flock_serv
             name: "shep".into(),
             role: Role::Shepherd,
             devices: vec![],
+            delegate: false,
         }],
         salt: name.into(),
         host: "h".into(),

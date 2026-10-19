@@ -231,6 +231,7 @@ fn a_shepherd_roster_that_only_reorders_is_admitted_and_reassigning_is_not() {
         name: "op2".into(),
         role: Role::Operator,
         devices: vec![d2.fingerprint()],
+        delegate: false,
     });
     for m in &mut roster {
         if m.name == "op" {
@@ -336,6 +337,7 @@ fn roster_with_a_second_op(server: &Server, device: Fingerprint) -> Vec<Member> 
             name: "op".into(),
             role: Role::Operator,
             devices: vec![device],
+            delegate: false,
         },
     );
     roster

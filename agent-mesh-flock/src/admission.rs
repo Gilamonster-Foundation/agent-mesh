@@ -58,6 +58,10 @@ pub enum Refusal {
     DevicesLocked,
     /// `devices` on a member that is not an operator.
     DevicesOnNonOperator,
+    /// Only a server-signed roster changes who the delegate is.
+    DelegateLocked,
+    /// More than one roster member is the delegate.
+    MultipleDelegates,
     /// Two roster members share a name.
     DuplicateMember,
     /// A roster that changes the file roots, signed by anyone but the server.
@@ -135,14 +139,21 @@ fn decide(board: &Board, node: &MerkleNode<Event>, signer: &Signer) -> Result<Ve
 }
 
 /// A roster is well formed when member names are unique (bindings are by
-/// name) and devices belong to operator members only. Every reader of a
+/// name), devices belong to operator members only and at most one member is
+/// the delegate. Every reader of a
 /// roster (init, the genesis loader, roster admission) uses this one rule.
 #[must_use]
 pub fn roster_well_formed(members: &[Member]) -> bool {
     let mut names = std::collections::BTreeSet::new();
-    members.iter().all(|m| {
-        names.insert(m.name.as_str()) && (m.role == Role::Operator || m.devices.is_empty())
-    })
+    members.iter().filter(|m| m.delegate).count() <= 1
+        && members.iter().all(|m| {
+            names.insert(m.name.as_str()) && (m.role == Role::Operator || m.devices.is_empty())
+        })
+}
+
+/// The designated delegate's name, if any.
+fn delegate_of(ms: &[Member]) -> Option<&str> {
+    ms.iter().find(|m| m.delegate).map(|m| m.name.as_str())
 }
 
 /// Device bindings by member name, each list sorted: roster order and device
@@ -164,6 +175,12 @@ fn check_devices(board: &Board, new: &[Member], signer: &Signer) -> Result<(), R
     let mut names = BTreeSet::new();
     if !new.iter().all(|m| names.insert(m.name.as_str())) {
         return Err(Refusal::DuplicateMember);
+    }
+    if new.iter().filter(|m| m.delegate).count() > 1 {
+        return Err(Refusal::MultipleDelegates);
+    }
+    if signer.class != SignerClass::Server && delegate_of(new) != delegate_of(board.members()) {
+        return Err(Refusal::DelegateLocked);
     }
     if !roster_well_formed(new) {
         return Err(Refusal::DevicesOnNonOperator);
