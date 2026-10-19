@@ -35,6 +35,8 @@ fn detail(e: &Entry) -> String {
             _ => "unreadable exit".to_owned(),
         },
         Body::Ask { text, .. } | Body::Status { text } => text.clone(),
+        Body::Nudged { target } => format!("nudged {target}"),
+        Body::NudgeMisfire { target, .. } => format!("{target}: may have reached the wrong pane"),
         _ => String::new(),
     }
 }

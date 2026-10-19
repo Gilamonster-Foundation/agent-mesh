@@ -36,6 +36,8 @@ pub enum Kind {
     Status,
     /// Adapter nudge record.
     Nudged,
+    /// Adapter: a nudge may have reached the wrong pane.
+    NudgeMisfire,
     /// A session's claim of the herdr pane it runs in.
     Pane,
     /// Server: epoch bump.
@@ -216,10 +218,21 @@ pub enum Body {
         /// Status text.
         text: String,
     },
-    /// Adapter nudge.
+    /// Adapter nudge. May cite (`of`) the brief or review it was about.
     Nudged {
         /// Target the nudge went to.
         target: String,
+    },
+    /// Adapter: the pane that was prompted may not be `target`'s. The
+    /// adapter's own claim about what it saw; it may cite (`of`) the brief or
+    /// review the nudge was about.
+    NudgeMisfire {
+        /// The roster member the nudge was meant for.
+        target: String,
+        /// What the pane was when it was chosen.
+        expected: String,
+        /// What it was when the prompt had been sent.
+        found: String,
     },
     /// A session's claim of where it runs. The signature proves the session
     /// said it; nothing proves the pane is real or still that pane.
@@ -307,6 +320,7 @@ impl Body {
                 | (Self::RelayedAnswer { .. }, K::RelayedAnswer)
                 | (Self::Status { .. }, K::Status)
                 | (Self::Nudged { .. }, K::Nudged)
+                | (Self::NudgeMisfire { .. }, K::NudgeMisfire)
                 | (Self::Pane { .. }, K::Pane)
                 | (Self::Invite { .. }, K::Invite)
                 | (Self::SessionStart { .. }, K::SessionStart)
