@@ -600,6 +600,9 @@ impl Bus {
     /// this returns nothing of this bus still holds the socket: the same port
     /// can be bound at once.
     pub async fn close(self) -> Result<()> {
+        // First tell every session it is over (the shutdown sender dropping is
+        // that signal), then stop the loop, which waits for their handlers.
+        drop(self.shutdown);
         self.stop.notify_one();
         let _ = self.accept_task.await;
         self.transport.close().await;
@@ -916,14 +919,19 @@ fn spawn_accept_loop(
     stop: Arc<Notify>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        // Every inbound task lives in this set, so stopping can abort and await
-        // all of them: each holds a clone of the transport.
+        // Every inbound task lives in one of these sets, so stopping can wait
+        // for all of them: each holds a clone of the transport or a stream of
+        // the endpoint. Request/reply work is aborted; an accepted session is
+        // told by the shutdown signal to end, and its handler is awaited, not
+        // cut off (it reports how the session ended).
         let mut tasks: JoinSet<()> = JoinSet::new();
+        let mut session_tasks: JoinSet<()> = JoinSet::new();
         loop {
             let inbound = tokio::select! {
                 biased;
                 () = stop.notified() => break,
                 Some(_) = tasks.join_next(), if !tasks.is_empty() => continue,
+                Some(_) = session_tasks.join_next(), if !session_tasks.is_empty() => continue,
                 inbound = transport.recv() => match inbound {
                     Some(inbound) => inbound,
                     None => break,
@@ -935,7 +943,14 @@ fn spawn_accept_loop(
             let sequence = sequence.clone();
             let (sessions, shutdown) = (sessions.clone(), shutdown.clone());
             // One task per inbound so a slow handler/reply can't stall the loop.
-            tasks.spawn(async move {
+            let opens_session = inbound.stream.is_some()
+                && crate::session::open_request(&inbound.envelope).is_some();
+            let set = if opens_session {
+                &mut session_tasks
+            } else {
+                &mut tasks
+            };
+            set.spawn(async move {
                 let Inbound {
                     envelope,
                     provenance,
@@ -985,6 +1000,9 @@ fn spawn_accept_loop(
         }
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
+        // `Bus::close` has dropped the shutdown sender before asking us to
+        // stop, so every session is ending; wait for its handler to finish.
+        while session_tasks.join_next().await.is_some() {}
         tracing::debug!("bus accept loop: stopped");
     })
 }
