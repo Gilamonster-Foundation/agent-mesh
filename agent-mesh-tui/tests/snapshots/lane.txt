@@ -15,7 +15,7 @@ lane l1
       cited <cid>
       now   <cid>
   ? work/gone.rs (file missing)
-  ? work/escape.txt (path leaves its root)
+  ? work/escape.txt (path leaves its root or crosses a link)
   ? work/../secret.txt (path leaves its root)
   ? elsewhere/x.rs (root not mapped)
 

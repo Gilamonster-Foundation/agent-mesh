@@ -246,7 +246,7 @@ fn drift_is_same_changed_or_unavailable_per_file() {
     );
     for (p, why) in [
         ("gone.rs", "file missing"),
-        ("escape.txt", "path leaves its root"),
+        ("escape.txt", "path leaves its root or crosses a link"),
         ("../secret.txt", "path leaves its root"),
         ("x.rs", "root not mapped"),
     ] {
