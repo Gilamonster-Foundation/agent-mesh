@@ -3,7 +3,7 @@
 //! challenge is signed by the session (`ProveStream`), every frame is verified
 //! against the saved head by the `Reader`, saved, and only then folded.
 
-use crate::model::{fold, Link, Model, Source};
+use crate::model::{fold, fold_onto, Link, Model, Source};
 use agent_mesh_flock_server::load_genesis;
 use agent_mesh_flock_session::{
     call, session_prover, CtlReq, CtlResp, Reader, ReaderError, RealFs, Seen,
@@ -117,6 +117,7 @@ impl Feed {
         let (name, id) = (self.name.clone(), self.id);
         let prove = session_prover(&self.ctl);
         let mut live = false;
+        let mut last: Option<Model> = None;
         let result = self.reader.follow(&self.serve, &prove, once, &mut |seen| {
             let follower = match seen {
                 Seen::Frame(_, f) => f,
@@ -132,7 +133,14 @@ impl Feed {
                     since: follower.admitted(),
                 }
             };
-            on(fold(&Source::of_follower(&name, id, follower), link));
+            // the log only grows: build rows for the new events only
+            let m = fold_onto(
+                last.as_ref(),
+                &Source::of_follower(&name, id, follower),
+                link,
+            );
+            last = Some(m.clone());
+            on(m);
         });
         match result {
             Ok(_) if once => Outcome::Done,

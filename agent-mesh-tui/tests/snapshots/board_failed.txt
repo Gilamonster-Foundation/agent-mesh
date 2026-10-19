@@ -1,5 +1,6 @@
 amesh-tui · flock fx · id ············ · 7 members
 log ✗ 24 · epoch 1 · history does not extend the saved head
+[Board]  Stream
   MEMBER     ROLE      SESSION    SELF           OPEN                   QUIET
 ▸ shep       shepherd  active     -              -                      9 events
   h1         helper    active +1  -              1 job, 1 lane, 1 ask   7 events
@@ -8,5 +9,4 @@ log ✗ 24 · epoch 1 · history does not extend the saved head
   herdr      adapter   active     idle           -                      6 events
   watcher    reviewer  none       -              -                      never
   spare      helper    pending    -              -                      never
-
-↑↓ select · q quit · refused events (!) are not on the stream: not shown in v1
+↑↓ select · Tab next view · q quit · refused events (!) are not on the stream: not shown in v1

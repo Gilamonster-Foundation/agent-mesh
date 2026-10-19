@@ -1,0 +1,24 @@
+amesh-tui · flock fx · id ············ · 7 members
+log ✓ 24 · epoch 1 · live
+ Board  [Stream]
+event #11  <cid>
+✓ signature, session certificate and admission checked; admitted at #11
+kind brief · signed by shep; session <session>
+lane l1 · at 1
+parents:
+  (none)
+body:
+  {
+    "brief": {
+      "to": "h1",
+      "lane": "l1"
+    }
+  }
+
+
+
+
+
+
+
+1-9 jump to a parent · Backspace back · ↑↓ neighbours · Esc close

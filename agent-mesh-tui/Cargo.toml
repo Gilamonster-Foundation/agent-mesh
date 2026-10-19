@@ -30,6 +30,7 @@ content-addressable.workspace = true
 newtui.workspace = true
 ratatui.workspace = true
 rustix = { version = "1", features = ["process"] }
+serde_json.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 # fixtures only: a real server and a real session to feed the view

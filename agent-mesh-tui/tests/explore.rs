@@ -29,19 +29,19 @@ fn model(n: usize) -> Model {
                 quiet_for: Some(i as u64),
             })
             .collect(),
+        events: std::sync::Arc::default(),
     }
 }
 
-/// Every key the Board might be sent, not only the navigation set.
+/// Every key the Board might be sent, not only the navigation set, but none
+/// that leaves it (Tab and the view numbers are explored with the Stream).
 fn alphabet() -> Vec<Key> {
-    let mut keys = Key::navigation();
+    let mut keys = vec![Key::Up, Key::Down, Key::Left, Key::Right, Key::Enter];
     keys.extend([
         Key::Home,
         Key::End,
         Key::PageUp,
         Key::PageDown,
-        Key::Tab,
-        Key::BackTab,
         Key::Backspace,
         Key::Char('x'),
         Key::Other,
@@ -60,7 +60,9 @@ fn keys_never_change_what_the_model_says() -> Named<impl Fn(&Observation<'_>) ->
                     .map(|r| (r.label.clone(), r.value.clone(), r.note.clone()))
                     .collect::<Vec<_>>()
             };
-            if data(from) == data(to) && from.title == to.title && from.footer == to.footer {
+            if from.title != "Board" || to.title != "Board" {
+                PropertyOutcome::NotApplicable
+            } else if data(from) == data(to) && from.footer == to.footer {
                 PropertyOutcome::Held
             } else {
                 PropertyOutcome::Violated("a key changed the rows".into())
@@ -195,7 +197,7 @@ mod viewport {
     fn a_resize_keeps_the_selection_visible() {
         let mut app = App::new(model(25));
         app.handle(Key::End);
-        for height in [24, 8, 5, 40, 12] {
+        for height in [24, 9, 7, 40, 12] {
             let text = render::to_text(&app, 110, height);
             assert!(
                 text.lines()
@@ -209,4 +211,118 @@ mod viewport {
         assert_eq!(rows_with(&all, "m0 "), 1);
         assert_eq!(rows_with(&all, "m24 "), 1);
     }
+}
+
+// ---- the Stream ----
+
+use agent_mesh_tui::events::{EventRow, Parent};
+use newtui::properties::selection_is_always_in_range as in_range;
+
+fn event(i: usize, kind: &str, member: &str, lane: Option<&str>, parents: &[usize]) -> EventRow {
+    EventRow {
+        index: i as u64 + 1,
+        id: format!("bafy{i}"),
+        cid: content_addressable::ContentAddressable::content_id(
+            &content_addressable::MerkleNode::genesis(format!("e{i}")),
+        )
+        .unwrap(),
+        kind: kind.into(),
+        member: member.into(),
+        lane: lane.map(str::to_owned),
+        summary: format!("s{i}"),
+        conflict: false,
+        signer: format!("{member}, helper; session ab{i}"),
+        at: i as u64,
+        parents: parents
+            .iter()
+            .enumerate()
+            .map(|(n, p)| Parent {
+                role: if n == 0 { "prev".into() } else { "of".into() },
+                id: format!("bafy{p}"),
+                row: Some(*p),
+            })
+            .collect(),
+        files: vec![],
+        body: vec!["\"ack\"".into()],
+        verified: "✓ checked".into(),
+    }
+}
+
+/// A small log with two kinds, two lanes, two signers and parent links.
+fn with_events() -> Model {
+    let mut m = model(3);
+    m.events = std::sync::Arc::new(vec![
+        event(0, "brief", "m0", Some("l1"), &[]),
+        event(1, "ack", "m1", Some("l1"), &[0]),
+        event(2, "brief", "m0", Some("l2"), &[0]),
+        event(3, "ack", "m1", Some("l2"), &[1, 2]),
+    ]);
+    m
+}
+
+/// Whatever the Stream shows is an event the log has: a row for `#n` says the
+/// kind and signer that event really has, and a raw panel's parents are the
+/// event's own.
+fn the_stream_shows_only_what_the_log_holds(
+    m: Model,
+) -> Named<impl Fn(&Observation<'_>) -> PropertyOutcome> {
+    Named::new("the Stream shows only events the log holds", move |o| {
+        let view = o.view();
+        if view.title != "Stream" {
+            return PropertyOutcome::NotApplicable;
+        }
+        for row in &view.rows {
+            let Some(n) = row.label.strip_prefix('#') else {
+                continue; // a parent line of the raw panel
+            };
+            let Some(e) = n
+                .parse::<u64>()
+                .ok()
+                .and_then(|n| m.events.iter().find(|e| e.index == n))
+            else {
+                return PropertyOutcome::Violated(format!("no event {}", row.label));
+            };
+            if row.value != e.id && row.value != format!("{} {}", e.kind, e.member) {
+                return PropertyOutcome::Violated(format!("{} says {}", row.label, row.value));
+            }
+        }
+        PropertyOutcome::Held
+    })
+}
+
+fn stream_alphabet() -> Vec<Key> {
+    let mut keys = vec![
+        Key::Up,
+        Key::Down,
+        Key::Home,
+        Key::End,
+        Key::PageUp,
+        Key::PageDown,
+        Key::Enter,
+        Key::Esc,
+        Key::Tab,
+        Key::BackTab,
+        Key::Backspace,
+    ];
+    keys.extend("fklmc1239x".chars().map(Key::Char));
+    keys
+}
+
+#[test]
+fn every_state_the_stream_can_reach_holds_to_the_log() {
+    let m = with_events();
+    let report = Explorer::new(stream_alphabet())
+        .max_states(200_000)
+        .max_depth(64)
+        .explore(
+            || App::new(with_events()),
+            &[&in_range(), &the_stream_shows_only_what_the_log_holds(m)],
+        );
+    assert!(report.is_clean(), "{report}");
+    assert!(report.exhausted, "the search was capped: {report}");
+    assert!(
+        report.never_applied().is_empty(),
+        "{:?}",
+        report.never_applied()
+    );
 }

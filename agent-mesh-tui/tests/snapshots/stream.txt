@@ -1,0 +1,30 @@
+amesh-tui · flock fx · id ············ · 7 members
+log ✓ 24 · epoch 1 · live
+ Board  [Stream]
+      # KIND          MEMBER   LANE     SUMMARY
+      1 invite        server   -        for shep
+      2 session-start server   -        shep started
+      3 invite        server   -        for h1
+      4 session-start server   -        h1 started
+      5 invite        server   -        for rev
+      6 session-start server   -        rev started
+      7 invite        server   -        for herdr
+      8 session-start server   -        herdr started
+      9 invite        server   -        for h1
+     10 session-start server   -        h1 started
+     11 brief         shep     l1       to h1 lane l1
+     12 brief         shep     l2       to h2 lane l2
+     13 ack           h1       l1
+     14 job           shep     l9       lane l9 push
+     15 job-end       shep     l9       exit 0
+     16 job           h1       l1       lane l1 build
+     17 ask           h1       l1       which branch?
+     18 status        herdr    -        idle
+     19 invite        server   -        for spare
+     20 session-start server   -        spare started
+     21 invite        server   -        for spare
+     22 session-start server   -        spare started
+     23 session-end   server   -        closed
+▸    24 epoch         server   -        epoch 1
+kind all · lane all · member all · follow on · 24 of 24 events
+↑↓ select · Enter raw · f follow · k/l/m filter kind/lane/member · c clear

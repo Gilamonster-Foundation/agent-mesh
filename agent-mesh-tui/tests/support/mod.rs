@@ -33,6 +33,12 @@ fn member(name: &str, role: Role) -> Member {
 impl Fixture {
     /// A flock named `fx` with shep, h1, h2, rev, herdr and a spare `watcher`.
     pub fn new() -> Self {
+        Self::with_members(&[])
+    }
+
+    /// [`new`](Self::new) plus helpers with these names (names are the
+    /// roster's, so they are as untrusted as any other text in a flock).
+    pub fn with_members(extra: &[&str]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let spec = InitSpec {
             name: "fx".into(),
@@ -44,7 +50,10 @@ impl Fixture {
                 member("herdr", Role::Adapter),
                 member("watcher", Role::Reviewer),
                 member("spare", Role::Helper),
-            ],
+            ]
+            .into_iter()
+            .chain(extra.iter().map(|n| member(n, Role::Adapter)))
+            .collect(),
             salt: "00".into(),
             host: "h".into(),
             issued_at: "t".into(),
@@ -82,6 +91,17 @@ impl Fixture {
         refs: &[(&str, ContentId)],
         body: Body,
     ) -> ContentId {
+        self.emit_files(who, kind, refs, body, vec![])
+    }
+
+    pub fn emit_files(
+        &mut self,
+        who: &Who,
+        kind: Kind,
+        refs: &[(&str, ContentId)],
+        body: Body,
+        files: Vec<agent_mesh_flock::FileRef>,
+    ) -> ContentId {
         self.at += 1;
         let node = Event {
             flock: self.server.flock(),
@@ -92,7 +112,7 @@ impl Fixture {
                 .iter()
                 .map(|(r, c)| ((*r).to_owned(), *c))
                 .collect::<BTreeMap<_, _>>(),
-            files: vec![],
+            files,
             at: self.at,
             body,
         }
@@ -222,4 +242,42 @@ pub fn assert_snapshot(name: &str, actual: &str) {
         actual, want,
         "screen differs from {name}.txt (UPDATE_SNAPSHOTS=1 rewrites it)"
     );
+}
+
+/// Blank every content id and session fingerprint on a screen: they differ
+/// with every generated key, and nothing else does.
+pub fn mask_hashes(text: &str) -> String {
+    let word = |w: &str| {
+        let t = w.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        if t.starts_with("bafy") && t.len() > 20 {
+            w.replacen(t, "<cid>", 1)
+        } else if t.len() >= 60 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+            w.replacen(t, "<session>", 1)
+        } else {
+            w.to_owned()
+        }
+    };
+    text.lines()
+        .map(|l| l.split(' ').map(word).collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+/// The model of the busy flock, folded from its log on disk.
+pub fn busy_model(link: agent_mesh_tui::model::Link) -> (Fixture, agent_mesh_tui::model::Model) {
+    use agent_mesh_flock_server::Snapshot;
+    use content_addressable::ContentAddressable as _;
+    let (f, _) = busy();
+    let snap = Snapshot::read(f.path()).unwrap();
+    let genesis = agent_mesh_flock_server::load_genesis(f.path())
+        .unwrap()
+        .node;
+    let id = genesis.content_id().unwrap();
+    let name = genesis.payload.name.clone();
+    let m = agent_mesh_tui::model::fold(
+        &agent_mesh_tui::model::Source::of_snapshot(&name, id, &snap),
+        link,
+    );
+    (f, m)
 }
