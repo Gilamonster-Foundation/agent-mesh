@@ -257,11 +257,16 @@ impl Serving {
     /// returns the log's lock is free.
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        for p in &self.shared.paths {
-            let _wake = UnixStream::connect(p);
-        }
-        for j in self.joins.drain(..) {
-            let _ = j.join();
+        // One accept loop at a time: wake it by connecting, and keep that
+        // connection open until the loop has ended. Closing it at once loses
+        // the wake on macOS, which drops a queued connection whose peer has
+        // already gone, so the loop goes back to sleep in `accept` and the
+        // join never returns (#165). Holding it also bounds the descriptors
+        // stop needs to one at a time: the loop either accepts it or fails
+        // `accept` for want of a descriptor, and either way sees the flag.
+        for (path, join) in self.shared.paths.iter().zip(self.joins.drain(..)) {
+            let _wake = UnixStream::connect(path);
+            let _ = join.join();
         }
         self.shared.journal.stop();
         end_connections(&self.shared);

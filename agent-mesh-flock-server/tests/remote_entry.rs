@@ -418,6 +418,11 @@ fn a_watch_that_disconnects_ends_its_worker_with_nothing_published() {
     drop(conn);
 }
 
+/// #165: on macOS this hung about a third of the time while `stop` woke an
+/// accept loop by connecting and closing at once (the kernel drops a queued
+/// connection whose peer has gone, so the loop slept on). `stop` now keeps the
+/// wake open until the loop ends; looped 100 times on macOS, no hang.
+///
 /// Stopping needs no new descriptor for a connection it already holds. The
 /// limit is lowered in a child process (the test re-runs itself), so the
 /// rest of the suite keeps its descriptors.
