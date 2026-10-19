@@ -4,8 +4,13 @@
 //! follows uncertifies its key.
 //!
 //! The socket is the flock owner's local surface (the same user can read the
-//! server key file anyway). The SSH stream of step 9 authenticates by a fresh
-//! signed challenge instead; nothing here may be read as that.
+//! server key file anyway). A second socket, the attach socket, is the surface
+//! a remote host's bridge connects to; on it only the entries a remote session
+//! needs are offered (see [`offered`]) and minting an invite is not one of
+//! them. Whoever is on the far end of it proves membership the same way a local
+//! session does: an invite token to enroll, a possession proof to renew, a
+//! signature over a fresh challenge bound to this flock and connection to
+//! watch.
 
 use crate::wire::{read_msg, write_msg, Req, Resp, StreamChallenge};
 use crate::{CrashPlan, Head, Journal, Resume, Server, ServerError};
@@ -90,7 +95,8 @@ struct Shared {
     server: Mutex<Server>,
     /// The published log: streams read it without the server's lock.
     journal: Arc<Journal>,
-    path: PathBuf,
+    /// Every socket being served, so a stop can wake each accept loop.
+    paths: Vec<PathBuf>,
     /// The epoch and the first failure, with their condvar.
     signal: Signal,
     /// Every connection thread, so a stop can end and join them all.
@@ -101,14 +107,54 @@ struct Shared {
 pub struct Serving {
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
-    join: Option<JoinHandle<()>>,
+    joins: Vec<JoinHandle<()>>,
+}
+
+/// What the attach socket answers to a request it does not offer.
+pub(crate) const NOT_OFFERED: &str = "not offered on the attach socket";
+
+/// Whether `class` may make `req`. Written as one arm per request and no
+/// wildcard on the remote side, so a request added to the protocol will not
+/// compile until someone decides whether a remote host may make it.
+///
+/// A remote host's bridge may: say hello, fetch genesis, enroll with an invite
+/// token, renew with a possession proof, ask for a session's head, admit events
+/// a session signed, open a stream with a signed challenge, and say goodbye. It
+/// may not mint invites: that is the owner's alone.
+fn offered(class: Class, req: &Req) -> bool {
+    if class == Class::Owner {
+        return true;
+    }
+    match req {
+        Req::Hello => true,
+        Req::Genesis => true,
+        Req::EnrollBegin { .. } => true,
+        Req::EnrollFinish { .. } => true,
+        Req::Renew { .. } => true,
+        Req::RenewFinish { .. } => true,
+        Req::Head { .. } => true,
+        Req::Admit { .. } => true,
+        Req::End => true,
+        Req::WatchBegin => true,
+        Req::Watch { .. } => true,
+        Req::Invite { .. } => false,
+    }
+}
+
+/// Which surface a connection came in on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Class {
+    /// The owner's socket: everything.
+    Owner,
+    /// The attach socket: what a remote host's session needs, nothing more.
+    Remote,
 }
 
 impl Serving {
     /// Block until the loop ends: through [`Serving::stop`] from another
     /// thread, or a failure to persist. Returns that failure.
     pub fn wait(mut self) -> Option<String> {
-        if let Some(j) = self.join.take() {
+        for j in self.joins.drain(..) {
             let _ = j.join();
         }
         self.shared.journal.stop();
@@ -146,8 +192,10 @@ impl Serving {
     /// returns the log's lock is free.
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        let _wake = UnixStream::connect(&self.shared.path);
-        if let Some(j) = self.join.take() {
+        for p in &self.shared.paths {
+            let _wake = UnixStream::connect(p);
+        }
+        for j in self.joins.drain(..) {
             let _ = j.join();
         }
         self.shared.journal.stop();
@@ -160,47 +208,75 @@ impl Serving {
 /// # Errors
 /// The socket's address cannot be read.
 pub fn serve(server: Server, listener: UnixListener) -> std::io::Result<Serving> {
-    let path = listener
-        .local_addr()?
-        .as_pathname()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| std::io::Error::other("unnamed socket"))?;
+    start(server, vec![(listener, Class::Owner)])
+}
+
+/// [`serve`], and also the attach socket: the surface for a remote host's
+/// bridge. Both are served by the same server and stop together.
+///
+/// # Errors
+/// A socket's address cannot be read.
+pub fn serve_with_attach(
+    server: Server,
+    owner: UnixListener,
+    attach: UnixListener,
+) -> std::io::Result<Serving> {
+    start(server, vec![(owner, Class::Owner), (attach, Class::Remote)])
+}
+
+fn start(server: Server, listeners: Vec<(UnixListener, Class)>) -> std::io::Result<Serving> {
+    let mut paths = Vec::new();
+    for (l, _) in &listeners {
+        paths.push(
+            l.local_addr()?
+                .as_pathname()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| std::io::Error::other("unnamed socket"))?,
+        );
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let signal = Signal::new(server.epoch());
     let journal = server.journal();
     let shared = Arc::new(Shared {
         server: Mutex::new(server),
         journal,
+        paths,
         signal,
-        path,
         conns: Mutex::new(Vec::new()),
     });
-    let (flag, state) = (stop.clone(), shared.clone());
-    let join = std::thread::spawn(move || {
-        for conn in listener.incoming() {
-            if flag.load(Ordering::SeqCst) || failed(&state) {
-                break;
-            }
-            let Ok(conn) = conn else { continue };
-            if crate::peer_ok(&conn).is_err() {
-                continue;
-            }
-            let Ok(mine) = conn.try_clone() else { continue };
-            let st = state.clone();
-            let handle = std::thread::spawn(move || connection(&st, conn));
-            let mut conns = state
-                .conns
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            conns.retain(|(_, h)| !h.is_finished());
-            conns.push((mine, handle));
-        }
-    });
+    let joins = listeners
+        .into_iter()
+        .map(|(listener, class)| {
+            let (flag, state) = (stop.clone(), shared.clone());
+            std::thread::spawn(move || accept_loop(&listener, class, &flag, &state))
+        })
+        .collect();
     Ok(Serving {
         shared,
         stop,
-        join: Some(join),
+        joins,
     })
+}
+
+fn accept_loop(listener: &UnixListener, class: Class, flag: &AtomicBool, state: &Arc<Shared>) {
+    for conn in listener.incoming() {
+        if flag.load(Ordering::SeqCst) || failed(state) {
+            break;
+        }
+        let Ok(conn) = conn else { continue };
+        if crate::peer_ok(&conn).is_err() {
+            continue;
+        }
+        let Ok(mine) = conn.try_clone() else { continue };
+        let st = state.clone();
+        let handle = std::thread::spawn(move || connection(&st, conn, class));
+        let mut conns = state
+            .conns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        conns.retain(|(_, h)| !h.is_finished());
+        conns.push((mine, handle));
+    }
 }
 
 fn lock(m: &Mutex<Server>) -> MutexGuard<'_, Server> {
@@ -242,7 +318,9 @@ fn publish(s: &Shared, server: &Server) {
 /// Record a failure to persist and wake the accept loop so it stops.
 fn fail(s: &Shared, e: &ServerError) {
     s.signal.fail(e.to_string());
-    let _wake = UnixStream::connect(&s.path);
+    for p in &s.paths {
+        let _wake = UnixStream::connect(p);
+    }
 }
 
 /// An error after which the server no longer reflects what was promised.
@@ -252,10 +330,16 @@ fn is_fatal(e: &ServerError) -> bool {
 
 /// One connection carries at most one session, and its end is that
 /// session's end. A goodbye is answered `Ok` only once the end is durable.
-fn connection(shared: &Shared, mut conn: UnixStream) {
+fn connection(shared: &Shared, mut conn: UnixStream, class: Class) {
     let mut bound: Option<String> = None;
     let mut challenge: Option<StreamChallenge> = None;
     while let Ok(Some(req)) = read_msg::<Req>(&mut conn) {
+        if !offered(class, &req) {
+            if write_msg(&mut conn, &Resp::Err(NOT_OFFERED.into())).is_err() {
+                break;
+            }
+            continue;
+        }
         match req {
             Req::WatchBegin => {
                 let mut nonce = [0u8; 32];
@@ -286,7 +370,7 @@ fn connection(shared: &Shared, mut conn: UnixStream) {
                 break;
             }
             req => {
-                if !step(shared, &mut conn, req, &mut bound) {
+                if !step(shared, &mut conn, req, &mut bound, class) {
                     break;
                 }
                 continue;
@@ -304,7 +388,13 @@ fn connection(shared: &Shared, mut conn: UnixStream) {
 }
 
 /// One ordinary request; false when the connection should end.
-fn step(shared: &Shared, conn: &mut UnixStream, req: Req, bound: &mut Option<String>) -> bool {
+fn step(
+    shared: &Shared,
+    conn: &mut UnixStream,
+    req: Req,
+    bound: &mut Option<String>,
+    class: Class,
+) -> bool {
     let goodbye = matches!(req, Req::End);
     let result = if goodbye {
         bound
@@ -314,7 +404,7 @@ fn step(shared: &Shared, conn: &mut UnixStream, req: Req, bound: &mut Option<Str
             })
             .map(|()| Resp::Ok)
     } else {
-        with(shared, |srv| handle(srv, req, bound))
+        with(shared, |srv| handle(srv, req, bound, class))
     };
     let resp = result.unwrap_or_else(|e| {
         if is_fatal(&e) {
@@ -379,13 +469,19 @@ fn stream(shared: &Shared, conn: &mut UnixStream, session: &str, from: Option<&H
     }
 }
 
-fn handle(server: &mut Server, req: Req, bound: &mut Option<String>) -> Result<Resp, ServerError> {
+fn handle(
+    server: &mut Server,
+    req: Req,
+    bound: &mut Option<String>,
+    _class: Class,
+) -> Result<Resp, ServerError> {
     let taken = || ServerError::Session("this connection already carries a session".into());
     Ok(match req {
         Req::Hello => Resp::Hello {
             flock: server.flock(),
             epoch: server.epoch(),
         },
+        Req::Genesis => Resp::Genesis(server.genesis().clone()),
         Req::Invite { member } => Resp::Invited {
             token: server.invite(&member)?.token,
         },

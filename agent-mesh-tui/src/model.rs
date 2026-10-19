@@ -1,9 +1,11 @@
 //! The model: a pure fold of the verified log into what the views show. No
 //! I/O, no clock, no terminal; the same log always folds to the same model.
 
+use crate::events::{fold_events, EventRow};
 use agent_mesh_flock::{AttemptState, Board, Body, Kind};
 use agent_mesh_flock_server::{Follower, Sessions, Snapshot, Status};
 use content_addressable::ContentId;
+use std::sync::Arc;
 
 /// What the fold reads: a verified prefix of one flock.
 pub struct Source<'a> {
@@ -118,6 +120,9 @@ pub struct Model {
     pub header: Header,
     /// The roster, in roster order.
     pub members: Vec<MemberRow>,
+    /// Every admitted event, in admission order (shared between models: the
+    /// log only grows, so a newer model reuses the older one's rows).
+    pub events: Arc<Vec<EventRow>>,
 }
 
 const SHORT_ID: usize = 12;
@@ -125,6 +130,13 @@ const SHORT_ID: usize = 12;
 /// Fold a verified log into the model.
 #[must_use]
 pub fn fold(src: &Source<'_>, link: Link) -> Model {
+    fold_onto(None, src, link)
+}
+
+/// [`fold`], reusing the event rows of `prev` (an earlier fold of the same
+/// log) instead of building them again.
+#[must_use]
+pub fn fold_onto(prev: Option<&Model>, src: &Source<'_>, link: Link) -> Model {
     let id = src.id.to_string();
     let header = Header {
         flock: src.name.to_owned(),
@@ -147,7 +159,12 @@ pub fn fold(src: &Source<'_>, link: Link) -> Model {
             quiet_for: quiet_for(src.board, &m.name, src.admitted),
         })
         .collect();
-    Model { header, members }
+    let events = Arc::new(fold_events(src.board, prev.map(|p| p.events.as_slice())));
+    Model {
+        header,
+        members,
+        events,
+    }
 }
 
 /// A member can hold one active session and pending replacements.

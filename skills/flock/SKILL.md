@@ -109,6 +109,20 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   (`Admit`) still carries its chain, and a hand-off's operator-device approval
   keeps its inline chain (that certificate is not in the log). Flocks made before
   this cannot be opened either: new flock, fresh directory;
+- **the attach socket** (`amesh flock serve --attach`, Unix): a second socket,
+  `run/attach.sock` (mode 0600, private directory), the surface a remote host's
+  bridge will connect to (step 9b; the bridge is not built yet). Without
+  `--attach` nothing remote can reach the flock. On it only these requests are
+  offered: `Hello`, `Genesis` (the public genesis node; its hash is the flock
+  id, which a remote attacher checks against the id it was given), enroll,
+  renew, `Head`, `Admit`, the stream challenge and `Watch`, and goodbye. Minting
+  an invite stays on the owner socket; the attach socket answers "not offered on
+  the attach socket". The list has one arm per request and no wildcard, so a new
+  request cannot be added without deciding whether a remote host may make it.
+  Whoever is on the far end still proves membership the usual way (invite token,
+  possession proof, a signature over a fresh challenge bound to flock and
+  connection). v1 attaches same-user hosts only: the host-to-host handshake
+  (the bus's auto-team rule) requires both hosts to belong to one user;
 - **MCP tools** (`amesh mcp --flock-session <sock>` or `AMESH_FLOCK_SESSION`,
   Unix): `flock_whoami`, `flock_inbox`, `flock_status` and `flock_emit{kind,
   refs, body}` join the `mesh_*` tools, only when a session is given. The
@@ -235,12 +249,12 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   real server and session feeding the model, and the same cargo-tree and
   compile-probe checks as the read side (`tests_common::readside`) run against
   the TUI: neither writer feature resolves and no writer API can be named by a
-  consumer of the crate. The Board scrolls to keep the selected member on screen (header and footer fixed). A frame whose checkpoint cannot be saved is rolled back by the reader itself (`Reader::follow` keeps nothing it did not save, and `Reader::open` makes a checkpoint it finds durable (file and directory fsync) before showing it, or does not open: a rename left visible by a failed directory fsync is never presented as saved until it will survive power loss), so the view and `amesh flock watch` only ever show the saved prefix; the TUI header says `cannot save the checkpoint` and keeps the last saved state. Stream, Lane and Waiting views are 8c-8e.
+  consumer of the crate. The Board scrolls to keep the selected member on screen (header and footer fixed). A frame whose checkpoint cannot be saved is rolled back by the reader itself (`Reader::follow` keeps nothing it did not save, and `Reader::open` makes a checkpoint it finds durable (file and directory fsync) before showing it, or does not open: a rename left visible by a failed directory fsync is never presented as saved until it will survive power loss), so the view and `amesh flock watch` only ever show the saved prefix; the TUI header says `cannot save the checkpoint` and keeps the last saved state. **Stream (step 8c)**: a second tab (`Tab`, or `1`/`2`) lists every admitted event in order (index, kind, signer, lane, one-line summary; conflicts marked) with kind / lane / member filters (`k` `l` `m` cycle through what the log has and back to all, `c` clears) and a follow mode (on at the start; moving up leaves it, `f` or `End` returns). An event's lane is its own or that of the event it answers. `Enter` opens the raw view: id, "✓ signature, session certificate and admission checked", signer (member and session fingerprint), lane, claimed time, parents (`prev` then references, numbered; `1`-`9` jump to one, `Backspace` returns; a filter that hides the parent is cleared), cited files and the pretty-printed body. Everything is folded from the verified board; nothing is fetched or checked again, and the event list is shared and extended between models. Everything drawn passes one function, `inert` (`ui/inert.rs`), which spells out control characters (C0 including ESC/BEL/CR/TAB, DEL, C1 including U+009B, and line/bidi/zero-width controls) as `\x1b`, `\r`, `\x9b` ...: a signature says who spoke, not that the text is safe to print, so a member's status, lane, label, file path or name cannot send the operator's terminal a command (tests: the screens carry no control character, and the bytes sent through a real crossterm backend carry only the renderer's own escapes). A signer is shown as member and session, with no role (the log knows only today's roster). `amesh flock log`/`watch`/`inbox` print member text raw and need the same treatment (follow-up). Lane and Waiting views are 8d-8e.
 
 **Planned, not built:** operator approval of a **delegate**
 hand-off (#127's other half; waits on the delegate designation, step 13); device changes
 signed by a listed device (server-signed only today); operator-signed events (`answer`); the rest of
-the CLI's `answer`; `amesh-tui`; attaching from another host; the
+the CLI's `answer`; `amesh-tui`; attaching from another host (9b: the bridge and `attach` proxy; 9c: cited files; 9d: a real-sshd run); the
 `amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native
 newt receive. Until they land, lanes run on files
 as the herdr-flock skill describes. Status: epic #109.

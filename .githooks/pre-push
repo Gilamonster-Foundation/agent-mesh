@@ -33,7 +33,8 @@
 # Do NOT skip this hook with `--no-verify`. If a check fails, fix the issue.
 #
 # CI-only as well: the "flock sockets refuse another user" step in ci.yml
-# (it needs root).
+# (it needs root), and the "flock read side, writer features off" clippy and
+# test steps (a second feature configuration of two crates).
 #
 # PREPUSH_PLAN_ONLY=1 prints "PLAN ..." instead of running cargo (tests).
 
