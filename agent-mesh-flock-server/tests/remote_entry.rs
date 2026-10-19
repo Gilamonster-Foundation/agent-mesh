@@ -422,6 +422,10 @@ fn stop_with_no_spare_descriptors_still_ends_every_connection() {
             read_msg::<Resp>(&mut c),
             Ok(Some(Resp::Hello { .. }))
         ));
+        // Set the read guard while the socket is live: macOS refuses
+        // SO_RCVTIMEO (EINVAL) on a socket the server has already shut down.
+        c.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
         clients.push(c);
     }
     // 12 idle workers are running (each answered, so each was accepted)
@@ -451,8 +455,6 @@ fn stop_with_no_spare_descriptors_still_ends_every_connection() {
     rx.recv_timeout(std::time::Duration::from_secs(30))
         .expect("stop did not complete");
     for mut c in clients {
-        c.set_read_timeout(Some(std::time::Duration::from_secs(10)))
-            .unwrap();
         let end = read_msg::<Resp>(&mut c);
         assert!(matches!(end, Ok(None) | Err(_)), "{end:?}");
     }
