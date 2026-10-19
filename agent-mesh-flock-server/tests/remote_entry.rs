@@ -116,11 +116,11 @@ fn genesis_is_served_on_both_and_hashes_to_the_flock_id() {
         panic!("hello")
     };
     for sock in [&r.attach, &r.owner] {
-        let Resp::Genesis(node) = ask(sock, &Req::Genesis) else {
+        let Resp::Genesis(g) = ask(sock, &Req::Genesis) else {
             panic!("genesis on {}", sock.display())
         };
-        assert_eq!(node.content_id().unwrap(), flock);
-        assert_eq!(node.content_id().unwrap(), r.env.flock);
+        assert_eq!(g.node.content_id().unwrap(), flock);
+        assert_eq!(g.node.content_id().unwrap(), r.env.flock);
     }
 }
 

@@ -162,7 +162,7 @@ pub enum Resp {
         epoch: u64,
     },
     /// Answer to `Genesis`.
-    Genesis(MerkleNode<agent_mesh_flock::Genesis>),
+    Genesis(crate::SignedGenesis),
     /// Answer to `Invite`.
     #[cfg(feature = "serve")]
     Invited {

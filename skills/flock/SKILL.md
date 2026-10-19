@@ -111,7 +111,7 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   this cannot be opened either: new flock, fresh directory;
 - **the attach socket** (`amesh flock serve --attach`, Unix): a second socket,
   `run/attach.sock` (mode 0600, private directory), the surface a remote host's
-  bridge will connect to (step 9b; the bridge is not built yet). Without
+  bridge connects to (step 9b, below). Without
   `--attach` nothing remote can reach the flock. On it only these requests are
   offered: `Hello`, `Genesis` (the public genesis node; its hash is the flock
   id, which a remote attacher checks against the id it was given), enroll,
@@ -123,6 +123,29 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   possession proof, a signature over a fresh challenge bound to flock and
   connection). v1 attaches same-user hosts only: the host-to-host handshake
   (the bus's auto-team rule) requires both hosts to belong to one user;
+- **the bridge and `attach` (step 9b)**, Unix, same-user hosts only. `amesh flock
+  serve --attach --bridge [--bridge-port N] [--bridge-quiet]` (the home host;
+  needs `amesh keygen`) joins the mesh as a bus agent and serves a session
+  stream per remote on topic `flock/<flock id>`; each stream is piped to the
+  attach socket, so the allow-list applies and `Invite` is never offered
+  remotely. It prints `bridge <agent fingerprint> <agent pubkey> <port>`.
+  `amesh flock attach --dir D --id <flock id> --peer <pubkey>@<ip:port | fingerprint>`
+  (the remote host, the same user's key) fetches the genesis, **refuses unless
+  its hash is the `--id` you were given** (the id is the out-of-band anchor, like
+  a fingerprint; nothing is written otherwise), keeps it as `D/genesis`, and
+  serves `D/run/serve.sock`: every flock tool (`session`, `watch`, `join`, the
+  TUI, a `Reader`) then runs unchanged against `D`, one bus stream per local
+  connection. The proxy holds no key and has no emit path; the wire is the
+  server's own `Req`/`Resp`, one session message per wire message, and a body
+  that is not exactly one wire message (up to 1 MiB) is dropped with the
+  connection. Enrolling uses a token the owner mints at home; the key is made
+  and stays on the remote. A session that was quiet across epoch bumps renews
+  through the proxy; two flocks at different epochs ride one host-to-host
+  connection (one topic each) without touching each other. A connection that
+  drops without goodbye is recorded `lost` at home as before. What the bus
+  handshake proves is only that the two hosts belong to the same user; the
+  proofs above (token, possession, a stream signature) are what admit a member.
+  `--peer <fingerprint>` finds the home by mDNS; `pubkey@addr` dials directly.
 - **MCP tools** (`amesh mcp --flock-session <sock>` or `AMESH_FLOCK_SESSION`,
   Unix): `flock_whoami`, `flock_inbox`, `flock_status` and `flock_emit{kind,
   refs, body}` join the `mesh_*` tools, only when a session is given. The
@@ -254,7 +277,7 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
 **Planned, not built:** operator approval of a **delegate**
 hand-off (#127's other half; waits on the delegate designation, step 13); device changes
 signed by a listed device (server-signed only today); operator-signed events (`answer`); the rest of
-the CLI's `answer`; `amesh-tui`; attaching from another host (9b: the bridge and `attach` proxy; 9c: cited files; 9d: a real-sshd run); the
+the CLI's `answer`; `amesh-tui`; cited-file service for remote hosts (9c) and a real-sshd run of the attach suite (9d); the
 `amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native
 newt receive. Until they land, lanes run on files
 as the herdr-flock skill describes. Status: epic #109.

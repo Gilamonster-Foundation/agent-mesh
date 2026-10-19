@@ -30,7 +30,7 @@ pub struct Receipt {
 /// An open flock server.
 pub struct Server {
     pub(crate) key: AgentKey,
-    genesis: MerkleNode<Genesis>,
+    genesis: crate::SignedGenesis,
     pub(crate) st: State,
     log: Log,
     refusal_log: Log,
@@ -94,7 +94,7 @@ impl Server {
         refusal_log.commit_recovery()?;
         Ok(Self {
             key,
-            genesis: genesis.node,
+            genesis,
             st,
             log,
             refusal_log,
@@ -109,6 +109,13 @@ impl Server {
     /// The flock's genesis node: public, and what the flock id is the hash of.
     #[must_use]
     pub fn genesis(&self) -> &MerkleNode<Genesis> {
+        &self.genesis.node
+    }
+
+    /// The genesis with the server's signature over it: what is sent to a
+    /// remote host so it can keep the same `genesis` file this host has.
+    #[must_use]
+    pub fn signed_genesis(&self) -> &crate::SignedGenesis {
         &self.genesis
     }
 

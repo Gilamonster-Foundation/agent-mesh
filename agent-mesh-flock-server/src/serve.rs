@@ -481,7 +481,7 @@ fn handle(
             flock: server.flock(),
             epoch: server.epoch(),
         },
-        Req::Genesis => Resp::Genesis(server.genesis().clone()),
+        Req::Genesis => Resp::Genesis(server.signed_genesis().clone()),
         Req::Invite { member } => Resp::Invited {
             token: server.invite(&member)?.token,
         },
