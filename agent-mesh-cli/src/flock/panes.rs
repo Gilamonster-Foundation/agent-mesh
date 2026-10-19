@@ -94,12 +94,11 @@ fn render(
     Ok(out)
 }
 
-/// The pane each member's active session last claimed, when herdr still has
-/// that pane (and it is in `tab`, if one is given). Only the active session
-/// counts: an ended or pending session's claim says nothing about who holds
-/// the role now. The claim is the session's word, signed; herdr and the log
-/// cannot confirm the pane.
-fn announced(snap: &Snapshot, live: &[Pane], tab: Option<&str>) -> BTreeMap<String, String> {
+/// The pane each member's active session last claimed, whether or not herdr
+/// still lists it. Only the active session counts: an ended or pending
+/// session's claim says nothing about who holds the role now. The claim is the
+/// session's word, signed; herdr and the log cannot confirm the pane.
+pub(crate) fn claims(snap: &Snapshot) -> BTreeMap<String, String> {
     let sessions = snap.sessions();
     let mut latest: BTreeMap<&str, (u64, &str)> = BTreeMap::new();
     for e in snap.board().entries() {
@@ -120,8 +119,19 @@ fn announced(snap: &Snapshot, live: &[Pane], tab: Option<&str>) -> BTreeMap<Stri
                 // a roster change can drop a member whose session is still
                 // Active in the table: its claim is not about anyone now
                 .filter(|s| snap.board().members().iter().any(|m| m.name == s.member))?;
-            let p = live.iter().find(|p| p.pane_id == pane)?;
-            (tab.is_none() || tab == Some(p.tab_id.as_str())).then(|| (s.member, pane.to_owned()))
+            Some((s.member, pane.to_owned()))
+        })
+        .collect()
+}
+
+/// [`claims`] herdr still lists (and that are in `tab`, if one is given).
+fn announced(snap: &Snapshot, live: &[Pane], tab: Option<&str>) -> BTreeMap<String, String> {
+    claims(snap)
+        .into_iter()
+        .filter(|(_, pane)| {
+            live.iter()
+                .find(|p| &p.pane_id == pane)
+                .is_some_and(|p| tab.is_none() || tab == Some(p.tab_id.as_str()))
         })
         .collect()
 }
@@ -292,6 +302,7 @@ mod tests {
         Pane {
             pane_id: id.into(),
             tab_id: tab.into(),
+            workspace_id: None,
             label: label.map(Into::into),
             agent: Some("newt".into()),
             agent_session: None,

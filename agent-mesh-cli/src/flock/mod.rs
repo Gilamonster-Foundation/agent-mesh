@@ -17,6 +17,9 @@ mod discover;
 mod emit;
 #[cfg(unix)]
 pub(crate) mod mcp;
+// wired by `amesh flock nudge` (step 10c)
+#[allow(dead_code)]
+mod nudge;
 mod panes;
 #[cfg(unix)]
 mod read;
