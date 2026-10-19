@@ -71,6 +71,21 @@ impl Runner for System {
     }
 }
 
+/// `herdr pane list`, parsed.
+fn list_panes(run: &impl Runner) -> Result<Vec<Pane>> {
+    #[derive(Deserialize)]
+    struct Listing {
+        panes: Vec<Pane>,
+    }
+    #[derive(Deserialize)]
+    struct Envelope {
+        result: Listing,
+    }
+    let text = run.run(&["pane", "list"])?;
+    let env: Envelope = serde_json::from_str(&text).context("parse `herdr pane list`")?;
+    Ok(env.result.panes)
+}
+
 /// herdr, read-only by construction: `panes` is the only thing it can ask.
 pub struct Herdr<R>(pub R);
 
@@ -80,17 +95,107 @@ impl<R: Runner> Herdr<R> {
     /// # Errors
     /// herdr failed or its output did not parse.
     pub fn panes(&self) -> Result<Vec<Pane>> {
+        list_panes(&self.0)
+    }
+}
+
+/// What `herdr agent get` says about the agent in a pane.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Agent {
+    /// herdr's id for the terminal the agent runs in.
+    pub terminal_id: String,
+    /// The agent's herdr name, when it has one.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The detected agent kind.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// `idle`, `working`, `blocked`, ...
+    pub agent_status: String,
+    /// The pane it is in.
+    pub pane_id: String,
+    /// The tab that pane is in.
+    pub tab_id: String,
+}
+
+/// The longest id of a pane we will put on a command line.
+const MAX_ID: usize = 64;
+
+/// A herdr id is its own text, not ours: it goes on a command line only if it
+/// cannot be read as an option or carry anything but id characters.
+#[must_use]
+pub fn safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ID
+        && !id.starts_with('-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '.' | '-'))
+}
+
+/// herdr as the nudge adapter drives it: the one read of `Herdr`, plus the
+/// three verbs a nudge needs, and nothing else (no `send-keys`, `pane run`,
+/// `focus` or `rename`). Every method names a fixed command.
+pub struct HerdrControl<R>(pub R);
+
+impl<R: Runner> HerdrControl<R> {
+    /// `herdr pane list`.
+    ///
+    /// # Errors
+    /// herdr failed or its output did not parse.
+    pub fn panes(&self) -> Result<Vec<Pane>> {
+        list_panes(&self.0)
+    }
+
+    /// `herdr agent get <pane>`.
+    ///
+    /// # Errors
+    /// The id is not safe to pass, herdr failed, or its output did not parse.
+    pub fn agent(&self, pane: &str) -> Result<Agent> {
         #[derive(Deserialize)]
-        struct Listing {
-            panes: Vec<Pane>,
+        struct Result_ {
+            agent: Agent,
         }
         #[derive(Deserialize)]
         struct Envelope {
-            result: Listing,
+            result: Result_,
         }
-        let text = self.0.run(&["pane", "list"])?;
-        let env: Envelope = serde_json::from_str(&text).context("parse `herdr pane list`")?;
-        Ok(env.result.panes)
+        ensure_safe(pane)?;
+        let text = self.0.run(&["agent", "get", pane])?;
+        let env: Envelope = serde_json::from_str(&text).context("parse `herdr agent get`")?;
+        Ok(env.result.agent)
+    }
+
+    /// `herdr agent wait <pane> --until idle --timeout <ms>`. An error is a
+    /// timeout or a failure; the caller gives up either way.
+    ///
+    /// # Errors
+    /// The id is not safe, or herdr did not report idle.
+    pub fn wait_idle(&self, pane: &str, timeout_ms: u64) -> Result<()> {
+        ensure_safe(pane)?;
+        let ms = timeout_ms.to_string();
+        self.0
+            .run(&["agent", "wait", pane, "--until", "idle", "--timeout", &ms])
+            .map(drop)
+    }
+
+    /// `herdr agent prompt <pane> <text>`: submitted, with no waiting. herdr
+    /// errors (`agent_prompt_stalled`) when nothing changed in the pane, which
+    /// is "not delivered" here.
+    ///
+    /// # Errors
+    /// The id is not safe, or herdr refused or stalled.
+    pub fn prompt(&self, pane: &str, text: &str) -> Result<()> {
+        ensure_safe(pane)?;
+        self.0.run(&["agent", "prompt", pane, text]).map(drop)
+    }
+}
+
+fn ensure_safe(pane: &str) -> Result<()> {
+    if safe_id(pane) {
+        Ok(())
+    } else {
+        bail!("a pane id that is not safe to pass to herdr")
     }
 }
 
@@ -226,6 +331,47 @@ mod tests {
         assert_eq!(panes[0].agent(), Some("newt"));
         // The allowlist: any other argv would be a state-changing request.
         assert_eq!(*mock.calls.borrow(), vec![vec!["pane", "list"]]);
+    }
+
+    #[test]
+    fn control_issues_only_its_four_commands() {
+        let mock = Mock {
+            calls: RefCell::default(),
+            reply: r#"{"result":{"agent":{"terminal_id":"t","agent_status":"idle",
+                "pane_id":"w1:p1","tab_id":"w1:t1","extra":1},"panes":[]}}"#
+                .into(),
+        };
+        let c = HerdrControl(&mock);
+        c.panes().unwrap();
+        assert_eq!(c.agent("w1:p1").unwrap().agent_status, "idle");
+        c.wait_idle("w1:p1", 5000).unwrap();
+        c.prompt("w1:p1", "hello").unwrap();
+        let calls: Vec<String> = mock.calls.borrow().iter().map(|c| c.join(" ")).collect();
+        assert_eq!(
+            calls,
+            [
+                "pane list",
+                "agent get w1:p1",
+                "agent wait w1:p1 --until idle --timeout 5000",
+                "agent prompt w1:p1 hello"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pane_id_that_could_be_an_option_or_carry_text_is_never_passed() {
+        let mock = Mock {
+            calls: RefCell::default(),
+            reply: String::new(),
+        };
+        let c = HerdrControl(&mock);
+        for bad in ["", "-x", "--help", "w1:p1 --x", "w1:p1\n", "a;b", "é"] {
+            assert!(c.agent(bad).is_err(), "{bad:?}");
+            assert!(c.wait_idle(bad, 1).is_err(), "{bad:?}");
+            assert!(c.prompt(bad, "t").is_err(), "{bad:?}");
+        }
+        assert!(c.agent(&"a".repeat(65)).is_err());
+        assert!(mock.calls.borrow().is_empty(), "nothing reached herdr");
     }
 
     #[test]
