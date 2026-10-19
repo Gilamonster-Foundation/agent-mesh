@@ -153,6 +153,28 @@ pub struct LaneRow {
     pub files: Vec<FileRef>,
 }
 
+/// One thing that waits for someone: an unanswered ask, a review with no
+/// verdict, a brief nobody has taken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Waiting {
+    /// `ask`, `review` or `brief`.
+    pub kind: String,
+    /// Its admission index.
+    pub index: u64,
+    /// Events admitted since (how long it has waited, in events).
+    pub age: u64,
+    /// The member it waits on (who must answer, give the verdict, take it),
+    /// or `-` if the log does not say.
+    pub on: String,
+    /// Its lane, if it has one.
+    pub lane: Option<String>,
+    /// The ask's text, the review's head, the brief's addressee.
+    pub what: String,
+    /// A file an ask cites (`root/path`): the draft it is about. Only named,
+    /// never read here.
+    pub draft: Option<String>,
+}
+
 /// Everything the views need.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Model {
@@ -165,6 +187,8 @@ pub struct Model {
     pub events: Arc<Vec<EventRow>>,
     /// Every lane with a brief, by name.
     pub lanes: Vec<LaneRow>,
+    /// What waits for someone, oldest first.
+    pub waiting: Vec<Waiting>,
 }
 
 const SHORT_ID: usize = 12;
@@ -203,12 +227,83 @@ pub fn fold_onto(prev: Option<&Model>, src: &Source<'_>, link: Link) -> Model {
         .collect();
     let events = Arc::new(fold_events(src.board, prev.map(|p| p.events.as_slice())));
     let lanes = lane_rows(src.board, &events);
+    let waiting = waiting_rows(src.board, src.admitted);
     Model {
         header,
         members,
         events,
         lanes,
+        waiting,
     }
+}
+
+fn waiting_rows(board: &Board, admitted: u64) -> Vec<Waiting> {
+    let age = |index: u64| admitted.saturating_sub(index);
+    let open =
+        |e: &agent_mesh_flock::Entry| e.conflict.is_none() && board.closer_of(&e.id).is_none();
+    let mut out: Vec<Waiting> = board
+        .entries()
+        .filter(|e| open(e))
+        .filter_map(|e| {
+            let row = |kind: &str, on: String, lane: Option<String>, what: String| Waiting {
+                kind: kind.to_owned(),
+                index: e.index,
+                age: age(e.index),
+                on,
+                lane,
+                what,
+                draft: None,
+            };
+            match &e.event.body {
+                Body::Ask { lane, text } => {
+                    // it waits on whoever briefed the work it is about
+                    let on = e
+                        .event
+                        .refs
+                        .get("about")
+                        .and_then(|b| board.get(b))
+                        .and_then(|b| b.member.clone())
+                        .unwrap_or_else(|| "-".to_owned());
+                    let mut r = row("ask", on, lane.clone(), text.clone());
+                    r.draft = e
+                        .event
+                        .files
+                        .first()
+                        .map(|f| format!("{}/{}", f.root, f.path));
+                    Some(r)
+                }
+                Body::Review { to, lane, head } => Some(row(
+                    "review",
+                    to.clone(),
+                    Some(lane.clone()),
+                    format!("head {head}"),
+                )),
+                _ => None,
+            }
+        })
+        .collect();
+    // briefs nobody has taken: a lane's latest attempt, still only submitted
+    for l in board.lanes() {
+        if l.latest.state != AttemptState::Submitted {
+            continue;
+        }
+        let Some(e) = board.get(&l.latest.brief) else {
+            continue;
+        };
+        if let Body::Brief { to, lane } = &e.event.body {
+            out.push(Waiting {
+                kind: "brief".to_owned(),
+                index: e.index,
+                age: age(e.index),
+                on: to.clone(),
+                lane: Some(lane.clone()),
+                what: format!("to {to}"),
+                draft: None,
+            });
+        }
+    }
+    out.sort_by_key(|w| w.index);
+    out
 }
 
 fn attempt(a: &AttemptView, board: &Board) -> Attempt {

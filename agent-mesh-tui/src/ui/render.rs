@@ -207,6 +207,44 @@ pub fn lane_detail(app: &App) -> Vec<String> {
     out
 }
 
+/// The Waiting table: a column header, then what waits from `offset`.
+#[must_use]
+pub fn wait_lines(app: &App, offset: usize, visible: usize) -> Vec<String> {
+    let mut out = vec![format!(
+        "  {:>5} {} {} {} {} WHAT",
+        "AGE",
+        cell("KIND", 7),
+        cell("#", 5),
+        cell("ON", 8),
+        cell("LANE", 8)
+    )];
+    let selected = app.wait_selected();
+    for (i, w) in app
+        .model()
+        .waiting
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible)
+    {
+        let draft = w
+            .draft
+            .as_ref()
+            .map_or(String::new(), |d| format!(" [draft: {d}]"));
+        out.push(format!(
+            "{} {:>5} {} {} {} {} {}{draft}",
+            if selected == Some(i) { "▸" } else { " " },
+            w.age,
+            cell(&w.kind, 7),
+            cell(&format!("#{}", w.index), 5),
+            cell(&w.on, 8),
+            cell(w.lane.as_deref().unwrap_or("-"), 8),
+            w.what,
+        ));
+    }
+    out
+}
+
 /// The Stream list: a column header, then events from `offset` that fit.
 #[must_use]
 pub fn stream_lines(app: &App, offset: usize, visible: usize) -> Vec<String> {
@@ -342,6 +380,30 @@ pub fn draw(f: &mut Frame<'_>, app: &App) {
                 .collect();
             let mut text = app.view().footer;
             if total > visible {
+                let last = (offset + visible).min(total);
+                text = format!("rows {}-{last} of {total} · {text}", offset + 1);
+            }
+            footer = vec![text];
+        }
+        Tab::Waiting => {
+            let offset = app.wait_viewport(visible);
+            let selected = app.wait_selected();
+            body = wait_lines(app, offset, visible)
+                .into_iter()
+                .enumerate()
+                .map(|(i, l)| {
+                    if i > 0 && selected == Some(offset + i - 1) {
+                        selected_line(&l)
+                    } else {
+                        text_line(&l)
+                    }
+                })
+                .collect();
+            let total = app.model().waiting.len();
+            let mut text = app.view().footer;
+            if total == 0 {
+                text = format!("nothing is waiting · {text}");
+            } else if total > visible {
                 let last = (offset + visible).min(total);
                 text = format!("rows {}-{last} of {total} · {text}", offset + 1);
             }

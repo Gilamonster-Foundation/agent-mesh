@@ -305,6 +305,7 @@ mod tests {
         Pane {
             pane_id: id.into(),
             tab_id: tab.into(),
+            workspace_id: None,
             label: label.map(Into::into),
             agent: Some("newt".into()),
             agent_session: None,

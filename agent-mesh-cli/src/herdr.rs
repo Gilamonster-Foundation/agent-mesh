@@ -17,6 +17,10 @@ pub struct Pane {
     pub pane_id: String,
     /// The tab it sits in; labels are only unique within one.
     pub tab_id: String,
+    /// The workspace herdr says it is in. Absent in older output, in which
+    /// case no workspace rule can be decided for the pane.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
     /// The pane label, when one was set.
     #[serde(default)]
     pub label: Option<String>,
@@ -296,6 +300,7 @@ mod tests {
         Pane {
             pane_id: id.into(),
             tab_id: tab.into(),
+            workspace_id: None,
             label: label.map(Into::into),
             agent: None,
             agent_session: None,

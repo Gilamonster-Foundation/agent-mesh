@@ -51,6 +51,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: OpenSSH server for the attach-over-ssh suite
+        run: test -x /usr/sbin/sshd || (sudo apt-get update && sudo apt-get install -y openssh-server)
       - name: cargo test
         run: cargo test --workspace --locked
       - name: cargo test (flock read side, writer features off)
@@ -83,6 +85,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (macOS-gated protocol + OpenSSH tests, flock Unix code)
         run: cargo test -p agent-mesh-protocol -p agent-mesh-transport-ssh -p agent-mesh-flock-server -p agent-mesh-flock-session --locked
+      # The flock attach suite over a real loopback sshd (agent-mesh-cli,
+      # step 9d). macOS ships sshd at /usr/sbin/sshd.
+      - name: cargo test (flock attach over ssh)
+        run: cargo test -p agent-mesh-cli --test flock_bridge_ssh --locked
 
   coverage:
     name: Workspace coverage (cargo-llvm-cov)
@@ -97,6 +103,8 @@ jobs:
           # Coverage uses an instrumented build — keep its target dir
           # isolated from the lint/test cache to avoid thrash.
           key: coverage
+      - name: OpenSSH server for the attach-over-ssh suite
+        run: test -x /usr/sbin/sshd || (sudo apt-get update && sudo apt-get install -y openssh-server)
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
