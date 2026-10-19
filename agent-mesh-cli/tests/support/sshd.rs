@@ -2,9 +2,9 @@
 //! test and torn down with it. Modelled on the transport crate's
 //! `openssh_roundtrip`; it forwards only to the mesh port it was given.
 //!
-//! Where `sshd` is not installed the test says so and returns; set
-//! `AMESH_REQUIRE_SSHD` (CI should) to make that a failure instead, so a
-//! runner without it cannot pass quietly.
+//! Where OpenSSH is not installed the test FAILS: a skipped test would show
+//! as passed (the harness hides a passing test's output). A developer without
+//! sshd can set `AMESH_SKIP_SSHD=1` to skip deliberately.
 #![allow(dead_code)]
 
 use agent_mesh_transport_ssh::{HostKeyPolicy, SshTarget};
@@ -53,8 +53,9 @@ fn quoted(p: &Path) -> String {
 }
 
 impl Sshd {
-    /// Start sshd forwarding only to `mesh_port`, or `None` (loudly) when
-    /// OpenSSH is not installed and `AMESH_REQUIRE_SSHD` is not set.
+    /// Start sshd forwarding only to `mesh_port`. Without OpenSSH this
+    /// panics, unless `AMESH_SKIP_SSHD` is set, in which case it returns
+    /// `None` and the test returns without exercising the SSH carrier.
     pub fn start(mesh_port: u16) -> Option<Self> {
         let bins = ["/usr/bin", "/usr/local/bin", "/bin"];
         let sbins = ["/usr/sbin", "/usr/local/sbin", "/sbin", "/usr/bin"];
@@ -66,10 +67,10 @@ impl Sshd {
         let (Some(ssh), Some(keygen), Some(sshd)) = (ssh, keygen, sshd) else {
             let why = "OpenSSH (ssh, ssh-keygen, sshd) is not installed";
             assert!(
-                std::env::var_os("AMESH_REQUIRE_SSHD").is_none(),
-                "{why}, and AMESH_REQUIRE_SSHD is set"
+                std::env::var_os("AMESH_SKIP_SSHD").is_some(),
+                "{why}; install it, or set AMESH_SKIP_SSHD=1 to skip the SSH suite deliberately"
             );
-            eprintln!("SKIPPED: {why}; the SSH carrier was NOT exercised");
+            eprintln!("SKIPPED (AMESH_SKIP_SSHD): {why}; the SSH carrier was NOT exercised");
             return None;
         };
         let user = run(Command::new("id").arg("-un"), "id -un");
@@ -151,6 +152,7 @@ impl Sshd {
         });
         if rx.recv_timeout(READY).is_err() {
             let _ = child.kill();
+            let _ = child.wait();
             panic!("sshd did not start listening:\n{}", log.lock().unwrap());
         }
         Some(Self {

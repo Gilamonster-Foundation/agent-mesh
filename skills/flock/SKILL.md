@@ -218,8 +218,8 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   `agent-mesh-transport-ssh` and a real loopback `sshd` between them (throwaway
   host and user keys, the host key pinned, forwarding only to the home's mesh
   port). A test fails if no ssh login was logged. Without OpenSSH installed the
-  tests print `SKIPPED` and return; with `AMESH_REQUIRE_SSHD` set that is a
-  failure (CI should set it). `amesh flock attach` and `serve --bridge` still
+  tests fail (a skip would show as a pass); `AMESH_SKIP_SSHD=1` skips them
+  deliberately. CI installs sshd on Linux and runs the suite on macOS too. `amesh flock attach` and `serve --bridge` still
   dial iroh only: there is no `--transport ssh` choice, so ssh is proven at the
   library level, not by the CLI.
 - **MCP tools** (`amesh mcp --flock-session <sock>` or `AMESH_FLOCK_SESSION`,
