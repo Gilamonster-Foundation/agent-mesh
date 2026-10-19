@@ -521,3 +521,83 @@ fn every_flock_tool_fails_once_the_bound_socket_stops_being_its_session() {
         );
     }
 }
+
+/// A session socket that is not a session: it vouches for itself on the first
+/// two `Whoami`s (the server's startup check, then the tool's per-call guard)
+/// and answers everything after with a refusal carrying `payload`.
+fn mock_session(f: &Flock, payload: &str) -> PathBuf {
+    use agent_mesh_flock_server::wire::{read_msg, write_msg};
+    use agent_mesh_flock_session::{CtlReq, CtlResp};
+    let sock = f.dir.join("run").join("session-mock.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    let flock = agent_mesh_flock_server::load_genesis(&f.dir)
+        .unwrap()
+        .node
+        .content_id()
+        .unwrap();
+    let payload = payload.to_owned();
+    std::thread::spawn(move || {
+        for (n, conn) in listener.incoming().enumerate() {
+            let Ok(mut c) = conn else { return };
+            if read_msg::<CtlReq>(&mut c).ok().flatten().is_none() {
+                continue;
+            }
+            let resp = if n < 2 {
+                CtlResp::Who {
+                    flock,
+                    member: "m".into(),
+                    session: "00".into(),
+                    pending: false,
+                }
+            } else {
+                CtlResp::Err(payload.clone())
+            };
+            let _ = write_msg(&mut c, &resp);
+        }
+    });
+    sock
+}
+
+#[test]
+fn a_refusal_after_startup_reaches_the_mcp_client_inert() {
+    let payload = "\u{1b}]52;c;aGk=\u{7}\u{9b}31m\u{202e}rtl\u{61c}\nFORGED";
+    let f = flock();
+    let sock = mock_session(&f, payload);
+    let mut child = amesh(f.home.path())
+        .args(["mcp", "--quiet", "--flock-session"])
+        .arg(&sock)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let _guard = Proc(child);
+    let req = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"flock_whoami","arguments":{}}});
+    writeln!(stdin, "{req}").unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+
+    let r: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line:?}"));
+    assert_eq!(r["id"], 1, "framing and id survive: {line}");
+    let msg = r["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("an error response: {line:?}"));
+    for (what, s) in [("message", msg), ("wire", line.as_str())] {
+        let bad = s.chars().find(|c| {
+            c.is_control() && *c != '\n'
+                || matches!(c, '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+                    | '\u{2060}'..='\u{206f}' | '\u{feff}')
+        });
+        // the one newline the wire may carry is the framing terminator
+        assert!(bad.is_none(), "{what}: {bad:?} in {s:?}");
+    }
+    assert!(!msg.contains('\n'), "a newline in {msg:?}");
+    assert!(
+        msg.contains("\\x1b]52"),
+        "the text is still readable: {msg:?}"
+    );
+}
