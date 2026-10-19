@@ -283,6 +283,23 @@ impl Server {
         Ok(ids[0])
     }
 
+    /// Replace the declared file roots, keeping the roster. Only the server
+    /// signs this.
+    ///
+    /// # Errors
+    /// A root name the model refuses, or I/O.
+    pub fn set_roots(&mut self, roots: Vec<String>) -> Result<ContentId, ServerError> {
+        let ids = self.transact(vec![Spec {
+            kind: Kind::Roster,
+            refs: vec![("replaces", self.st.board.roster_id())],
+            body: Body::Roster {
+                members: self.st.board.members().to_vec(),
+                roots,
+            },
+        }])?;
+        Ok(ids[0])
+    }
+
     /// Move a member's role from one session to another, on the roster
     /// authority's single-use approval: `handoff` then `epoch`, one frame.
     ///

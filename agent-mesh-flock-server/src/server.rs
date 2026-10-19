@@ -41,6 +41,9 @@ pub struct Server {
     pub(crate) challenges: BTreeMap<[u8; 32], Held>,
     poisoned: bool,
     journal: Arc<Journal>,
+    /// Where each declared root is on this host. Local configuration: never
+    /// in the log, so no path leaves this machine.
+    root_paths: BTreeMap<String, std::path::PathBuf>,
 }
 
 impl Server {
@@ -103,6 +106,7 @@ impl Server {
             challenges: BTreeMap::new(),
             poisoned: false,
             journal: Journal::new(published),
+            root_paths: BTreeMap::new(),
         })
     }
 
@@ -117,6 +121,56 @@ impl Server {
     #[must_use]
     pub fn signed_genesis(&self) -> &crate::SignedGenesis {
         &self.genesis
+    }
+
+    /// Map root names to directories on this host, and have the roster
+    /// declare any name it does not yet (one server-signed `roster` event).
+    ///
+    /// # Errors
+    /// A name that is not a plain root name, or I/O.
+    pub fn serve_roots(
+        &mut self,
+        roots: BTreeMap<String, std::path::PathBuf>,
+    ) -> Result<(), ServerError> {
+        let names: Vec<String> = roots.keys().cloned().collect();
+        if !agent_mesh_flock::roots_well_formed(&names) {
+            return Err(ServerError::Session("not a plain root name".into()));
+        }
+        let mut declared = self.st.board.roots().to_vec();
+        let before = declared.len();
+        for n in names {
+            if !declared.contains(&n) {
+                declared.push(n);
+            }
+        }
+        if declared.len() != before {
+            self.set_roots(declared)?;
+        }
+        self.root_paths = roots;
+        Ok(())
+    }
+
+    /// Where `root` is on this host: only a root the roster declares, that
+    /// this host maps.
+    #[must_use]
+    pub fn root_dir(&self, root: &str) -> Option<std::path::PathBuf> {
+        self.st
+            .board
+            .roots()
+            .iter()
+            .any(|r| r == root)
+            .then(|| self.root_paths.get(root).cloned())
+            .flatten()
+    }
+
+    /// Whether `session` is still an active session of a current member:
+    /// what a connection that proved membership must keep being.
+    #[must_use]
+    pub fn session_may_read(&self, session: &str) -> bool {
+        self.st.sessions.get(session).is_some_and(|s| {
+            s.status == crate::sessions::Status::Active
+                && self.st.board.members().iter().any(|m| m.name == s.member)
+        })
     }
 
     /// The published log, readable without this server's lock.
