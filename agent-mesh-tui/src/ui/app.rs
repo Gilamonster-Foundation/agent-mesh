@@ -5,9 +5,12 @@
 //! only by the feed).
 
 use super::board::{window, BoardState, PAGE};
+use super::lane::LaneState;
 use super::stream::{cycle, Filters, StreamState};
+use crate::drift::Drift;
 use crate::events::EventRow;
 use crate::model::{Model, Open};
+use agent_mesh_flock::FileRef;
 use newtui::{Component, Flow, Key, Row, View};
 
 /// The views, left to right.
@@ -17,16 +20,31 @@ pub enum Tab {
     Board,
     /// Every admitted event, with a raw view of each.
     Stream,
+    /// Each lane's attempts, reviews and the files its events cite.
+    Lane,
 }
 
 impl Tab {
     /// Tab names in order, for the tab bar.
-    pub const ALL: [(Self, &'static str); 2] = [(Self::Board, "Board"), (Self::Stream, "Stream")];
+    pub const ALL: [(Self, &'static str); 3] = [
+        (Self::Board, "Board"),
+        (Self::Stream, "Stream"),
+        (Self::Lane, "Lane"),
+    ];
 
     fn next(self) -> Self {
         match self {
             Self::Board => Self::Stream,
+            Self::Stream => Self::Lane,
+            Self::Lane => Self::Board,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            Self::Board => Self::Lane,
             Self::Stream => Self::Board,
+            Self::Lane => Self::Stream,
         }
     }
 }
@@ -37,6 +55,8 @@ pub struct App {
     tab: Tab,
     board: BoardState,
     stream: StreamState,
+    lane: LaneState,
+    drift: Drift,
 }
 
 impl App {
@@ -48,6 +68,8 @@ impl App {
             tab: Tab::Board,
             board: BoardState::default(),
             stream: StreamState::new(),
+            lane: LaneState::default(),
+            drift: Drift::new(),
         };
         app.stream.settle(&app.model);
         app
@@ -62,6 +84,73 @@ impl App {
             .selected
             .min(self.model.members.len().saturating_sub(1));
         self.stream.settle(&self.model);
+        self.lane.selected = self
+            .lane
+            .selected
+            .min(self.model.lanes.len().saturating_sub(1));
+    }
+
+    /// Replace what is known about the cited files (computed off the UI
+    /// thread by [`crate::drift`]; a key never changes it).
+    pub fn set_drift(&mut self, drift: Drift) {
+        self.drift = drift;
+    }
+
+    /// What is known about the cited files.
+    #[must_use]
+    pub fn drift(&self) -> &Drift {
+        &self.drift
+    }
+
+    /// Every distinct file any lane cites, first cited first.
+    #[must_use]
+    pub fn cited_files(&self) -> Vec<FileRef> {
+        let mut out: Vec<FileRef> = vec![];
+        for l in &self.model.lanes {
+            for f in &l.files {
+                if !out.contains(f) {
+                    out.push(f.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether the reader asked to check the files again (and forget the ask).
+    pub fn take_recheck(&mut self) -> bool {
+        std::mem::take(&mut self.lane.recheck)
+    }
+
+    /// The selected lane, if there are any.
+    #[must_use]
+    pub fn lane_selected(&self) -> Option<usize> {
+        (!self.model.lanes.is_empty()).then_some(self.lane.selected)
+    }
+
+    /// The first Lane row to draw when `visible` rows fit.
+    #[must_use]
+    pub fn lane_viewport(&self, visible: usize) -> usize {
+        window(
+            &self.lane.offset,
+            self.lane.selected,
+            self.model.lanes.len(),
+            visible,
+        )
+    }
+
+    fn lane_key(&mut self, key: Key) {
+        let last = self.model.lanes.len().saturating_sub(1);
+        let l = &mut self.lane;
+        match key {
+            Key::Up => l.selected = l.selected.saturating_sub(1),
+            Key::Down => l.selected = (l.selected + 1).min(last),
+            Key::Home => l.selected = 0,
+            Key::End => l.selected = last,
+            Key::PageUp => l.selected = l.selected.saturating_sub(PAGE),
+            Key::PageDown => l.selected = (l.selected + PAGE).min(last),
+            Key::Char('r') => l.recheck = true,
+            _ => {}
+        }
     }
 
     /// The model this view shows.
@@ -295,6 +384,10 @@ pub(crate) fn quiet_text(quiet_for: Option<u64>) -> String {
 pub(crate) const BOARD_FOOTER: &str =
     "↑↓ select · Tab next view · q quit · refused events (!) are not on the stream: not shown in v1";
 
+/// Footer for the Lane view.
+pub(crate) const LANE_FOOTER: &str =
+    "↑↓ select · r check the files again · Tab next view · q quit · files are read, never written";
+
 impl Component for App {
     fn handle(&mut self, key: Key) -> Flow {
         match key {
@@ -303,16 +396,20 @@ impl Component for App {
                 return Flow::Close(false)
             }
             Key::Tab => self.tab = self.tab.next(),
-            Key::BackTab => self.tab = self.tab.next(),
+            Key::BackTab => self.tab = self.tab.prev(),
             Key::Char('1') if !(self.tab == Tab::Stream && self.stream.panel) => {
                 self.tab = Tab::Board;
             }
             Key::Char('2') if !(self.tab == Tab::Stream && self.stream.panel) => {
                 self.tab = Tab::Stream;
             }
+            Key::Char('3') if !(self.tab == Tab::Stream && self.stream.panel) => {
+                self.tab = Tab::Lane;
+            }
             k => match self.tab {
                 Tab::Board => self.board_key(k),
                 Tab::Stream => self.stream_key(k),
+                Tab::Lane => self.lane_key(k),
             },
         }
         Flow::Stay
@@ -322,6 +419,7 @@ impl Component for App {
         match self.tab {
             Tab::Board => self.board_view(),
             Tab::Stream => self.stream_view(),
+            Tab::Lane => self.lane_view(),
         }
     }
 }
@@ -340,6 +438,19 @@ impl App {
                 quiet_text(m.quiet_for)
             ));
             view = view.row(if self.selected() == Some(i) {
+                row.selected()
+            } else {
+                row
+            });
+        }
+        view
+    }
+
+    fn lane_view(&self) -> View {
+        let mut view = View::titled("Lane").footer(LANE_FOOTER);
+        for (i, l) in self.model.lanes.iter().enumerate() {
+            let row = Row::new(l.lane.clone(), l.latest.label.clone());
+            view = view.row(if self.lane_selected() == Some(i) {
                 row.selected()
             } else {
                 row

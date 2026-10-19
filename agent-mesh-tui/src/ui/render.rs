@@ -4,7 +4,10 @@
 use super::app::{open_text, quiet_text};
 use super::inert::inert;
 use super::{App, Tab};
+use crate::drift::{key, FileState};
+use crate::model::{Attempt, LaneRow};
 use crate::model::{Header, Link};
+use agent_mesh_flock::FileRef;
 use newtui::Component;
 use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Layout};
@@ -104,6 +107,104 @@ pub fn tab_line(app: &App) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The one-character verdict on a cited file: `✓` the bytes are as cited,
+/// `⚠` changed since cited, `?` unavailable, `…` not checked yet.
+fn mark(state: Option<&FileState>) -> &'static str {
+    match state {
+        Some(FileState::Same) => "✓",
+        Some(FileState::Changed { .. }) => "⚠",
+        Some(FileState::Unavailable(_)) => "?",
+        None => "…",
+    }
+}
+
+fn file_lines(app: &App, f: &FileRef) -> Vec<String> {
+    let state = app.drift().get(&key(f));
+    let at = format!("{}/{}", f.root, f.path);
+    let m = mark(state);
+    match state {
+        Some(FileState::Same) => vec![format!("  {m} {at}")],
+        Some(FileState::Changed { current }) => vec![
+            format!("  {m} {at} changed since cited"),
+            format!("      cited {}", f.id),
+            format!("      now   {current}"),
+        ],
+        Some(FileState::Unavailable(why)) => vec![format!("  {m} {at} ({why})")],
+        None => vec![format!("  {m} {at} (not checked yet)")],
+    }
+}
+
+fn attempt_text(a: &Attempt) -> String {
+    let mut s = format!("#{} {}", a.index, a.label);
+    if !a.conflicts.is_empty() {
+        let at: Vec<String> = a.conflicts.iter().map(|i| format!("#{i}")).collect();
+        s.push_str(&format!(" [conflict {}]", at.join(" ")));
+    }
+    s
+}
+
+/// The marks of a lane's files in a row: `✓✓⚠`.
+fn marks(app: &App, l: &LaneRow) -> String {
+    l.files
+        .iter()
+        .map(|f| mark(app.drift().get(&key(f))))
+        .collect()
+}
+
+/// The Lane table: a column header, then the lanes from `offset` that fit.
+#[must_use]
+pub fn lane_lines(app: &App, offset: usize, visible: usize) -> Vec<String> {
+    let mut out = vec![format!(
+        "  {} {} {} FILES",
+        cell("LANE", 10),
+        cell("LATEST", 34),
+        cell("OLDER", 6)
+    )];
+    let selected = app.lane_selected();
+    for (i, l) in app
+        .model()
+        .lanes
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible)
+    {
+        out.push(format!(
+            "{} {} {} {} {}",
+            if selected == Some(i) { "▸" } else { " " },
+            cell(&l.lane, 10),
+            cell(&attempt_text(&l.latest), 34),
+            cell(&l.older.len().to_string(), 6),
+            marks(app, l),
+        ));
+    }
+    out
+}
+
+/// Everything about the selected lane: its attempts, reviews and files.
+#[must_use]
+pub fn lane_detail(app: &App) -> Vec<String> {
+    let Some(l) = app.lane_selected().and_then(|i| app.model().lanes.get(i)) else {
+        return vec![];
+    };
+    let mut out = vec![format!("lane {}", l.lane)];
+    out.push(format!("  latest  {}", attempt_text(&l.latest)));
+    for a in &l.older {
+        out.push(format!("  older   {}", attempt_text(a)));
+    }
+    for r in &l.reviews {
+        let newer = r
+            .newer_result
+            .map_or(String::new(), |n| format!(" · newer result since #{n}"));
+        out.push(format!("  {} #{} head {}{newer}", r.kind, r.index, r.head));
+    }
+    if l.files.is_empty() {
+        out.push("  files   (none cited)".to_owned());
+    }
+    out.extend(l.files.iter().flat_map(|f| file_lines(app, f)));
+    out
 }
 
 /// The Stream list: a column header, then events from `offset` that fit.
@@ -245,6 +346,35 @@ pub fn draw(f: &mut Frame<'_>, app: &App) {
                 text = format!("rows {}-{last} of {total} · {text}", offset + 1);
             }
             footer = vec![text];
+        }
+        Tab::Lane => {
+            let mut detail = lane_detail(app);
+            // the list keeps a third of the screen (or all its lanes if fewer)
+            let list = app.model().lanes.len().min((visible / 3).max(3)).max(1);
+            let room = visible.saturating_sub(list + 1).max(1);
+            if detail.len() > room {
+                detail.truncate(room.saturating_sub(1));
+                detail.push("  … (clipped to the screen)".to_owned());
+            }
+            let offset = app.lane_viewport(list);
+            let selected = app.lane_selected();
+            let mut lines: Vec<Line<'_>> = lane_lines(app, offset, list)
+                .into_iter()
+                .enumerate()
+                .map(|(i, l)| {
+                    if i > 0 && selected == Some(offset + i - 1) {
+                        selected_line(&l)
+                    } else {
+                        text_line(&l)
+                    }
+                })
+                .collect();
+            if !detail.is_empty() {
+                lines.push(text_line(""));
+                lines.extend(detail.iter().map(|l| text_line(l)));
+            }
+            body = lines;
+            footer = vec![app.view().footer];
         }
         Tab::Stream if app.raw().is_some() => {
             let height = usize::from(rows[1].height);
