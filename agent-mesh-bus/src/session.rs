@@ -538,33 +538,78 @@ pub(crate) fn open_request(env: &SignedEnvelope) -> Option<([u8; 16], String)> {
 
 type Handler = Arc<dyn Fn(IncomingSession) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
+/// How long a session handler may keep running after its bus starts closing
+/// before it is cancelled (see [`SessionHandlers::dispatch`]).
+const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
 /// Session handlers by wire-form topic.
-#[derive(Default)]
-pub(crate) struct SessionHandlers(RwLock<HashMap<String, Handler>>);
+pub(crate) struct SessionHandlers {
+    handlers: RwLock<HashMap<String, Handler>>,
+    grace: RwLock<Duration>,
+}
+
+impl Default for SessionHandlers {
+    fn default() -> Self {
+        Self {
+            handlers: RwLock::default(),
+            grace: RwLock::new(DEFAULT_SHUTDOWN_GRACE),
+        }
+    }
+}
 
 impl SessionHandlers {
+    pub(crate) fn set_shutdown_grace(&self, grace: Duration) {
+        *self.grace.write().expect("session grace lock poisoned") = grace;
+    }
+
     pub(crate) fn register<F, Fut>(&self, topic: &Topic, handler: F)
     where
         F: Fn(IncomingSession) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
         let handler: Handler = Arc::new(move |incoming| Box::pin(handler(incoming)));
-        self.0
+        self.handlers
             .write()
             .expect("session handlers lock poisoned")
             .insert(topic.wire(), handler);
     }
 
     /// Run the topic's handler on `incoming`, or refuse it when there is none.
-    pub(crate) async fn dispatch(&self, incoming: IncomingSession) {
+    ///
+    /// Once `shutdown` fires (the bus is closing) the session's own I/O fails
+    /// with `NotRunning` and a handler waiting in it ends and reports how. A
+    /// handler waiting on anything else would never notice, so after the grace
+    /// the dispatcher drops its future (cancellation) and reports the session
+    /// as ended by the close. `close` therefore never waits on application code.
+    pub(crate) async fn dispatch(
+        &self,
+        incoming: IncomingSession,
+        mut shutdown: watch::Receiver<()>,
+    ) {
         let handler = self
-            .0
+            .handlers
             .read()
             .expect("session handlers lock poisoned")
             .get(incoming.topic())
             .cloned();
         let outcome = match handler {
-            Some(handler) => handler(incoming).await,
+            Some(handler) => {
+                let mut run = handler(incoming);
+                tokio::select! {
+                    outcome = &mut run => outcome,
+                    // the sender is only ever dropped: this ends when the bus closes
+                    () = async { while shutdown.changed().await.is_ok() {} } => {
+                        let grace = *self.grace.read().expect("session grace lock poisoned");
+                        match tokio::time::timeout(grace, &mut run).await {
+                            Ok(outcome) => outcome,
+                            Err(_) => {
+                                drop(run);
+                                Err(BusError::NotRunning)
+                            }
+                        }
+                    }
+                }
+            }
             None => incoming.refuse("no session handler for this topic").await,
         };
         if let Err(e) = outcome {
@@ -770,8 +815,9 @@ mod tests {
     async fn an_open_reaches_its_topics_handler_and_an_unknown_topic_is_refused() {
         let mesh = Mesh::new();
         let handlers = SessionHandlers::default();
+        let (_open, running) = watch::channel(()); // dropping the sender means "closing"
         let (opening, incoming) = mesh.open(1 << 16, Timing::default()).await;
-        handlers.dispatch(incoming).await;
+        handlers.dispatch(incoming, running.clone()).await;
         match opening.await.unwrap() {
             Err(BusError::SessionRefused(reason)) => assert!(reason.contains("no session handler")),
             other => panic!("expected a refusal, got {:?}", other.map(|_| ())),
@@ -782,7 +828,7 @@ mod tests {
             session.send(b"hello".to_vec()).await
         });
         let (opening, incoming) = mesh.open(1 << 16, Timing::default()).await;
-        handlers.dispatch(incoming).await;
+        handlers.dispatch(incoming, running).await;
         let mut alice = opening.await.unwrap().unwrap();
         assert_eq!(alice.recv().await.unwrap().unwrap(), b"hello");
     }
