@@ -308,6 +308,7 @@ fn roster_replacement_names_the_current_roster() {
     let mut fx = Fx::new();
     let body = Body::Roster {
         members: fx.board.members().to_vec(),
+        roots: vec![],
     };
     let genesis = fx.flock;
     assert_eq!(
@@ -500,5 +501,93 @@ fn a_pane_claim_is_a_short_printable_id_and_takes_no_references() {
     assert_eq!(
         fx.judge("h1", Kind::Pane, pane("w1:p2", "t"), &[("of", brief)]),
         Verdict::Refuse(Refusal::UnexpectedRef("of".into()))
+    );
+}
+
+fn roster_with_roots(fx: &Fx, roots: &[&str]) -> Body {
+    Body::Roster {
+        members: fx.board.members().to_vec(),
+        roots: roots.iter().map(|r| (*r).to_owned()).collect(),
+    }
+}
+
+#[test]
+fn only_the_server_declares_roots() {
+    let mut fx = Fx::new();
+    let genesis = fx.flock;
+    let with = roster_with_roots(&fx, &["notes"]);
+    assert_eq!(
+        fx.judge("shep", Kind::Roster, with.clone(), &[("replaces", genesis)]),
+        Verdict::Refuse(Refusal::RootsLocked)
+    );
+    let first = fx.emit("server", Kind::Roster, with, &[("replaces", genesis)]);
+    assert_eq!(fx.board.roots(), ["notes".to_owned()]);
+    // a shepherd's roster that keeps the roots goes through; one that drops
+    // or adds any does not
+    let keep = roster_with_roots(&fx, &["notes"]);
+    assert_eq!(
+        fx.judge("shep", Kind::Roster, keep, &[("replaces", first)]),
+        Verdict::Admit
+    );
+    let drop = roster_with_roots(&fx, &[]);
+    assert_eq!(
+        fx.judge("shep", Kind::Roster, drop, &[("replaces", first)]),
+        Verdict::Refuse(Refusal::RootsLocked)
+    );
+    let swap = roster_with_roots(&fx, &["other"]);
+    assert_eq!(
+        fx.judge("shep", Kind::Roster, swap, &[("replaces", first)]),
+        Verdict::Refuse(Refusal::RootsLocked)
+    );
+}
+
+#[test]
+fn root_order_is_not_a_change() {
+    let mut fx = Fx::new();
+    let genesis = fx.flock;
+    let ab = roster_with_roots(&fx, &["a", "b"]);
+    let first = fx.emit("server", Kind::Roster, ab, &[("replaces", genesis)]);
+    let ba = roster_with_roots(&fx, &["b", "a"]);
+    assert_eq!(
+        fx.judge("shep", Kind::Roster, ba, &[("replaces", first)]),
+        Verdict::Admit
+    );
+}
+
+#[test]
+fn a_root_name_is_a_plain_unique_name() {
+    let mut fx = Fx::new();
+    let genesis = fx.flock;
+    let long = "x".repeat(65);
+    for bad in [
+        vec![""],
+        vec!["a/b"],
+        vec![".."],
+        vec!["."],
+        vec!["a b"],
+        vec!["a\u{0}"],
+        vec!["é"],
+        vec![long.as_str()],
+        vec!["a", "a"],
+    ] {
+        assert_eq!(
+            fx.judge(
+                "server",
+                Kind::Roster,
+                roster_with_roots(&fx, &bad),
+                &[("replaces", genesis)]
+            ),
+            Verdict::Refuse(Refusal::BadRoot),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(
+        fx.judge(
+            "server",
+            Kind::Roster,
+            roster_with_roots(&fx, &["notes-1", "A_b.c"]),
+            &[("replaces", genesis)]
+        ),
+        Verdict::Admit
     );
 }

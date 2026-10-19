@@ -143,6 +143,13 @@ pub enum Body {
     Roster {
         /// All members.
         members: Vec<Member>,
+        /// The names of the file roots a member may cite from: a name only,
+        /// never a path (each home host maps its names to directories in its
+        /// own config). Changed only by a server-signed `roster` event. Empty
+        /// roots are not encoded, so a roster without roots has the bytes it
+        /// always had.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        roots: Vec<String>,
     },
     /// A brief for `to` in `lane`.
     Brief {

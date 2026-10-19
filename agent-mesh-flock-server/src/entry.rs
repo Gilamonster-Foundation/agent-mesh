@@ -265,7 +265,10 @@ impl Server {
         let mut specs = vec![Spec {
             kind: Kind::Roster,
             refs: vec![("replaces", replaces)],
-            body: Body::Roster { members },
+            body: Body::Roster {
+                members,
+                roots: self.st.board.roots().to_vec(),
+            },
         }];
         if drops {
             specs.push(Spec {

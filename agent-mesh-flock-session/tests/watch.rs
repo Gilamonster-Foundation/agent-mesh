@@ -193,6 +193,7 @@ impl Rig {
                     role: Role::Shepherd,
                     devices: vec![],
                 }],
+                roots: vec![],
             },
         }
         .node();

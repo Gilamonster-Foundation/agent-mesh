@@ -161,7 +161,10 @@ fn a_shepherd_cannot_change_the_device_list() {
         Kind::Roster,
         None,
         &[("replaces", replaces)],
-        Body::Roster { members: roster },
+        Body::Roster {
+            members: roster,
+            roots: vec![],
+        },
     );
     assert!(matches!(
         f.server.admit(n, s),
@@ -174,7 +177,10 @@ fn a_shepherd_cannot_change_the_device_list() {
         Kind::Roster,
         None,
         &[("replaces", replaces)],
-        Body::Roster { members: roster },
+        Body::Roster {
+            members: roster,
+            roots: vec![],
+        },
     );
     f.server.admit(n, s).unwrap();
 }
@@ -239,7 +245,10 @@ fn a_shepherd_roster_that_only_reorders_is_admitted_and_reassigning_is_not() {
             Kind::Roster,
             None,
             &[("replaces", replaces)],
-            Body::Roster { members },
+            Body::Roster {
+                members,
+                roots: vec![],
+            },
         );
         f.server.admit(n, s)
     };
@@ -347,6 +356,7 @@ fn a_second_member_of_the_same_name_is_refused_at_admission() {
         &[("replaces", replaces)],
         Body::Roster {
             members: roster.clone(),
+            roots: vec![],
         },
     );
     assert!(matches!(
@@ -377,7 +387,10 @@ fn a_logged_roster_with_duplicate_names_is_refused_on_replay_by_both_readers() {
         Kind::Roster,
         prev,
         &[("replaces", replaces)],
-        Body::Roster { members: roster },
+        Body::Roster {
+            members: roster,
+            roots: vec![],
+        },
     );
     let sealed = seal(
         &key,

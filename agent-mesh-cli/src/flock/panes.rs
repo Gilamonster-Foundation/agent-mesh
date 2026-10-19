@@ -419,6 +419,7 @@ mod tests {
                     role: agent_mesh_flock::Role::Shepherd,
                     devices: vec![],
                 }],
+                roots: vec![],
             },
         }
         .node();

@@ -60,6 +60,10 @@ pub enum Refusal {
     DevicesOnNonOperator,
     /// Two roster members share a name.
     DuplicateMember,
+    /// A roster that changes the file roots, signed by anyone but the server.
+    RootsLocked,
+    /// A root name that is empty, too long, not plain, or declared twice.
+    BadRoot,
     /// A claim (pane, tab) that is empty, too long or not printable.
     BadClaim,
     /// A `job-end` that does not say exactly one of an exit code and a signal.
@@ -117,8 +121,9 @@ fn decide(board: &Board, node: &MerkleNode<Event>, signer: &Signer) -> Result<Ve
         return Err(Refusal::BodyKindMismatch);
     }
     let member = signer_member(board, ev.kind, signer)?;
-    if let Body::Roster { members } = &ev.body {
+    if let Body::Roster { members, roots } = &ev.body {
         check_devices(board, members, signer)?;
+        check_roots(board, roots, signer)?;
     }
     writer_chain(board, ev, signer)?;
     let target = check_refs(board, ev)?;
@@ -167,6 +172,34 @@ fn check_devices(board: &Board, new: &[Member], signer: &Signer) -> Result<(), R
         return Err(Refusal::DevicesLocked);
     }
     Ok(())
+}
+
+/// Root names the roster may declare.
+fn check_roots(board: &Board, new: &[String], signer: &Signer) -> Result<(), Refusal> {
+    if !roots_well_formed(new) {
+        return Err(Refusal::BadRoot);
+    }
+    let as_set = |r: &[String]| r.iter().cloned().collect::<BTreeSet<String>>();
+    if signer.class != SignerClass::Server && as_set(new) != as_set(board.roots()) {
+        return Err(Refusal::RootsLocked);
+    }
+    Ok(())
+}
+
+/// Root names are plain and unique: 1 to 64 of `A-Za-z0-9._-`, and not `.`
+/// or `..` (a name is looked up in the home host's own map, never joined to a
+/// path, but a name that reads as a path invites the mistake).
+#[must_use]
+pub fn roots_well_formed(roots: &[String]) -> bool {
+    let mut seen = BTreeSet::new();
+    roots.iter().all(|r| {
+        (1..=64).contains(&r.len())
+            && r.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            && r != "."
+            && r != ".."
+            && seen.insert(r.as_str())
+    })
 }
 
 /// The signing member (name, role) for session signers, after the class gate.

@@ -38,7 +38,10 @@ fn vectors() -> Vec<(&'static str, MerkleNode<Event>)> {
             "roster",
             event(
                 Kind::Roster,
-                Body::Roster { members: vec![] },
+                Body::Roster {
+                    members: vec![],
+                    roots: vec![],
+                },
                 &[("replaces", "roster")],
             ),
         ),
@@ -430,7 +433,10 @@ fn roster_node(devices: Vec<agent_mesh_protocol::Fingerprint>) -> MerkleNode<Eve
     ];
     event(
         Kind::Roster,
-        Body::Roster { members },
+        Body::Roster {
+            members,
+            roots: vec![],
+        },
         &[("replaces", "roster")],
     )
 }
