@@ -112,7 +112,7 @@ fn a_shepherd_cannot_designate_or_undesignate_the_delegate() {
 fn at_most_one_delegate_even_from_the_server() {
     let mut f = flock();
     let two = roster(&f.server, |m| {
-        m.delegate = matches!(m.name.as_str(), "h1" | "shep")
+        m.delegate = matches!(m.name.as_str(), "h1" | "shep");
     });
     assert!(matches!(
         f.server.replace_roster(two),
