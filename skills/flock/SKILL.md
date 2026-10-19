@@ -211,6 +211,17 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   waiting for the next record, so a reader that vanishes ends its worker even
   when nothing is ever published; the server also closes a finished connection
   completely (it keeps no duplicate handle), which is what lets a place go back.
+- **the attach suite over ssh (step 9d)**: the bridge is transport-agnostic (it
+  takes any `Bus`), and `agent-mesh-cli/tests/flock_bridge_ssh.rs` runs the same
+  scenarios as the iroh suite (remote enrol and emit, replay then live watch,
+  renew after missed epochs, the refusals, a cited-file read) with both buses on
+  `agent-mesh-transport-ssh` and a real loopback `sshd` between them (throwaway
+  host and user keys, the host key pinned, forwarding only to the home's mesh
+  port). A test fails if no ssh login was logged. Without OpenSSH installed the
+  tests fail (a skip would show as a pass); `AMESH_SKIP_SSHD=1` skips them
+  deliberately. CI installs sshd on Linux and runs the suite on macOS too. `amesh flock attach` and `serve --bridge` still
+  dial iroh only: there is no `--transport ssh` choice, so ssh is proven at the
+  library level, not by the CLI.
 - **MCP tools** (`amesh mcp --flock-session <sock>` or `AMESH_FLOCK_SESSION`,
   Unix): `flock_whoami`, `flock_inbox`, `flock_status` and `flock_emit{kind,
   refs, body}` join the `mesh_*` tools, only when a session is given. The
@@ -344,7 +355,7 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
 **Planned, not built:** operator approval of a **delegate**
 hand-off (#127's other half; waits on the delegate designation, step 13); device changes
 signed by a listed device (server-signed only today); operator-signed events (`answer`); the rest of
-the CLI's `answer`; `amesh-tui`; the TUI drift column over a remote attach (waits on 8d) and a real-sshd run of the attach suite (9d); the
+the CLI's `answer`; `amesh-tui`; the
 `amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native
 newt receive. Until they land, lanes run on files
 as the herdr-flock skill describes. Status: epic #109.

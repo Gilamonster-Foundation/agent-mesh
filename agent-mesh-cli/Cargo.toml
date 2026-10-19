@@ -48,6 +48,7 @@ tempfile.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
 wiremock.workspace = true
+agent-mesh-transport-ssh.workspace = true
 ed25519-dalek.workspace = true
 
 [lints]
