@@ -2,8 +2,8 @@
 
 use crate::herdr::{self, Gap, Herdr, Pane};
 use agent_mesh_flock::text::{inert, inert_lines};
-use agent_mesh_flock::{AttemptView, Body};
-use agent_mesh_flock_server::{Snapshot, Status};
+use agent_mesh_flock::{AttemptView, Board, Body};
+use agent_mesh_flock_server::{Sessions, Snapshot, Status};
 use anyhow::{anyhow, Context, Result};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -16,19 +16,23 @@ pub(super) fn panes(
     maps: &[String],
 ) -> Result<()> {
     let dir = dir.unwrap_or_else(|| home.join("flocks").join(name));
-    let explicit = maps
-        .iter()
-        .map(|m| {
-            m.split_once('=')
-                .map(|(who, pane)| (who.to_owned(), pane.to_owned()))
-                .ok_or_else(|| anyhow!("--map '{m}' must be member=pane"))
-        })
-        .collect::<Result<BTreeMap<_, _>>>()?;
+    let explicit = parse_maps(maps)?;
     let snap =
         Snapshot::read(&dir).with_context(|| format!("read the log in {}", dir.display()))?;
     let live = Herdr(herdr::System).panes()?;
     print!("{}", inert_lines(&render(&snap, &live, &explicit, tab)?));
     Ok(())
+}
+
+/// `--map member=pane`, repeated.
+pub(super) fn parse_maps(maps: &[String]) -> Result<BTreeMap<String, String>> {
+    maps.iter()
+        .map(|m| {
+            m.split_once('=')
+                .map(|(who, pane)| (who.to_owned(), pane.to_owned()))
+                .ok_or_else(|| anyhow!("--map '{m}' must be member=pane"))
+        })
+        .collect()
 }
 
 /// The joined view: verified flock columns beside herdr's unverified ones.
@@ -98,10 +102,9 @@ fn render(
 /// still lists it. Only the active session counts: an ended or pending
 /// session's claim says nothing about who holds the role now. The claim is the
 /// session's word, signed; herdr and the log cannot confirm the pane.
-pub(crate) fn claims(snap: &Snapshot) -> BTreeMap<String, String> {
-    let sessions = snap.sessions();
+pub(crate) fn claims(board: &Board, sessions: &Sessions) -> BTreeMap<String, String> {
     let mut latest: BTreeMap<&str, (u64, &str)> = BTreeMap::new();
-    for e in snap.board().entries() {
+    for e in board.entries() {
         let Body::Pane { pane, .. } = &e.event.body else {
             continue;
         };
@@ -118,7 +121,7 @@ pub(crate) fn claims(snap: &Snapshot) -> BTreeMap<String, String> {
                 .filter(|s| s.status == Status::Active)
                 // a roster change can drop a member whose session is still
                 // Active in the table: its claim is not about anyone now
-                .filter(|s| snap.board().members().iter().any(|m| m.name == s.member))?;
+                .filter(|s| board.members().iter().any(|m| m.name == s.member))?;
             Some((s.member, pane.to_owned()))
         })
         .collect()
@@ -126,7 +129,7 @@ pub(crate) fn claims(snap: &Snapshot) -> BTreeMap<String, String> {
 
 /// [`claims`] herdr still lists (and that are in `tab`, if one is given).
 fn announced(snap: &Snapshot, live: &[Pane], tab: Option<&str>) -> BTreeMap<String, String> {
-    claims(snap)
+    claims(snap.board(), &snap.sessions())
         .into_iter()
         .filter(|(_, pane)| {
             live.iter()
