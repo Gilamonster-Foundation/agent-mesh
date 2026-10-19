@@ -103,6 +103,7 @@ impl<R: Runner> Herdr<R> {
     }
 }
 
+#[cfg(unix)]
 /// What `herdr agent get` says about the agent in a pane.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Agent {
@@ -122,9 +123,11 @@ pub struct Agent {
     pub tab_id: String,
 }
 
+#[cfg(unix)]
 /// The longest id of a pane we will put on a command line.
 const MAX_ID: usize = 64;
 
+#[cfg(unix)]
 /// A herdr id is its own text, not ours: it goes on a command line only if it
 /// cannot be read as an option or carry anything but id characters.
 #[must_use]
@@ -137,11 +140,13 @@ pub fn safe_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '.' | '-'))
 }
 
+#[cfg(unix)]
 /// herdr as the nudge adapter drives it: the one read of `Herdr`, plus the
 /// three verbs a nudge needs, and nothing else (no `send-keys`, `pane run`,
 /// `focus` or `rename`). Every method names a fixed command.
 pub struct HerdrControl<R>(pub R);
 
+#[cfg(unix)]
 impl<R: Runner> HerdrControl<R> {
     /// `herdr pane list`.
     ///
@@ -195,6 +200,7 @@ impl<R: Runner> HerdrControl<R> {
     }
 }
 
+#[cfg(unix)]
 fn ensure_safe(pane: &str) -> Result<()> {
     if safe_id(pane) {
         Ok(())
@@ -338,6 +344,7 @@ mod tests {
         assert_eq!(*mock.calls.borrow(), vec![vec!["pane", "list"]]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn control_issues_only_its_four_commands() {
         let mock = Mock {
@@ -363,6 +370,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_pane_id_that_could_be_an_option_or_carry_text_is_never_passed() {
         let mock = Mock {
