@@ -2,7 +2,7 @@
 //! I/O, no clock, no terminal; the same log always folds to the same model.
 
 use crate::events::{fold_events, EventRow};
-use agent_mesh_flock::{AttemptState, Board, Body, Kind};
+use agent_mesh_flock::{AttemptState, AttemptView, Board, Body, FileRef, Kind};
 use agent_mesh_flock_server::{Follower, Sessions, Snapshot, Status};
 use content_addressable::ContentId;
 use std::sync::Arc;
@@ -113,6 +113,46 @@ pub struct MemberRow {
     pub quiet_for: Option<u64>,
 }
 
+/// One attempt (a brief) of a lane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attempt {
+    /// The brief's admission index.
+    pub index: u64,
+    /// `completed, job open` and the like, verbatim from the fold.
+    pub label: String,
+    /// Admission indexes of the conflict events aimed at it.
+    pub conflicts: Vec<u64>,
+}
+
+/// A review or verdict of a lane and whether a later result has overtaken it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reviewed {
+    /// Its admission index.
+    pub index: u64,
+    /// `review` or `verdict`.
+    pub kind: String,
+    /// The head it is about (the author's claim: the flock cannot see git).
+    pub head: String,
+    /// The first result of the lane admitted after it, if any: the head it
+    /// names may be stale since then.
+    pub newer_result: Option<u64>,
+}
+
+/// One lane as the Lane view shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneRow {
+    /// Lane name.
+    pub lane: String,
+    /// The latest attempt.
+    pub latest: Attempt,
+    /// Earlier attempts, oldest first.
+    pub older: Vec<Attempt>,
+    /// Its reviews and verdicts, in admission order.
+    pub reviews: Vec<Reviewed>,
+    /// Every distinct file its events cite (root, path, id), first cited first.
+    pub files: Vec<FileRef>,
+}
+
 /// Everything the views need.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Model {
@@ -123,6 +163,8 @@ pub struct Model {
     /// Every admitted event, in admission order (shared between models: the
     /// log only grows, so a newer model reuses the older one's rows).
     pub events: Arc<Vec<EventRow>>,
+    /// Every lane with a brief, by name.
+    pub lanes: Vec<LaneRow>,
 }
 
 const SHORT_ID: usize = 12;
@@ -160,11 +202,72 @@ pub fn fold_onto(prev: Option<&Model>, src: &Source<'_>, link: Link) -> Model {
         })
         .collect();
     let events = Arc::new(fold_events(src.board, prev.map(|p| p.events.as_slice())));
+    let lanes = lane_rows(src.board, &events);
     Model {
         header,
         members,
         events,
+        lanes,
     }
+}
+
+fn attempt(a: &AttemptView, board: &Board) -> Attempt {
+    let at = |id| board.get(id).map_or(0, |e| e.index);
+    Attempt {
+        index: at(&a.brief),
+        label: a.label(),
+        conflicts: a.conflicts.iter().map(at).collect(),
+    }
+}
+
+fn lane_rows(board: &Board, events: &[EventRow]) -> Vec<LaneRow> {
+    board
+        .lanes()
+        .into_iter()
+        .map(|l| {
+            let mine: Vec<(&agent_mesh_flock::Entry, &EventRow)> = board
+                .entries()
+                .zip(events)
+                .filter(|(_, r)| r.lane.as_deref() == Some(l.lane.as_str()))
+                .collect();
+            let mut files: Vec<FileRef> = vec![];
+            for (e, _) in &mine {
+                for f in &e.event.files {
+                    if !files.contains(f) {
+                        files.push(f.clone());
+                    }
+                }
+            }
+            let results: Vec<u64> = mine
+                .iter()
+                .filter(|(e, _)| e.event.kind == Kind::Result && e.conflict.is_none())
+                .map(|(e, _)| e.index)
+                .collect();
+            let reviews = mine
+                .iter()
+                .filter_map(|(e, r)| {
+                    let (kind, head) = match &e.event.body {
+                        Body::Review { head, .. } => ("review", head),
+                        Body::Verdict { head, .. } => ("verdict", head),
+                        _ => return None,
+                    };
+                    Some(Reviewed {
+                        index: e.index,
+                        kind: kind.to_owned(),
+                        head: head.clone(),
+                        newer_result: results.iter().copied().find(|i| *i > r.index),
+                    })
+                })
+                .collect();
+            LaneRow {
+                latest: attempt(&l.latest, board),
+                older: l.older.iter().map(|a| attempt(a, board)).collect(),
+                lane: l.lane,
+                reviews,
+                files,
+            }
+        })
+        .collect()
 }
 
 /// A member can hold one active session and pending replacements.

@@ -250,7 +250,7 @@ pub fn assert_snapshot(name: &str, actual: &str) {
 pub fn mask_hashes(text: &str) -> String {
     let word = |w: &str| {
         let t = w.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-        if t.starts_with("bafy") && t.len() > 20 {
+        if t.starts_with("baf") && t.len() > 20 {
             w.replacen(t, "<cid>", 1)
         } else if t.len() >= 60 && t.chars().all(|c| c.is_ascii_hexdigit()) {
             w.replacen(t, "<session>", 1)
