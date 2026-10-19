@@ -5,11 +5,11 @@
 //! reading, never created, and a path that leaves its root is never opened.
 
 use agent_mesh_flock::FileRef;
+use agent_mesh_flock_server::Beneath;
 use content_addressable::RawContentId;
-use rustix::fs::{Mode, OFlags};
 use std::collections::BTreeMap;
 use std::io::Read as _;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 /// The most bytes read from one file. A bigger file is `?`, not a prefix hash
 /// that would claim something about bytes never read.
@@ -69,32 +69,40 @@ fn no(why: &str) -> FileState {
 }
 
 /// Check one cited file against the bytes under `roots`.
+///
+/// The file is opened strictly beneath the mapped root by
+/// [`Beneath`]: relative to the root's own descriptor, with every symlink on
+/// the way refused (a link that stays inside the root too: it is `?`), so no
+/// directory swapped for a link between a check and the open can lead out.
 #[must_use]
 pub fn check(roots: &Roots, f: &FileRef) -> FileState {
+    check_with(roots, f, &mut || {})
+}
+
+/// [`check`], calling `after_root` once the root is open and before the file
+/// is: the window in which a pathname-based check could be lied to. A test
+/// lands a directory swap there.
+#[doc(hidden)]
+#[must_use]
+pub fn check_with(roots: &Roots, f: &FileRef, after_root: &mut dyn FnMut()) -> FileState {
     let Some(base) = roots.0.get(&f.root) else {
         return no("root not mapped");
     };
-    let rel = Path::new(&f.path);
-    // lexical first: an absolute path or `..` never reaches the file system
-    if f.path.is_empty()
-        || rel.is_absolute()
-        || rel
-            .components()
-            .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
-    {
-        return no("path leaves its root");
-    }
-    let Ok(base) = std::fs::canonicalize(base) else {
+    let Ok(dir) = Beneath::root(base) else {
         return no("root missing");
     };
-    // then the real path: a symlink anywhere on it may lead out
-    let Ok(real) = std::fs::canonicalize(base.join(rel)) else {
-        return no("file missing");
+    after_root();
+    let file = match dir.open(Path::new(&f.path)) {
+        Ok(file) => file,
+        Err(e) => {
+            return no(match e.kind() {
+                std::io::ErrorKind::NotFound => "file missing",
+                std::io::ErrorKind::InvalidInput => "path leaves its root",
+                _ => "path leaves its root or crosses a link",
+            })
+        }
     };
-    if !real.starts_with(&base) {
-        return no("path leaves its root");
-    }
-    read_id(&real).map_or_else(FileState::Unavailable, |current| {
+    read_id(file).map_or_else(FileState::Unavailable, |current| {
         if current == f.id {
             FileState::Same
         } else {
@@ -103,17 +111,8 @@ pub fn check(roots: &Roots, f: &FileRef) -> FileState {
     })
 }
 
-/// Read `real` (already resolved, so no symlink on it) and hash it.
-fn read_id(real: &Path) -> Result<RawContentId, String> {
-    // O_NOFOLLOW: if the last component was swapped for a link after the
-    // check, the open fails instead of following it.
-    let fd = rustix::fs::open(
-        real,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|e| format!("cannot open: {e}"))?;
-    let file = std::fs::File::from(fd);
+/// Hash what `file` (already opened beneath the root) holds.
+fn read_id(file: std::fs::File) -> Result<RawContentId, String> {
     let meta = file.metadata().map_err(|e| format!("cannot stat: {e}"))?;
     if !meta.is_file() {
         return Err("not a regular file".to_owned());

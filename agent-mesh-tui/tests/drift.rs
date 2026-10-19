@@ -114,23 +114,64 @@ fn a_symlink_that_leads_out_of_the_root_is_never_followed() {
     // even though the cited id is exactly the secret's: it must not match
     for path in ["link.txt", "linkdir/secret.txt"] {
         let s = check(&w.roots, &cite("work", path, b"secret"));
-        assert_eq!(unavailable(&s), "path leaves its root", "{path}");
+        assert_eq!(unavailable(&s), CROSSES, "{path}");
     }
-    // a dangling link is just a missing file
+    // a dangling link is a link too
     symlink(w.root.join("nowhere"), w.root.join("dangling")).unwrap();
     assert_eq!(
         unavailable(&check(&w.roots, &cite("work", "dangling", b"x"))),
-        "file missing"
+        CROSSES
     );
 }
 
+const CROSSES: &str = "path leaves its root or crosses a link";
+
 #[test]
-fn a_link_that_stays_inside_the_root_is_the_file_it_names() {
+fn a_link_that_stays_inside_the_root_is_not_followed_either() {
     let w = world();
     symlink(w.root.join("src/a.rs"), w.root.join("alias.rs")).unwrap();
+    symlink("src", w.root.join("srclink")).unwrap();
+    for path in ["alias.rs", "srclink/a.rs"] {
+        let s = check(&w.roots, &cite("work", path, b"fn a() {}"));
+        assert_eq!(unavailable(&s), CROSSES, "{path}");
+    }
+}
+
+/// A directory on the path becomes a link to outside after the root was
+/// opened and before the file is: the case a checked pathname loses. The
+/// cited id is the outside file's, so a follow would say `Same`.
+#[test]
+fn a_directory_swapped_for_a_link_after_the_root_is_open_is_unavailable() {
+    let w = world();
+    std::fs::create_dir(w.outside.join("src")).unwrap();
+    std::fs::write(w.outside.join("src/a.rs"), b"outside bytes").unwrap();
+    let f = cite("work", "src/a.rs", b"outside bytes");
+    let s = agent_mesh_tui::drift::check_with(&w.roots, &f, &mut || {
+        std::fs::rename(w.root.join("src"), w.root.join("src.old")).unwrap();
+        symlink(w.outside.join("src"), w.root.join("src")).unwrap();
+    });
+    assert_eq!(unavailable(&s), CROSSES);
+}
+
+/// The mapped root itself (or an ancestor of it) is replaced by a link to
+/// elsewhere after it was opened: what is read is still the directory that
+/// was opened.
+#[test]
+fn the_root_swapped_for_a_link_after_it_is_open_still_reads_the_opened_directory() {
+    let w = world();
+    std::fs::create_dir_all(w.outside.join("src")).unwrap();
+    std::fs::write(w.outside.join("src/a.rs"), b"outside bytes").unwrap();
+    let f = cite("work", "src/a.rs", b"outside bytes");
+    let s = agent_mesh_tui::drift::check_with(&w.roots, &f, &mut || {
+        let moved = w.root.with_file_name("work.old");
+        std::fs::rename(&w.root, moved).unwrap();
+        symlink(&w.outside, &w.root).unwrap();
+    });
     assert_eq!(
-        check(&w.roots, &cite("work", "alias.rs", b"fn a() {}")),
-        FileState::Same
+        s,
+        FileState::Changed {
+            current: RawContentId::from_content(b"fn a() {}")
+        }
     );
 }
 
