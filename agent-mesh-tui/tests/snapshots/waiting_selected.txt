@@ -1,0 +1,12 @@
+amesh-tui · flock fx · id ············ · 7 members
+log ✓ 20 · epoch 0 · live
+ Board   Stream   Lane  [Waiting]
+    AGE KIND    #     ON       LANE     WHAT
+     13 brief   #7    h2       l0       to h2
+     10 ask     #10   shep     l1       which branch? [draft: work/notes/draft.md]
+▸     9 ask     #11   shep     l1       ok to rebase?
+      8 review  #12   rev      l1       head c0ffee
+      5 brief   #15   h2       l2       to h2
+      3 brief   #17   h1       l3       to h1
+
+↑↓ select · Tab next view · q quit · this view answers nothing

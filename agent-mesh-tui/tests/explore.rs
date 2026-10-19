@@ -31,6 +31,7 @@ fn model(n: usize) -> Model {
             .collect(),
         events: std::sync::Arc::default(),
         lanes: vec![],
+        waiting: vec![],
     }
 }
 

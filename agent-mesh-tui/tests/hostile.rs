@@ -150,6 +150,8 @@ fn screens(model: &Model) -> Vec<(String, String)> {
     roots.insert(&format!("root{PAYLOAD}"), dir.path().to_path_buf());
     app.set_drift(agent_mesh_tui::drift::check_all(&roots, &app.cited_files()));
     shot("lane checked", &app);
+    app.handle(Key::Char('4'));
+    shot("waiting", &app);
     // a Link that carries text, on both tabs
     let mut unsaved = model.clone();
     unsaved.header.link = Link::Unsaved(format!("cannot save{PAYLOAD}"));
@@ -195,7 +197,7 @@ impl std::io::Write for Capture {
 
 fn terminal_bytes(model: &Model) -> Vec<u8> {
     let mut bytes = vec![];
-    for tab in ['1', '2', '3'] {
+    for tab in ['1', '2', '3', '4'] {
         let mut app = App::new(model.clone());
         app.handle(Key::Char(tab));
         let sink = Capture::default();
