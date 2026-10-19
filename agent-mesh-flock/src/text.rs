@@ -11,17 +11,36 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 
 /// Characters a terminal or a reader could mistake for something other than
-/// text: C0 and DEL (including newline, carriage return, tab, ESC, BEL), C1
-/// (including U+009B, CSI as one character), line and paragraph separators,
-/// zero-width and bidirectional controls, and the byte-order mark.
+/// text: every control (Cc: C0, DEL, C1 including U+009B, CSI as one
+/// character), every format character (Cf: zero-width and bidirectional
+/// controls, the Arabic letter mark, annotation controls, tag characters, the
+/// byte-order mark), and the line and paragraph separators. Variation
+/// selectors shape text and are kept.
 fn needs_escape(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
-            '\u{200b}'..='\u{200f}'
+            '\u{00ad}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061c}'
+                | '\u{06dd}'
+                | '\u{070f}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08e2}'
+                | '\u{180e}'
+                | '\u{200b}'..='\u{200f}'
                 | '\u{2028}'..='\u{202e}'
-                | '\u{2060}'..='\u{2069}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206f}'
                 | '\u{feff}'
+                | '\u{fff9}'..='\u{fffb}'
+                | '\u{110bd}'
+                | '\u{110cd}'
+                | '\u{13430}'..='\u{1343f}'
+                | '\u{1bca0}'..='\u{1bca3}'
+                | '\u{1d173}'..='\u{1d17a}'
+                | '\u{e0001}'
+                | '\u{e0020}'..='\u{e007f}'
         )
 }
 
@@ -125,14 +144,65 @@ mod tests {
         }
     }
 
+    /// The policy, written out on its own (from the Unicode General_Category
+    /// lists for Cc, Cf, Zl and Zp), not derived from `needs_escape`: a class
+    /// the implementation forgets is still in this table and fails the sweep.
+    /// Variation selectors (Mn) are deliberately absent: they shape text and
+    /// do not command a terminal.
+    const MUST_ESCAPE: &[(u32, u32)] = &[
+        (0x0000, 0x001f), // Cc C0
+        (0x007f, 0x009f), // Cc DEL, C1
+        (0x00ad, 0x00ad), // Cf soft hyphen
+        (0x0600, 0x0605), // Cf Arabic number signs
+        (0x061c, 0x061c), // Cf Arabic letter mark
+        (0x06dd, 0x06dd), // Cf Arabic end of ayah
+        (0x070f, 0x070f), // Cf Syriac abbreviation mark
+        (0x0890, 0x0891), // Cf Arabic pound/piastre marks above
+        (0x08e2, 0x08e2), // Cf Arabic disputed end of ayah
+        (0x180e, 0x180e), // Cf Mongolian vowel separator
+        (0x200b, 0x200f), // Cf zero width, LRM, RLM
+        (0x2028, 0x2029), // Zl, Zp
+        (0x202a, 0x202e), // Cf bidi embeddings and overrides
+        (0x2060, 0x2064), // Cf word joiner, invisible operators
+        (0x2066, 0x206f), // Cf bidi isolates, deprecated formats
+        (0xfeff, 0xfeff), // Cf byte-order mark
+        (0xfff9, 0xfffb), // Cf interlinear annotation
+        (0x110bd, 0x110bd),
+        (0x110cd, 0x110cd),
+        (0x13430, 0x1343f), // Cf Egyptian hieroglyph format
+        (0x1bca0, 0x1bca3), // Cf shorthand format
+        (0x1d173, 0x1d17a), // Cf musical formatting
+        (0xe0001, 0xe0001), // Cf language tag
+        (0xe0020, 0xe007f), // Cf tag characters
+    ];
+
     #[test]
-    fn nothing_that_needs_escaping_survives() {
-        let hostile: String = ('\0'..='\u{ffff}')
-            .filter(|c| needs_escape(*c))
-            .chain("normal".chars())
-            .collect();
-        let out = inert(&hostile);
-        assert!(!out.chars().any(needs_escape), "{out:?}");
+    fn every_scalar_value_is_escaped_exactly_when_the_policy_says() {
+        let mut checked = 0u32;
+        for cp in 0..=0x10ffffu32 {
+            let Some(c) = char::from_u32(cp) else { continue };
+            checked += 1;
+            let want = MUST_ESCAPE.iter().any(|&(lo, hi)| (lo..=hi).contains(&cp));
+            let one = c.to_string();
+            assert_eq!(inert(&one) != one, want, "U+{cp:04X}");
+        }
+        assert_eq!(checked, 1_112_064);
+    }
+
+    #[test]
+    fn annotation_and_tag_characters_have_fixed_spellings() {
+        for (c, want) in [
+            ('\u{061c}', "\\u{61c}"),
+            ('\u{fff9}', "\\u{fff9}"),
+            ('\u{fffb}', "\\u{fffb}"),
+            ('\u{e0001}', "\\u{e0001}"),
+            ('\u{e0061}', "\\u{e0061}"),
+            ('\u{e007f}', "\\u{e007f}"),
+        ] {
+            assert_eq!(inert(&format!("x{c}y")), format!("x{want}y"));
+        }
+        // text-shaping marks are kept
+        assert_eq!(inert("a\u{fe0f}\u{e0100}"), "a\u{fe0f}\u{e0100}");
     }
 
     #[test]
