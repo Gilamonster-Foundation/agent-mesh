@@ -16,7 +16,7 @@ use crate::herdr::{HerdrControl, System};
 use agent_mesh_flock::{Board, Body, Kind, Role};
 use agent_mesh_flock_server::private_dir;
 use agent_mesh_flock_session::{call, session_prover, CtlReq, CtlResp, Reader, RealFs, Seen};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::Args;
 use content_addressable::{ContentAddressable as _, ContentId, MerkleNode};
 use std::collections::{BTreeMap, BTreeSet};
@@ -71,6 +71,13 @@ fn pending(board: &Board) -> Vec<(ContentId, String)> {
         .filter(|(id, _)| !handled(id))
         .map(|(id, to)| (id, to.clone()))
         .collect()
+}
+
+fn is_adapter(board: &Board, member: &str) -> bool {
+    board
+        .members()
+        .iter()
+        .any(|m| m.name == member && m.role == Role::Adapter)
 }
 
 /// What to record for `outcome`, as an `Emit`.
@@ -166,20 +173,6 @@ pub fn run(home: &Path, w: &Where, opts: &Opts) -> Result<()> {
         private_dir(d).with_context(|| format!("reader directory {}", d.display()))?;
     }
     let mut reader = Reader::open(genesis, &state, RealFs).map_err(|e| anyhow!("{e}"))?;
-    // fail early: admission would refuse a nudge from anyone else anyway
-    let role = reader
-        .follower()
-        .board()
-        .members()
-        .iter()
-        .find(|m| m.name == me.member)
-        .map(|m| m.role);
-    if role != Some(Role::Adapter) {
-        bail!(
-            "'{}' is not the adapter: run `nudge` as the session of the roster's adapter member",
-            agent_mesh_flock::text::inert(&me.member)
-        );
-    }
     let ctx = Ctx {
         socket: &socket,
         wait_ms: opts.wait_timeout.saturating_mul(1000),
@@ -201,6 +194,18 @@ pub fn run(home: &Path, w: &Where, opts: &Opts) -> Result<()> {
             // nothing is decided from a partial replay: a `nudged` may still
             // be on its way
             if live {
+                // Authorised from the verified board as of this frame, before
+                // every act: a member promoted after genesis may act once the
+                // replay says so, and a demoted one stops before herdr is
+                // touched (admission would refuse its record only afterwards).
+                if !is_adapter(f.board(), &me.member) {
+                    eprintln!(
+                        "'{}' is not the adapter in the verified roster: run `nudge` as the \
+                         session of the roster's adapter member",
+                        agent_mesh_flock::text::inert(&me.member)
+                    );
+                    std::process::exit(1);
+                }
                 ctx.act(f.board(), f.sessions(), &mut tried);
             }
         })

@@ -4,8 +4,9 @@
 #![cfg(unix)]
 
 mod harness;
-use agent_mesh_flock::{Body, Kind};
+use agent_mesh_flock::{Body, Kind, Role};
 use agent_mesh_flock_server::Snapshot;
+use agent_mesh_flock_session::{call, CtlReq, CtlResp};
 use harness::*;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -365,4 +366,99 @@ fn a_brief_that_already_has_a_result_is_not_nudged() {
     f.emit(&h1, &["result", &brief, "--outcome", "completed"]);
     ok(&nudge(&f, &fake, &ad, &[]));
     assert!(fake.calls().is_empty(), "a closed brief was nudged");
+}
+
+/// The shepherd's session signs a roster that gives `who` a new role.
+fn set_role(f: &Flock, shep: &Sess, who: &str, role: Role) {
+    let snap = log(&f.dir);
+    let mut members = snap.board().members().to_vec();
+    members.iter_mut().find(|m| m.name == who).unwrap().role = role;
+    let refs =
+        std::collections::BTreeMap::from([("replaces".to_owned(), snap.board().roster_id())]);
+    let body = Body::Roster {
+        members,
+        roots: snap.board().roots().to_vec(),
+    };
+    let r = call(
+        &shep.sock,
+        &CtlReq::Emit {
+            kind: Kind::Roster,
+            refs,
+            body,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(r, CtlResp::Admitted { .. }),
+        "the roster change was not admitted"
+    );
+}
+
+#[test]
+fn an_adapter_demoted_in_the_replayed_log_touches_herdr_not_at_all() {
+    let f = flock4();
+    let (fake, shep, ad) = (fake(), f.session("shep"), f.session("ad"));
+    // the genesis roster says adapter; the log, once replayed, says helper
+    set_role(&f, &shep, "ad", Role::Helper);
+    f.emit(&shep, &["brief", "--to", "h1", "--lane", "l1"]);
+    let o = nudge(&f, &fake, &ad, &[]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("not the adapter"));
+    assert!(
+        fake.calls().is_empty(),
+        "herdr was reached by a demoted adapter"
+    );
+}
+
+#[test]
+fn a_member_promoted_to_adapter_after_genesis_is_accepted_once_caught_up() {
+    let f = flock_with(&["shep:shepherd", "h1:helper", "ad:helper"]);
+    let (fake, shep, ad) = (fake(), f.session("shep"), f.session("ad"));
+    set_role(&f, &shep, "ad", Role::Adapter);
+    let brief = f.emit(&shep, &["brief", "--to", "h1", "--lane", "l1"]);
+    let out = ok(&nudge(&f, &fake, &ad, &[]));
+    assert!(out.contains("Nudged"), "{out}");
+    assert_eq!(citing(&f.dir, Kind::Nudged, &brief), 1);
+}
+
+#[test]
+fn an_adapter_demoted_while_running_stops_before_the_next_herdr_command() {
+    use std::io::{BufRead as _, BufReader};
+    use std::process::Stdio;
+    let f = flock4();
+    let (fake, shep, ad) = (fake(), f.session("shep"), f.session("ad"));
+    let mut child = amesh(f.home.path())
+        .args(["flock", "nudge", "--dir"])
+        .arg(&f.dir)
+        .arg("--session")
+        .arg(&ad.sock)
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", fake.bin.path().display()),
+        )
+        .env("FAKE_HERDR_STATE", fake.state.path())
+        .env("HERDR_PANE_ID", "w1:p0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let first = f.emit(&shep, &["brief", "--to", "h1", "--lane", "l1"]);
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    assert!(
+        line.starts_with("Nudged") && line.contains(&first),
+        "{line}"
+    );
+    let before = fake.calls().len();
+    // the demoting frame arrives live: the process ends on it, then a brief follows
+    set_role(&f, &shep, "ad", Role::Helper);
+    let status = child.wait().unwrap();
+    assert!(!status.success(), "a demoted adapter kept running");
+    f.emit(&shep, &["brief", "--to", "h1", "--lane", "l2"]);
+    assert_eq!(
+        fake.calls().len(),
+        before,
+        "herdr was reached after the demotion"
+    );
 }
