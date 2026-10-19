@@ -70,6 +70,32 @@ fn world() -> World {
         },
     )
     .unwrap();
+    // the adapter's nudge and misfire records name the hostile member
+    for body in [
+        Body::Nudged {
+            target: evil_member.clone(),
+        },
+        Body::NudgeMisfire {
+            target: evil_member.clone(),
+            expected: "pane-a".into(),
+            found: "pane-b".into(),
+        },
+    ] {
+        let kind = if matches!(body, Body::Nudged { .. }) {
+            Kind::Nudged
+        } else {
+            Kind::NudgeMisfire
+        };
+        call(
+            &adapter.sock,
+            &CtlReq::Emit {
+                kind,
+                refs: BTreeMap::new(),
+                body,
+            },
+        )
+        .unwrap();
+    }
     let o = f.run(
         Some(&evil),
         &["run", "--lane", HOSTILE, "--label", HOSTILE, "--", "true"],
@@ -106,6 +132,15 @@ fn no_command_hands_member_authored_text_to_the_terminal() {
     let want = "\\x1b]52;c;aGk=\\x07\\x9b31m\\u{202e}rtl\\nFORGED";
     assert!(log.contains(want), "{log}");
     assert!(watch.contains(want), "{watch}");
+    // the new nudge records name a hostile member: both kinds, both readers
+    let tgt = "ev\\x1b]52;c;aGk=\\x07\\x9b31m\\u{202e}rtl\\nFORGEDil";
+    for (what, out) in [("log", &log), ("watch", &watch)] {
+        assert!(out.contains(&format!("nudged {tgt}")), "{what}: {out}");
+        assert!(
+            out.contains(&format!("{tgt}: may have reached the wrong pane")),
+            "{what}: {out}"
+        );
+    }
     assert!(status.contains("\\x1b"), "{status}");
     assert!(inbox.contains("\\x1b"), "{inbox}");
     assert!(join.contains("ev\\x1b"), "{join}");

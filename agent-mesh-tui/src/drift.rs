@@ -1,11 +1,14 @@
-//! "Changed since cited": compare a cited file's id with the bytes on this
-//! host now. Events cite files as `root/path` plus the id of the bytes at the
-//! time; the roster does not declare roots yet, so the operator maps them
-//! (`--root name=path`, home-local). Nothing here writes: files are opened for
-//! reading, never created, and a path that leaves its root is never opened.
+//! "Changed since cited": compare a cited file's id with the bytes now.
+//! Events cite files as `root/path` plus the id of the bytes at the time. A
+//! root the operator maps on this host (`--root name=path`) is read here; any
+//! other root is asked of the flock's server, the home host when attached
+//! remotely, which re-hashes it (its word: the bytes are not sent). Nothing
+//! here writes: files are opened for reading, never created, and a path that
+//! leaves its root is never opened.
 
 use agent_mesh_flock::FileRef;
 use agent_mesh_flock_server::Beneath;
+use agent_mesh_flock_session::{session_prover, Files};
 use content_addressable::RawContentId;
 use std::collections::BTreeMap;
 use std::io::Read as _;
@@ -130,12 +133,63 @@ fn read_id(file: std::fs::File) -> Result<RawContentId, String> {
     Ok(RawContentId::from_content(&bytes))
 }
 
-/// Check every file in `files` (once each).
+/// Where to ask for the roots this host does not map: the flock's server
+/// socket and the session that proves membership to it.
+#[derive(Debug, Clone, Copy)]
+pub struct Remote<'a> {
+    /// `run/serve.sock` of the flock directory (the attach proxy when
+    /// attached remotely).
+    pub serve: &'a Path,
+    /// The session's control socket.
+    pub ctl: &'a Path,
+}
+
+/// Check every file in `files` (once each) against the roots mapped here.
 #[must_use]
 pub fn check_all<'a>(roots: &Roots, files: impl IntoIterator<Item = &'a FileRef>) -> Drift {
+    check_all_via(roots, None, files)
+}
+
+/// [`check_all`], and a root this host does not map is asked of the server
+/// (`remote`): one connection per call, opened when the first such file
+/// comes up. A server that cannot be reached marks those files unavailable
+/// with the reason, as a missing root is.
+#[must_use]
+pub fn check_all_via<'a>(
+    roots: &Roots,
+    remote: Option<Remote<'_>>,
+    files: impl IntoIterator<Item = &'a FileRef>,
+) -> Drift {
     let mut out = Drift::new();
+    let mut conn: Option<Result<Files, String>> = None;
     for f in files {
-        out.entry(key(f)).or_insert_with(|| check(roots, f));
+        let k = key(f);
+        if out.contains_key(&k) {
+            continue;
+        }
+        let state = match remote {
+            Some(r) if !roots.0.contains_key(&f.root) => {
+                let conn = conn.get_or_insert_with(|| {
+                    Files::open(r.serve, &session_prover(r.ctl)).map_err(|e| e.to_string())
+                });
+                match conn {
+                    Ok(files) => ask(files, f),
+                    Err(why) => no(&format!("the flock's server: {why}")),
+                }
+            }
+            _ => check(roots, f),
+        };
+        out.insert(k, state);
     }
     out
+}
+
+/// What the server says `f` hashes to now.
+fn ask(files: &mut Files, f: &FileRef) -> FileState {
+    match files.stat(&f.root, &f.path) {
+        Ok(Ok(current)) if current == f.id => FileState::Same,
+        Ok(Ok(current)) => FileState::Changed { current },
+        Ok(Err(why)) => FileState::Unavailable(why),
+        Err(e) => no(&format!("the flock's server: {e}")),
+    }
 }

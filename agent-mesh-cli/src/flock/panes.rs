@@ -421,6 +421,7 @@ mod tests {
                     devices: vec![],
                     delegate: false,
                 }],
+                roots: vec![],
             },
         }
         .node();

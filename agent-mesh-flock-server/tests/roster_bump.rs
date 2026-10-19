@@ -66,7 +66,10 @@ fn a_shepherds_roster_event_that_drops_a_member_is_sealed_with_the_bump() {
         Kind::Roster,
         None,
         &[("replaces", replaces)],
-        Body::Roster { members: roster },
+        Body::Roster {
+            members: roster,
+            roots: vec![],
+        },
     );
     server.admit(n, s).unwrap();
     let all = frames(&server);

@@ -106,6 +106,7 @@ pub struct Board {
     flock: ContentId,
     roster_id: ContentId,
     members: Vec<Member>,
+    roots: Vec<String>,
     entries: BTreeMap<ContentId, Entry>,
     order: Vec<ContentId>,
     heads: BTreeMap<String, ContentId>,
@@ -123,6 +124,7 @@ impl Board {
             flock,
             roster_id: flock,
             members: genesis.payload.roster.clone(),
+            roots: Vec::new(),
             entries: BTreeMap::new(),
             order: Vec::new(),
             heads: BTreeMap::new(),
@@ -170,9 +172,10 @@ impl Board {
                 self.closers.insert(target, id);
             }
         }
-        if let (Kind::Roster, Body::Roster { members }) = (event.kind, &event.body) {
+        if let (Kind::Roster, Body::Roster { members, roots }) = (event.kind, &event.body) {
             if conflict.is_none() {
                 self.members.clone_from(members);
+                self.roots.clone_from(roots);
                 self.roster_id = id;
             }
         }
@@ -206,6 +209,12 @@ impl Board {
     #[must_use]
     pub fn members(&self) -> &[Member] {
         &self.members
+    }
+
+    /// The file roots the current roster declares, by name.
+    #[must_use]
+    pub fn roots(&self) -> &[String] {
+        &self.roots
     }
 
     /// An admitted event.

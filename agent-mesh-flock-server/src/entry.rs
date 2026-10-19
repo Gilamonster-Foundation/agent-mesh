@@ -265,7 +265,10 @@ impl Server {
         let mut specs = vec![Spec {
             kind: Kind::Roster,
             refs: vec![("replaces", replaces)],
-            body: Body::Roster { members },
+            body: Body::Roster {
+                members,
+                roots: self.st.board.roots().to_vec(),
+            },
         }];
         if drops {
             specs.push(Spec {
@@ -277,6 +280,23 @@ impl Server {
             });
         }
         let ids = self.transact(specs)?;
+        Ok(ids[0])
+    }
+
+    /// Replace the declared file roots, keeping the roster. Only the server
+    /// signs this.
+    ///
+    /// # Errors
+    /// A root name the model refuses, or I/O.
+    pub fn set_roots(&mut self, roots: Vec<String>) -> Result<ContentId, ServerError> {
+        let ids = self.transact(vec![Spec {
+            kind: Kind::Roster,
+            refs: vec![("replaces", self.st.board.roster_id())],
+            body: Body::Roster {
+                members: self.st.board.members().to_vec(),
+                roots,
+            },
+        }])?;
         Ok(ids[0])
     }
 

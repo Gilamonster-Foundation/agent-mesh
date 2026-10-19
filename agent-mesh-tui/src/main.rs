@@ -25,7 +25,7 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(unix)]
 mod run {
-    use agent_mesh_tui::drift::{check_all, Roots};
+    use agent_mesh_tui::drift::{check_all_via, Remote, Roots};
     use agent_mesh_tui::feed::{Feed, Outcome};
     use agent_mesh_tui::keys::decode;
     use agent_mesh_tui::model::Link;
@@ -56,7 +56,8 @@ mod run {
         tab: String,
         /// Where a root the events cite is on this host (`name=path`, repeat
         /// for more). Only to read cited files and say whether they changed;
-        /// nothing is ever written there.
+        /// nothing is ever written there. A root not given here is asked of
+        /// the flock's server (the home host, when attached remotely).
         #[arg(long = "root", value_name = "NAME=PATH", value_parser = Roots::parse)]
         roots: Vec<(String, PathBuf)>,
     }
@@ -68,6 +69,22 @@ mod run {
         Drift(agent_mesh_tui::drift::Drift),
     }
 
+    /// The flock's server and the session: where a root this host does not
+    /// map is asked for.
+    struct Sockets {
+        serve: PathBuf,
+        ctl: PathBuf,
+    }
+
+    impl Sockets {
+        fn remote(&self) -> Remote<'_> {
+            Remote {
+                serve: &self.serve,
+                ctl: &self.ctl,
+            }
+        }
+    }
+
     pub fn main() -> Result<()> {
         let args = Args::parse();
         let mut feed = Feed::open(&args.dir, &args.session)?;
@@ -75,13 +92,18 @@ mod run {
         for (name, dir) in args.roots {
             roots.insert(&name, dir);
         }
+        let serve = args.dir.join("run").join("serve.sock");
+        let remote = Sockets {
+            serve,
+            ctl: args.session,
+        };
         if args.once {
-            return once(&mut feed, &roots, &args.tab);
+            return once(&mut feed, &roots, &remote, &args.tab);
         }
-        interactive(feed, roots)
+        interactive(feed, roots, remote)
     }
 
-    fn once(feed: &mut Feed, roots: &Roots, tab: &str) -> Result<()> {
+    fn once(feed: &mut Feed, roots: &Roots, sockets: &Sockets, tab: &str) -> Result<()> {
         let outcome = feed.run(true, &mut |_| {});
         let link = match &outcome {
             Outcome::Done => Link::Live,
@@ -102,7 +124,11 @@ mod run {
             }
             "lane" => {
                 app.handle(Key::Char('3'));
-                app.set_drift(check_all(roots, &app.cited_files()));
+                app.set_drift(check_all_via(
+                    roots,
+                    Some(sockets.remote()),
+                    &app.cited_files(),
+                ));
                 app.model().lanes.len() + app.cited_files().len() + 12
             }
             other => bail!("no view called {other}: board, stream, lane or waiting"),
@@ -115,7 +141,7 @@ mod run {
         }
     }
 
-    fn interactive(mut feed: Feed, roots: Roots) -> Result<()> {
+    fn interactive(mut feed: Feed, roots: Roots, sockets: Sockets) -> Result<()> {
         let (tx, rx) = mpsc::channel::<Msg>();
         let mut app = App::new(feed.model(feed.stale()));
         let feed_tx = tx.clone();
@@ -141,7 +167,11 @@ mod run {
                     files = newer;
                 }
                 if drift_tx
-                    .send(Msg::Drift(check_all(&roots, &files)))
+                    .send(Msg::Drift(check_all_via(
+                        &roots,
+                        Some(sockets.remote()),
+                        &files,
+                    )))
                     .is_err()
                 {
                     break;
