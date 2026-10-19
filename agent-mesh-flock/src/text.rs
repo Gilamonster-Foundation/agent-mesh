@@ -180,7 +180,9 @@ mod tests {
     fn every_scalar_value_is_escaped_exactly_when_the_policy_says() {
         let mut checked = 0u32;
         for cp in 0..=0x10ffffu32 {
-            let Some(c) = char::from_u32(cp) else { continue };
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
             checked += 1;
             let want = MUST_ESCAPE.iter().any(|&(lo, hi)| (lo..=hi).contains(&cp));
             let one = c.to_string();
