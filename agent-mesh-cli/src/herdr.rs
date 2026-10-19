@@ -175,16 +175,17 @@ impl<R: Runner> HerdrControl<R> {
         Ok(env.result.agent)
     }
 
-    /// `herdr agent wait <pane> --until idle --timeout <ms>`. An error is a
-    /// timeout or a failure; the caller gives up either way.
+    /// `herdr agent wait <pane> --timeout <ms>`, with no target state: herdr
+    /// settles on `idle`, `done` or `blocked`, and the caller reads which. An
+    /// error is a timeout or a failure; the caller gives up either way.
     ///
     /// # Errors
-    /// The id is not safe, or herdr did not report idle.
-    pub fn wait_idle(&self, pane: &str, timeout_ms: u64) -> Result<()> {
+    /// The id is not safe, or herdr did not settle.
+    pub fn wait_settled(&self, pane: &str, timeout_ms: u64) -> Result<()> {
         ensure_safe(pane)?;
         let ms = timeout_ms.to_string();
         self.0
-            .run(&["agent", "wait", pane, "--until", "idle", "--timeout", &ms])
+            .run(&["agent", "wait", pane, "--timeout", &ms])
             .map(drop)
     }
 
@@ -356,7 +357,7 @@ mod tests {
         let c = HerdrControl(&mock);
         c.panes().unwrap();
         assert_eq!(c.agent("w1:p1").unwrap().agent_status, "idle");
-        c.wait_idle("w1:p1", 5000).unwrap();
+        c.wait_settled("w1:p1", 5000).unwrap();
         c.prompt("w1:p1", "hello").unwrap();
         let calls: Vec<String> = mock.calls.borrow().iter().map(|c| c.join(" ")).collect();
         assert_eq!(
@@ -364,7 +365,7 @@ mod tests {
             [
                 "pane list",
                 "agent get w1:p1",
-                "agent wait w1:p1 --until idle --timeout 5000",
+                "agent wait w1:p1 --timeout 5000",
                 "agent prompt w1:p1 hello"
             ]
         );
@@ -380,7 +381,7 @@ mod tests {
         let c = HerdrControl(&mock);
         for bad in ["", "-x", "--help", "w1:p1 --x", "w1:p1\n", "a;b", "é"] {
             assert!(c.agent(bad).is_err(), "{bad:?}");
-            assert!(c.wait_idle(bad, 1).is_err(), "{bad:?}");
+            assert!(c.wait_settled(bad, 1).is_err(), "{bad:?}");
             assert!(c.prompt(bad, "t").is_err(), "{bad:?}");
         }
         assert!(c.agent(&"a".repeat(65)).is_err());

@@ -146,7 +146,7 @@ fn a_brief_is_nudged_once_the_nudge_cites_it_and_a_restart_or_an_ack_stops_more(
     assert!(fake
         .calls()
         .iter()
-        .any(|c| c == "agent wait w1:p1 --until idle --timeout 120000"));
+        .any(|c| c == "agent wait w1:p1 --timeout 120000"));
     fake.audit();
     // the nudge is in the log, signed by the adapter, citing the brief
     assert_eq!(citing(&f.dir, Kind::Nudged, &brief), 1);
