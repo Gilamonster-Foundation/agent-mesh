@@ -171,7 +171,10 @@ impl RpcError {
     fn internal(err: anyhow::Error) -> Self {
         Self {
             code: -32603,
-            message: err.to_string(),
+            // JSON quoting is not display safety: a client that decodes the
+            // message gets raw ESC/BEL back, and serde_json writes C1 and bidi
+            // characters literally. Error text may carry a peer's words.
+            message: agent_mesh_flock::text::inert(&err.to_string()).into_owned(),
         }
     }
 }
