@@ -188,18 +188,12 @@ fn a_removed_approver_is_refused_but_its_earlier_delegate_handoff_replays() {
     f.designate(Some(&dev));
     f.approve_with(&dev).unwrap();
     let third = enroll(&mut f.server, "h1");
-    // device removed, and the designation dropped too
-    let ms = roster(&f.server, |m| {
-        m.devices.clear();
-        m.delegate = false;
-    });
+    // only the device is removed; the designation stays
+    let ms = roster(&f.server, |m| m.devices.clear());
     f.server.replace_roster(ms).unwrap();
     let ap = approval(&f.env, &f.server, "h1", &f.new, &third);
     let w = why(f.server.handoff(ap.clone(), sign_approval(&dev, &ap)));
-    assert!(
-        w.contains("not a listed operator device") || w.contains("helper"),
-        "{w}"
-    );
+    assert!(w.contains("not a listed operator device"), "{w}");
     assert_eq!(
         f.server.sessions().get(&third.session).unwrap().status,
         Status::Pending
@@ -235,4 +229,22 @@ fn a_delegate_approval_is_single_use() {
     let sig = sign_approval(&dev, &ap);
     f.server.handoff(ap.clone(), sig.clone()).unwrap();
     assert!(f.server.handoff(ap, sig).is_err());
+}
+
+#[test]
+fn an_approval_with_only_its_context_swapped_does_not_carry_over() {
+    let mut f = flock();
+    let dev = operator(&f.env);
+    f.designate(Some(&dev));
+    let signed_for = approval(&f.env, &f.server, "h1", &f.old, &f.new);
+    let sig = sign_approval(&dev, &signed_for);
+    // same sessions, same signature, a different context CID
+    let mut body = signed_for.payload.clone();
+    body.context
+        .as_mut()
+        .expect("fixture approval has a context")
+        .id = content_addressable::RawContentId::from_content(b"other bytes");
+    let other = content_addressable::MerkleNode::genesis(body);
+    assert!(f.server.handoff(other, sig).is_err());
+    assert_eq!(f.status(&f.new), Status::Pending);
 }

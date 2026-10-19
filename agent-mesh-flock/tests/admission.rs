@@ -504,6 +504,22 @@ fn a_pane_claim_is_a_short_printable_id_and_takes_no_references() {
     );
 }
 
+#[test]
+fn an_operator_key_the_roster_does_not_list_may_not_answer() {
+    let mut fx = Fx::new();
+    let q = fx.emit("h1", Kind::Ask, ask(None), &[]);
+    let ev = fx.event("op", Kind::Answer, answer(), &[("ask", q)]);
+    // same body and author, but the signer is another operator-class key
+    let mut stranger = fx.signer("op", false);
+    stranger.fingerprint = fx.key("op2").fingerprint();
+    let mut ev = ev;
+    ev.author = stranger.fingerprint.hex();
+    assert_eq!(
+        agent_mesh_flock::admit(&fx.board, &ev.node(), &stranger),
+        Verdict::Refuse(Refusal::NotAListedDevice)
+    );
+}
+
 fn roster_with_roots(fx: &Fx, roots: &[&str]) -> Body {
     Body::Roster {
         members: fx.board.members().to_vec(),

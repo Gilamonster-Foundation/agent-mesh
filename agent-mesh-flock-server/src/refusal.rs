@@ -61,6 +61,8 @@ pub enum Reason {
     DevicesLocked,
     /// `devices` on a member that is not an operator.
     DevicesOnNonOperator,
+    /// See [`Refusal::NotAListedDevice`].
+    NotAListedDevice,
     /// Only a server-signed roster changes who the delegate is.
     DelegateLocked,
     /// More than one roster member is the delegate.
@@ -104,6 +106,7 @@ impl From<&Refusal> for Reason {
             Refusal::DelegateLocked => Self::DelegateLocked,
             Refusal::MultipleDelegates => Self::MultipleDelegates,
             Refusal::DevicesOnNonOperator => Self::DevicesOnNonOperator,
+            Refusal::NotAListedDevice => Self::NotAListedDevice,
             Refusal::DuplicateMember => Self::DuplicateMember,
             Refusal::RootsLocked => Self::RootsLocked,
             Refusal::BadRoot => Self::BadRoot,

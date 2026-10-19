@@ -124,7 +124,7 @@ impl State {
         let server = &self.chain.server_pub;
         let signer = self
             .sessions
-            .resolve(sig, id, server, epoch)
+            .resolve(sig, id, server, &self.chain.user, epoch)
             .map_err(ServerError::Signer)?;
         let conflict = match admit(&self.board, node, &signer) {
             Verdict::Admit => None,
