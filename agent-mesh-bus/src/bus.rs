@@ -593,6 +593,18 @@ impl Bus {
         self.sessions.register(&topic, handler);
     }
 
+    /// How long an accepted session's handler may keep running once
+    /// [`Self::close`] has told its session it is over, before the handler is
+    /// cancelled (default five seconds). A handler waiting in session I/O ends
+    /// at once and reports how; a handler blocked on something else (a full
+    /// channel, a lock) is cancelled when the grace is up, so `close` never
+    /// waits on application code. Zero cancels it as soon as close starts.
+    #[must_use]
+    pub fn with_session_shutdown_grace(self, grace: Duration) -> Self {
+        self.sessions.set_shutdown_grace(grace);
+        self
+    }
+
     /// Graceful shutdown. Stops the bus receive loop, aborts and **awaits**
     /// every task it spawned for an inbound message (each holds a clone of the
     /// transport, so of the endpoint and its socket), then releases the
@@ -964,9 +976,14 @@ fn spawn_accept_loop(
                 {
                     let timing = Timing::default();
                     match IncomingSession::admit(
-                        agent, &envelope, provenance, stream, timing, shutdown,
+                        agent,
+                        &envelope,
+                        provenance,
+                        stream,
+                        timing,
+                        shutdown.clone(),
                     ) {
-                        Ok(incoming) => sessions.dispatch(incoming).await,
+                        Ok(incoming) => sessions.dispatch(incoming, shutdown).await,
                         Err(e) => tracing::warn!(error = %e, "bus: session open rejected"),
                     }
                     return;

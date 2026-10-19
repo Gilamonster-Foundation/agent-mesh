@@ -95,3 +95,74 @@ async fn a_bus_that_has_served_a_connection_releases_its_port_when_close_returns
     again.close().await.unwrap();
     alice_bus.close().await.unwrap();
 }
+
+/// A session handler blocked on something that is not session I/O (a full
+/// application channel, a lock, an application `Notify`) must not hold `close`:
+/// session I/O ends by the shutdown signal, application work does not. Bob serves
+/// a real session over QUIC, the handler signals that it is blocked, and `close`
+/// has to finish and free the port with the handler still blocked.
+async fn close_with_a_blocked_handler<F, Fut>(blocked: F)
+where
+    F: Fn(agent_mesh_bus::IncomingSession, mpsc::UnboundedSender<()>) -> Fut
+        + Send
+        + Sync
+        + 'static,
+    Fut: std::future::Future<Output = agent_mesh_bus::Result<()>> + Send + 'static,
+{
+    let user = UserKey::generate();
+    let (alice, bob) = (agent(&user, "alice"), agent(&user, "bob"));
+    let bob_pub = bob.public_bytes();
+    let alice_bus = Bus::bind_with(&user, alice, 0, QUIET).await.unwrap();
+    let bob_bus = Bus::bind_with(&user, bob, 0, QUIET)
+        .await
+        .unwrap()
+        .with_session_shutdown_grace(Duration::ZERO);
+    let port = bob_bus.local_port();
+    let topic = Topic::new(user.fingerprint(), "blocked");
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+    bob_bus.handle_sessions(topic.clone(), move |incoming| {
+        blocked(incoming, entered_tx.clone())
+    });
+    let peer = PeerEndpoint::new(bob_pub, SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port));
+    let _session = alice_bus.open_session_direct(peer, &topic).await.unwrap();
+    // causal: the handler is past session I/O and blocked, no clock involved
+    entered_rx.recv().await.expect("the handler is blocked");
+
+    // The watchdog only turns a hang into a failure; it does not make close pass.
+    tokio::time::timeout(Duration::from_secs(60), bob_bus.close())
+        .await
+        .expect("close must not wait on application code")
+        .unwrap();
+
+    let again = Bus::bind_with(&user, agent(&user, "bob2"), port, QUIET)
+        .await
+        .expect("the port is free the moment close returns");
+    again.close().await.unwrap();
+    alice_bus.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn close_does_not_wait_for_a_session_handler_blocked_on_an_application_gate() {
+    close_with_a_blocked_handler(|incoming, entered| async move {
+        let _session = incoming.accept().await?;
+        let gate = tokio::sync::Notify::new();
+        let _ = entered.send(());
+        gate.notified().await; // nothing ever opens it
+        Ok(())
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn close_does_not_wait_for_a_session_handler_blocked_on_a_full_channel() {
+    close_with_a_blocked_handler(|incoming, entered| async move {
+        let _session = incoming.accept().await?;
+        // the application's queue: capacity one, filled, its reader still alive
+        let (tx, _rx) = mpsc::channel::<u8>(1);
+        tx.send(1).await.unwrap();
+        let _ = entered.send(());
+        let _ = tx.send(2).await; // blocks: full and open
+        Ok(())
+    })
+    .await;
+}
