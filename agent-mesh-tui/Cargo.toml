@@ -29,7 +29,7 @@ clap.workspace = true
 content-addressable.workspace = true
 newtui.workspace = true
 ratatui.workspace = true
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["fs", "process"] }
 serde_json.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]

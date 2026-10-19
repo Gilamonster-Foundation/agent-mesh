@@ -10,6 +10,8 @@
 //! enrollment, session end, the epoch ratchet and renewal are events, so a
 //! fresh reader rebuilds the same table in replay order.
 
+#[cfg(unix)]
+mod beneath;
 mod chain;
 #[cfg(feature = "serve")]
 mod entry;
@@ -37,6 +39,8 @@ mod sessions;
 mod state;
 pub mod wire;
 
+#[cfg(unix)]
+pub use beneath::Beneath;
 pub use chain::{verify_record, Chain};
 #[cfg(feature = "serve")]
 pub use entry::{Enrolled, Invited};

@@ -1,0 +1,22 @@
+amesh-tui · flock fx · id ············ · 7 members
+log ✓ 15 · epoch 0 · live
+ Board   Stream  [Lane]
+  LANE       LATEST                             OLDER  FILES
+▸ l1         #13 submitted, job open            1      ✓⚠????
+  l2         #15 submitted                      0
+
+lane l1
+  latest  #13 submitted, job open
+  older   #7 completed, job open [conflict #12]
+  review #9 head c0ffee · newer result since #11
+  verdict #10 head c0ffee · newer result since #11
+  ✓ work/a.rs
+  ⚠ work/b.rs changed since cited
+      cited <cid>
+      now   <cid>
+  ? work/gone.rs (file missing)
+  ? work/escape.txt (path leaves its root or crosses a link)
+  ? work/../secret.txt (path leaves its root)
+  ? elsewhere/x.rs (root not mapped)
+
+↑↓ select · r check the files again · Tab next view · q quit · files are read, never written
