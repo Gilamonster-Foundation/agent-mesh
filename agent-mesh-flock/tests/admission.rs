@@ -591,3 +591,154 @@ fn a_root_name_is_a_plain_unique_name() {
         Verdict::Admit
     );
 }
+
+fn nudged(target: &str) -> Body {
+    Body::Nudged {
+        target: target.into(),
+    }
+}
+
+fn misfire(target: &str, expected: &str, found: &str) -> Body {
+    Body::NudgeMisfire {
+        target: target.into(),
+        expected: expected.into(),
+        found: found.into(),
+    }
+}
+
+#[test]
+fn a_nudge_and_a_misfire_are_the_adapters_and_may_cite_the_work_they_were_about() {
+    let mut fx = Fx::new();
+    let brief = fx.brief("h1", "a");
+    let m = misfire("h1", "pane w1:p2 claude", "pane w1:p2 shell");
+    for (kind, body) in [
+        (Kind::Nudged, nudged("h1")),
+        (Kind::NudgeMisfire, m.clone()),
+    ] {
+        // with or without the event it was about
+        assert_eq!(
+            fx.judge("herdr", kind, body.clone(), &[("of", brief)]),
+            Verdict::Admit
+        );
+        assert_eq!(fx.judge("herdr", kind, body.clone(), &[]), Verdict::Admit);
+        // and nobody else's: not the shepherd, not the addressee
+        for who in ["shep", "h1", "rev"] {
+            assert_eq!(
+                fx.judge(who, kind, body.clone(), &[("of", brief)]),
+                Verdict::Refuse(Refusal::NotAllowed),
+                "{who} signed a {kind:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_nudge_is_about_a_roster_member_and_the_addressee_of_what_it_cites() {
+    let mut fx = Fx::new();
+    let brief = fx.brief("h1", "a");
+    let review = fx.emit(
+        "shep",
+        Kind::Review,
+        Body::Review {
+            to: "rev".into(),
+            lane: "a".into(),
+            head: "abc".into(),
+        },
+        &[],
+    );
+    let m = |t: &str| misfire(t, "e", "f");
+    for (kind, make) in [
+        (Kind::Nudged, nudged as fn(&str) -> Body),
+        (Kind::NudgeMisfire, |t: &str| misfire(t, "e", "f")),
+    ] {
+        // work addressed to h1 cannot be nudged to h2
+        assert_eq!(
+            fx.judge("herdr", kind, make("h2"), &[("of", brief)]),
+            Verdict::Refuse(Refusal::NotAddressee)
+        );
+        // a review is nudged to its reviewer
+        assert_eq!(
+            fx.judge("herdr", kind, make("rev"), &[("of", review)]),
+            Verdict::Admit
+        );
+        assert_eq!(
+            fx.judge("herdr", kind, make("h1"), &[("of", review)]),
+            Verdict::Refuse(Refusal::NotAddressee)
+        );
+        // a name that is not on the roster
+        assert_eq!(
+            fx.judge("herdr", kind, make("ghost"), &[]),
+            Verdict::Refuse(Refusal::UnknownMember)
+        );
+    }
+    let _ = m;
+    // only a brief or a review can be cited, and only as `of`
+    let job = fx.emit("h1", Kind::Job, job("a"), &[]);
+    assert_eq!(
+        fx.judge("herdr", Kind::Nudged, nudged("h1"), &[("of", job)]),
+        Verdict::Refuse(Refusal::WrongRefKind("of"))
+    );
+    assert_eq!(
+        fx.judge("herdr", Kind::Nudged, nudged("h1"), &[("brief", brief)]),
+        Verdict::Refuse(Refusal::UnexpectedRef("brief".into()))
+    );
+}
+
+#[test]
+fn what_a_misfire_says_about_the_panes_is_short_and_printable() {
+    let mut fx = Fx::new();
+    for (expected, found) in [
+        ("", "x"),
+        ("x", ""),
+        ("a\x1b[31m", "x"),
+        ("x", "b\x07"),
+        (&"y".repeat(129), "x"),
+    ] {
+        assert_eq!(
+            fx.judge(
+                "herdr",
+                Kind::NudgeMisfire,
+                misfire("h1", expected, found),
+                &[]
+            ),
+            Verdict::Refuse(Refusal::BadClaim),
+            "{expected:?} {found:?}"
+        );
+    }
+    assert_eq!(
+        fx.judge(
+            "herdr",
+            Kind::NudgeMisfire,
+            misfire("h1", &"y".repeat(128), "x"),
+            &[]
+        ),
+        Verdict::Admit
+    );
+}
+
+#[test]
+fn neither_a_nudge_nor_a_misfire_closes_or_answers_anything() {
+    let mut fx = Fx::new();
+    let brief = fx.brief("h1", "a");
+    fx.emit("herdr", Kind::Nudged, nudged("h1"), &[("of", brief)]);
+    fx.emit(
+        "herdr",
+        Kind::NudgeMisfire,
+        misfire("h1", "e", "f"),
+        &[("of", brief)],
+    );
+    // still submitted: not acked, not closed
+    let a = fx.board.attempt(&brief).unwrap();
+    assert_eq!(a.state, agent_mesh_flock::AttemptState::Submitted);
+    assert_eq!(fx.board.closer_of(&brief), None);
+    // so the addressee's result is the first closer, not a conflict
+    assert_eq!(
+        fx.judge(
+            "h1",
+            Kind::Result,
+            result(Outcome::Completed),
+            &[("brief", brief)]
+        ),
+        Verdict::Admit
+    );
+}

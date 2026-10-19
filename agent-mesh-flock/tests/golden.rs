@@ -159,6 +159,26 @@ fn vectors() -> Vec<(&'static str, MerkleNode<Event>)> {
             event(Kind::Nudged, Body::Nudged { target: s("h1") }, &[]),
         ),
         (
+            "nudged-of",
+            event(
+                Kind::Nudged,
+                Body::Nudged { target: s("h1") },
+                &[("of", "brief")],
+            ),
+        ),
+        (
+            "nudge-misfire",
+            event(
+                Kind::NudgeMisfire,
+                Body::NudgeMisfire {
+                    target: s("h1"),
+                    expected: s("pane w1:p2 claude"),
+                    found: s("pane w1:p2 shell"),
+                },
+                &[("of", "brief")],
+            ),
+        ),
+        (
             "pane",
             event(
                 Kind::Pane,
@@ -251,6 +271,14 @@ const GOLDEN: &[(&str, &str)] = &[
     (
         "nudged",
         "bafyr4idxdvmjklou4mzm2k2chzp3mjogqhklk6xibru7kzhphk2hcpuv3q",
+    ),
+    (
+        "nudged-of",
+        "bafyr4ig3o2lhyncz4lld6xovv54lrlwxvmy6tnavwcfceum5un3hh5xeei",
+    ),
+    (
+        "nudge-misfire",
+        "bafyr4ibvz3rvoxknidxd6m2dyztfdfnzzuimvmw65yipa4lqq6o4h4z3ki",
     ),
     (
         "pane",

@@ -253,7 +253,7 @@ fn signer_member<'a>(
                 .ok_or(Refusal::UnknownMember)?;
             let allowed = match kind {
                 K::Roster | K::Brief | K::Review => role == Role::Shepherd,
-                K::Status | K::Nudged => role == Role::Adapter,
+                K::Status | K::Nudged | K::NudgeMisfire => role == Role::Adapter,
                 K::Ack
                 | K::Result
                 | K::Verdict
@@ -326,6 +326,8 @@ fn ref_spec(kind: Kind) -> &'static [(&'static str, &'static [Kind], bool)] {
         K::JobEnd => &[("job", &[K::Job], true)],
         K::Ask => &[("about", &[K::Brief], false)],
         K::Answer | K::RelayedAnswer => &[("ask", &[K::Ask], true)],
+        // what a nudge was about; optional, so a nudge needs no event to cite
+        K::Nudged | K::NudgeMisfire => &[("of", &[K::Brief, K::Review], false)],
         _ => &[],
     }
 }
@@ -462,8 +464,44 @@ fn apply_table(
             }
         }
         (_, Kind::Answer) => Ok(target),
+        (Body::Nudged { target: to }, Kind::Nudged) => nudge_ok(board, to, target_entry, &[]),
+        (
+            Body::NudgeMisfire {
+                target: to,
+                expected,
+                found,
+            },
+            Kind::NudgeMisfire,
+        ) => nudge_ok(board, to, target_entry, &[expected, found]),
         _ => Ok(None),
     }
+}
+
+/// A nudge (or a misfire) is about a roster member, and, if it cites a brief
+/// or review, about that one's addressee: the adapter cannot say it nudged
+/// someone about work addressed to someone else. It closes nothing.
+fn nudge_ok(
+    board: &Board,
+    target: &str,
+    about: Option<&crate::board::Entry>,
+    texts: &[&String],
+) -> Result<Option<ContentId>, Refusal> {
+    if !board.members().iter().any(|m| m.name == target) {
+        return Err(Refusal::UnknownMember);
+    }
+    if let Some(entry) = about {
+        let to = match &entry.event.body {
+            Body::Brief { to, .. } | Body::Review { to, .. } => to,
+            _ => return Err(Refusal::WrongRefKind("of")),
+        };
+        if to != target {
+            return Err(Refusal::NotAddressee);
+        }
+    }
+    if !texts.iter().all(|t| claim_ok(t)) {
+        return Err(Refusal::BadClaim);
+    }
+    Ok(None)
 }
 
 /// A claimed id is short and printable: it ends up on an operator's screen.

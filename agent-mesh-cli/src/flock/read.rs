@@ -43,6 +43,10 @@ fn detail(e: &Entry) -> String {
             _ => "unreadable exit".to_owned(),
         },
         Body::Ask { text, .. } | Body::Status { text } => inert(text).into_owned(),
+        Body::Nudged { target } => format!("nudged {}", inert(target)),
+        Body::NudgeMisfire { target, .. } => {
+            format!("{}: may have reached the wrong pane", inert(target))
+        }
         _ => String::new(),
     }
 }
