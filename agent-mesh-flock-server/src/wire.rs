@@ -65,6 +65,13 @@ pub enum Req {
         /// The roster member.
         member: String,
     },
+    /// Register an operator device's certificate (the local owner's surface;
+    /// a server-signed `device-cert` event). Grants nothing by itself.
+    #[cfg(feature = "serve")]
+    RegisterDevice {
+        /// The device's certificate, issued directly by the flock's user key.
+        cert: CertChain,
+    },
     /// Enrollment steps 2-3.
     #[cfg(feature = "serve")]
     EnrollBegin {

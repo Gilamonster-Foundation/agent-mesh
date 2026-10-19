@@ -175,6 +175,7 @@ fn offered(class: Class, req: &Req) -> bool {
         Req::FileStat { .. } => true,
         Req::File { .. } => true,
         Req::Invite { .. } => false,
+        Req::RegisterDevice { .. } => false,
     }
 }
 
@@ -684,6 +685,10 @@ fn handle(
         Req::Invite { member } => Resp::Invited {
             token: server.invite(&member)?.token,
         },
+        Req::RegisterDevice { cert } => {
+            server.register_device(cert)?;
+            Resp::Ok
+        }
         Req::EnrollBegin { .. } | Req::EnrollFinish { .. } if bound.is_some() => {
             return Err(taken());
         }

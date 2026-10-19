@@ -486,3 +486,24 @@ fn stop_with_no_spare_descriptors_still_ends_every_connection() {
         assert!(matches!(end, Ok(None) | Err(_)), "{end:?}");
     }
 }
+
+#[test]
+fn registering_a_device_certificate_is_the_owners_alone() {
+    let r = rig();
+    let dev = support::operator(&r.env);
+    let reg = |cert: CertChain| Req::RegisterDevice { cert };
+    // the attach socket never offers it
+    let refused = ask(&r.attach, &reg(dev.cert().clone()));
+    assert!(refused_as_not_offered(&refused), "{refused:?}");
+    // another user's certificate is refused even to the owner
+    assert!(matches!(ask(&r.owner, &reg(a_cert())), Resp::Err(_)));
+    assert!(matches!(
+        ask(&r.owner, &reg(dev.cert().clone())),
+        Resp::Ok
+    ));
+    // and only once
+    assert!(matches!(
+        ask(&r.owner, &reg(dev.cert().clone())),
+        Resp::Err(_)
+    ));
+}
