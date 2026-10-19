@@ -331,11 +331,20 @@ fn is_fatal(e: &ServerError) -> bool {
 /// One connection carries at most one session, and its end is that
 /// session's end. A goodbye is answered `Ok` only once the end is durable.
 fn connection(shared: &Shared, mut conn: UnixStream, class: Class) {
+    serve_connection(shared, &mut conn, class);
+    // The server keeps a duplicate of every connection so `stop` can cut them,
+    // so dropping this handle does not close the socket: the peer would never
+    // see the end it is waiting for (a bridge would hold the connection, and
+    // its place, forever). Close it for every holder.
+    let _ = conn.shutdown(std::net::Shutdown::Both);
+}
+
+fn serve_connection(shared: &Shared, conn: &mut UnixStream, class: Class) {
     let mut bound: Option<String> = None;
     let mut challenge: Option<StreamChallenge> = None;
-    while let Ok(Some(req)) = read_msg::<Req>(&mut conn) {
+    while let Ok(Some(req)) = read_msg::<Req>(conn) {
         if !offered(class, &req) {
-            if write_msg(&mut conn, &Resp::Err(NOT_OFFERED.into())).is_err() {
+            if write_msg(conn, &Resp::Err(NOT_OFFERED.into())).is_err() {
                 break;
             }
             continue;
@@ -349,7 +358,7 @@ fn connection(shared: &Shared, mut conn: UnixStream, class: Class) {
                     nonce,
                 };
                 challenge = Some(ch.clone());
-                if write_msg(&mut conn, &Resp::StreamChallenge(ch)).is_err() {
+                if write_msg(conn, &Resp::StreamChallenge(ch)).is_err() {
                     break;
                 }
                 continue;
@@ -362,15 +371,15 @@ fn connection(shared: &Shared, mut conn: UnixStream, class: Class) {
                     .and_then(|c| c.id())
                     .and_then(|id| with(shared, |s| s.authorize_stream(&proof, &id)));
                 match opened {
-                    Ok(session) => stream(shared, &mut conn, &session, from.as_ref()),
+                    Ok(session) => stream(shared, conn, &session, from.as_ref()),
                     Err(e) => {
-                        let _ = write_msg(&mut conn, &Resp::Err(e.to_string()));
+                        let _ = write_msg(conn, &Resp::Err(e.to_string()));
                     }
                 }
                 break;
             }
             req => {
-                if !step(shared, &mut conn, req, &mut bound, class) {
+                if !step(shared, conn, req, &mut bound, class) {
                     break;
                 }
                 continue;

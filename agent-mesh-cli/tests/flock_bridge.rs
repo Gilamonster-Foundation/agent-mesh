@@ -7,7 +7,7 @@
 
 use agent_mesh_bus::{Bus, BusOptions, PeerEndpoint};
 use agent_mesh_cli::flock_bridge::{
-    fetch_genesis, pin_genesis, serve_home, serve_proxy, topic, Peer,
+    fetch_genesis, pin_genesis, serve_home, serve_proxy, topic, Attachment, Gate, Limits, Peer,
 };
 use agent_mesh_flock::{Body, Kind, Member, Role};
 use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp, StreamChallenge};
@@ -66,6 +66,10 @@ struct Home {
 }
 
 fn home(user: &UserKey, bus: &Bus, name: &str) -> Home {
+    home_gated(user, bus, name, Gate::new(Limits::default()))
+}
+
+fn home_gated(user: &UserKey, bus: &Bus, name: &str, gate: Arc<Gate>) -> Home {
     let dir = tempfile::tempdir().unwrap();
     let member = |n: &str, role| Member {
         name: n.into(),
@@ -94,7 +98,7 @@ fn home(user: &UserKey, bus: &Bus, name: &str) -> Home {
         bind_private(&attach).unwrap(),
     )
     .unwrap();
-    serve_home(bus, topic(user.fingerprint(), &id), attach);
+    serve_home(bus, topic(user.fingerprint(), &id), attach, gate.clone());
     Home {
         dir,
         owner,
@@ -143,6 +147,7 @@ struct Attached {
     dir: TempDir,
     sock: PathBuf,
     task: tokio::task::JoinHandle<()>,
+    _att: Attachment,
 }
 
 async fn attach(user: &UserKey, remote: &Arc<Bus>, at: PeerEndpoint, home: &Home) -> Attached {
@@ -150,16 +155,27 @@ async fn attach(user: &UserKey, remote: &Arc<Bus>, at: PeerEndpoint, home: &Home
     let peer = Peer::Direct(at);
     let signed = fetch_genesis(remote, &peer, &t).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
-    pin_genesis(dir.path(), &home.id, &signed).unwrap();
+    // attach insists on a private directory; a temp dir is not always one
+    std::fs::set_permissions(
+        dir.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let att = pin_genesis(dir.path(), &home.id, &signed).unwrap();
     let sock = dir.path().join("run").join("serve.sock");
     let listener = bind_private(&sock).unwrap();
     listener.set_nonblocking(true).unwrap();
     let listener = tokio::net::UnixListener::from_std(listener).unwrap();
     let remote = remote.clone();
     let task = tokio::spawn(async move {
-        let _ = serve_proxy(remote, peer, t, listener).await;
+        let _ = serve_proxy(remote, peer, t, listener, Gate::new(Limits::default())).await;
     });
-    Attached { dir, sock, task }
+    Attached {
+        dir,
+        sock,
+        task,
+        _att: att,
+    }
 }
 
 impl Drop for Attached {
@@ -324,11 +340,11 @@ async fn the_wrong_flock_id_is_refused_before_anything_is_written() {
     );
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("flock");
-    let err = pin_genesis(&target, &other.id, &signed).unwrap_err();
+    let err = pin_genesis(&target, &other.id, &signed).err().unwrap();
     assert!(err.to_string().contains("not the"), "{err}");
     assert!(!target.exists(), "nothing was written");
     // the right id is accepted and verifies as the server's own file does
-    pin_genesis(&target, &h.id, &signed).unwrap();
+    let _att = pin_genesis(&target, &h.id, &signed).unwrap();
     assert_eq!(
         load_genesis(&target).unwrap().node.content_id().unwrap(),
         h.id
@@ -473,14 +489,15 @@ async fn a_session_offline_across_two_bumps_renews_and_emits_and_an_ended_one_ca
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_flocks_at_different_epochs_share_one_connection_and_a_bump_in_one_leaves_the_other_alone(
-) {
+async fn two_flocks_at_different_epochs_on_one_bus_each_stay_independent_when_one_is_bumped() {
     let w = world().await;
     let (a_home, b_home) = (
         home(&w.user, &w.home_bus, "a"),
         home(&w.user, &w.home_bus, "b"),
     );
-    // one bus on each side, so both flocks ride the same host-to-host connection
+    // one bus on each side, a topic per flock. Each session stream is its own
+    // QUIC connection today, so this shows the flocks are independent, not that
+    // they share a carrier.
     let a = attach(&w.user, &w.remote_bus, w.home_at, &a_home).await;
     let b = attach(&w.user, &w.remote_bus, w.home_at, &b_home).await;
     let tokens: Vec<String> = (0..3).map(|_| a_home.invite("h2")).collect();
@@ -679,6 +696,7 @@ async fn a_home_that_sends_something_that_is_not_one_wire_message_is_cut_off() {
         Peer::Direct(w.home_at),
         t,
         listener,
+        Gate::new(Limits::default()),
     ));
     let outcome = blocking(move || {
         let mut c = UnixStream::connect(&sock).unwrap();
@@ -724,4 +742,281 @@ async fn a_genesis_answer_that_is_not_exactly_one_message_is_refused() {
         err.to_string().contains("exactly one wire message"),
         "{err}"
     );
+}
+
+// ---- the pin: verified in memory first, installed without replacing anything ----
+
+/// A real signed genesis (and its flock id), from a throwaway flock on disk.
+fn some_genesis(user: &UserKey, name: &str) -> (ContentId, agent_mesh_flock_server::SignedGenesis) {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = InitSpec {
+        name: name.into(),
+        roster: vec![Member {
+            name: "shep".into(),
+            role: Role::Shepherd,
+            devices: vec![],
+        }],
+        salt: name.into(),
+        host: "h".into(),
+        issued_at: "t".into(),
+    };
+    let id = init(dir.path(), user, spec).unwrap();
+    (id, load_genesis(dir.path()).unwrap())
+}
+
+/// The same node (so the same id) with a signature by some other key.
+fn with_a_bad_signature(
+    g: &agent_mesh_flock_server::SignedGenesis,
+    user: &UserKey,
+) -> agent_mesh_flock_server::SignedGenesis {
+    let other = agent(user, "not-the-server");
+    agent_mesh_flock_server::SignedGenesis {
+        node: g.node.clone(),
+        sig: Assertion::sign(&other, &g.node.content_id().unwrap()),
+    }
+}
+
+#[test]
+fn a_bad_signature_on_the_right_node_touches_nothing_absent_or_present() {
+    let user = UserKey::generate();
+    let (id, good) = some_genesis(&user, "f");
+    let bad = with_a_bad_signature(&good, &user);
+    assert_eq!(bad.node.content_id().unwrap(), id, "the id still matches");
+
+    // an absent destination stays absent: not even the directory is made
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("flock");
+    let err = pin_genesis(&target, &id, &bad).err().unwrap();
+    assert!(err.to_string().contains("does not verify"), "{err}");
+    assert!(!target.exists());
+
+    // an existing pin survives, byte for byte
+    let att = pin_genesis(&target, &id, &good).unwrap();
+    drop(att);
+    let before = std::fs::read(target.join("genesis")).unwrap();
+    assert!(pin_genesis(&target, &id, &bad).is_err());
+    assert_eq!(std::fs::read(target.join("genesis")).unwrap(), before);
+}
+
+#[test]
+fn an_existing_pin_for_another_flock_a_link_or_a_directory_is_never_replaced() {
+    let user = UserKey::generate();
+    let (id_a, a) = some_genesis(&user, "a");
+    let (id_b, b) = some_genesis(&user, "b");
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("flock");
+    drop(pin_genesis(&target, &id_a, &a).unwrap());
+    let pin = std::fs::read(target.join("genesis")).unwrap();
+
+    // flock B into A's directory: refused, A's pin intact
+    let err = pin_genesis(&target, &id_b, &b).err().unwrap();
+    assert!(err.to_string().contains("another flock"), "{err}");
+    assert_eq!(std::fs::read(target.join("genesis")).unwrap(), pin);
+
+    // the same flock again: kept exactly as it is (same file, not rewritten)
+    use std::os::unix::fs::MetadataExt as _;
+    let before = std::fs::metadata(target.join("genesis")).unwrap();
+    drop(pin_genesis(&target, &id_a, &a).unwrap());
+    let after = std::fs::metadata(target.join("genesis")).unwrap();
+    assert_eq!(
+        (before.ino(), before.mtime(), before.mtime_nsec()),
+        (after.ino(), after.mtime(), after.mtime_nsec())
+    );
+    assert_eq!(std::fs::read(target.join("genesis")).unwrap(), pin);
+
+    // a symlink where the pin goes: refused, and its target is not touched
+    let fresh = root.path().join("trap");
+    std::fs::create_dir(&fresh).unwrap();
+    std::fs::set_permissions(&fresh, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    let victim = root.path().join("victim");
+    std::fs::write(&victim, b"precious").unwrap();
+    std::os::unix::fs::symlink(&victim, fresh.join("genesis")).unwrap();
+    let err = pin_genesis(&fresh, &id_a, &a).err().unwrap();
+    assert!(err.to_string().contains("not a regular file"), "{err}");
+    assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
+    // even a link to nowhere is not followed into existence
+    std::fs::remove_file(fresh.join("genesis")).unwrap();
+    let nowhere = root.path().join("nowhere");
+    std::os::unix::fs::symlink(&nowhere, fresh.join("genesis")).unwrap();
+    assert!(pin_genesis(&fresh, &id_a, &a).is_err());
+    assert!(!nowhere.exists());
+
+    // a directory where the pin goes is refused too
+    std::fs::remove_file(fresh.join("genesis")).unwrap();
+    std::fs::create_dir(fresh.join("genesis")).unwrap();
+    assert!(pin_genesis(&fresh, &id_a, &a).is_err());
+}
+
+#[test]
+fn a_new_pin_is_private_complete_and_leaves_no_litter_and_the_directory_must_be_private() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let user = UserKey::generate();
+    let (id, g) = some_genesis(&user, "f");
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("flock");
+    let _att = pin_genesis(&target, &id, &g).unwrap();
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&target), 0o700);
+    assert_eq!(mode(&target.join("genesis")), 0o600);
+    let mut names: Vec<String> = std::fs::read_dir(&target)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["attach.lock", "genesis"], "no temporary files left");
+    assert_eq!(
+        load_genesis(&target).unwrap().node.content_id().unwrap(),
+        id
+    );
+
+    // a directory others can enter is refused
+    let loose = root.path().join("loose");
+    std::fs::create_dir(&loose).unwrap();
+    std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(pin_genesis(&loose, &id, &g).is_err());
+    assert!(!loose.join("genesis").exists());
+}
+
+#[test]
+fn a_second_attach_on_one_directory_is_refused_until_the_first_is_gone() {
+    let user = UserKey::generate();
+    let (id, g) = some_genesis(&user, "f");
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("flock");
+    let first = pin_genesis(&target, &id, &g).unwrap();
+    let err = pin_genesis(&target, &id, &g).err().unwrap();
+    assert!(err.to_string().contains("already holds"), "{err}");
+    assert!(Attachment::open(&target).is_err());
+    drop(first);
+    drop(Attachment::open(&target).unwrap());
+}
+
+// ---- the caps: counted before anything is connected, released when it ends ----
+
+fn hello() -> Vec<u8> {
+    let mut v = Vec::new();
+    write_msg(&mut v, &Req::Hello).unwrap();
+    v
+}
+
+/// Open a session to the home and have it answer once, so it is certainly
+/// admitted and holds its place.
+async fn open_and_hold(
+    bus: &Bus,
+    at: PeerEndpoint,
+    t: &agent_mesh_bus::Topic,
+) -> Result<agent_mesh_bus::Session, agent_mesh_bus::BusError> {
+    let mut s = bus.open_session_direct(at, t).await?;
+    s.send(hello()).await?;
+    let _ = s.recv().await?;
+    Ok(s)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_over_its_share_is_refused_before_the_backend_is_touched_and_capacity_comes_back() {
+    let w = world().await;
+    let gate = Gate::new(Limits {
+        total: 8,
+        per_peer: 1,
+    });
+    let h = home_gated(&w.user, &w.home_bus, "f", gate.clone());
+    let t = topic(w.user.fingerprint(), &h.id);
+    let first = open_and_hold(&w.remote_bus, w.home_at, &t).await.unwrap();
+    assert_eq!(gate.open(), 1);
+    // the same peer again: refused, with the reason
+    match open_and_hold(&w.remote_bus, w.home_at, &t).await {
+        Err(agent_mesh_bus::BusError::SessionRefused(why)) => {
+            assert!(why.contains("too many"), "{why}");
+        }
+        other => panic!("an excess open was admitted: {:?}", other.map(|_| ())),
+    }
+    assert_eq!(gate.open(), 1, "the refusal took no place");
+    // another peer (same user) still has its own share
+    let (other_bus, _) = node(&w.user, "other").await;
+    let second = open_and_hold(&other_bus, w.home_at, &t).await.unwrap();
+    assert_eq!(gate.open(), 2);
+    // closing frees the place, and the same peer can open again
+    first.close().await.unwrap();
+    gate.wait_open_at_most(1).await;
+    let again = open_and_hold(&w.remote_bus, w.home_at, &t).await.unwrap();
+    drop((second, again));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_total_is_capped_across_peers() {
+    let w = world().await;
+    let gate = Gate::new(Limits {
+        total: 1,
+        per_peer: 4,
+    });
+    let h = home_gated(&w.user, &w.home_bus, "f", gate.clone());
+    let t = topic(w.user.fingerprint(), &h.id);
+    let (other_bus, _) = node(&w.user, "other").await;
+    let held = open_and_hold(&w.remote_bus, w.home_at, &t).await.unwrap();
+    assert!(matches!(
+        open_and_hold(&other_bus, w.home_at, &t).await,
+        Err(agent_mesh_bus::BusError::SessionRefused(_))
+    ));
+    held.close().await.unwrap();
+    gate.wait_open_at_most(0).await;
+    open_and_hold(&other_bus, w.home_at, &t).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_proxy_caps_its_local_connections_and_takes_them_back() {
+    let w = world().await;
+    let h = home(&w.user, &w.home_bus, "f");
+    let t = topic(w.user.fingerprint(), &h.id);
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("run").join("serve.sock");
+    let listener = bind_private(&sock).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+    let gate = Gate::new(Limits {
+        total: 1,
+        per_peer: 1,
+    });
+    let task = tokio::spawn(serve_proxy(
+        w.remote_bus.clone(),
+        Peer::Direct(w.home_at),
+        t,
+        listener,
+        gate.clone(),
+    ));
+    let first = blocking({
+        let sock = sock.clone();
+        move || {
+            let mut c = UnixStream::connect(&sock).unwrap();
+            write_msg(&mut c, &Req::Hello).unwrap();
+            assert!(matches!(
+                read_msg::<Resp>(&mut c),
+                Ok(Some(Resp::Hello { .. }))
+            ));
+            c // held open
+        }
+    })
+    .await;
+    assert_eq!(gate.open(), 1);
+    // a second connection ends at once: no dial, no reply
+    let refused = blocking({
+        let sock = sock.clone();
+        move || {
+            let mut c = UnixStream::connect(&sock).unwrap();
+            let _ = write_msg(&mut c, &Req::Hello);
+            read_msg::<Resp>(&mut c)
+        }
+    })
+    .await;
+    assert!(matches!(refused, Ok(None) | Err(_)), "{refused:?}");
+    // the first going away gives the place back, and a new connection works
+    drop(first);
+    gate.wait_open_at_most(0).await;
+    let served = blocking(move || {
+        let mut c = UnixStream::connect(&sock).unwrap();
+        write_msg(&mut c, &Req::Hello).unwrap();
+        matches!(read_msg::<Resp>(&mut c), Ok(Some(Resp::Hello { .. })))
+    })
+    .await;
+    assert!(served);
+    task.abort();
 }

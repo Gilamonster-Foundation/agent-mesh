@@ -132,20 +132,38 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   `amesh flock attach --dir D --id <flock id> --peer <pubkey>@<ip:port | fingerprint>`
   (the remote host, the same user's key) fetches the genesis, **refuses unless
   its hash is the `--id` you were given** (the id is the out-of-band anchor, like
-  a fingerprint; nothing is written otherwise), keeps it as `D/genesis`, and
-  serves `D/run/serve.sock`: every flock tool (`session`, `watch`, `join`, the
-  TUI, a `Reader`) then runs unchanged against `D`, one bus stream per local
-  connection. The proxy holds no key and has no emit path; the wire is the
+  a fingerprint) and unless it verifies as a genesis, all in memory before
+  anything is written. `D` must be a private directory (created 0700, or an
+  existing one that is ours and closed to others) and is held by an exclusive
+  lock while `attach` runs, so a second `attach` on it is refused. The genesis
+  is kept as `D/genesis` through a fresh temporary file (fsync, rename, fsync
+  of the directory); an existing pin for the same flock is left exactly as it is,
+  one for another flock, a symlink or anything that is not a regular file is
+  refused, never replaced. `attach` then serves `D/run/serve.sock`: every flock
+  tool (`session`, `watch`, `join`, the TUI, a `Reader`) runs unchanged against
+  `D`, one bus stream per local connection. The proxy holds no flock-member key
+  (it does use this host's mesh identity, its user key's agent) and has no emit path; the wire is the
   server's own `Req`/`Resp`, one session message per wire message, and a body
   that is not exactly one wire message (up to 1 MiB) is dropped with the
   connection. Enrolling uses a token the owner mints at home; the key is made
   and stays on the remote. A session that was quiet across epoch bumps renews
-  through the proxy; two flocks at different epochs ride one host-to-host
-  connection (one topic each) without touching each other. A connection that
+  through the proxy; two flocks at different epochs (one topic each, on one bus
+  on each side) do not touch each other. Today each session stream is its own
+  QUIC connection; nothing is shared between streams, and the tests do not
+  claim a single carrier. A connection that
   drops without goodbye is recorded `lost` at home as before. What the bus
   handshake proves is only that the two hosts belong to the same user; the
   proofs above (token, possession, a stream signature) are what admit a member.
   `--peer <fingerprint>` finds the home by mDNS; `pubkey@addr` dials directly.
+  Open streams are counted before anything is connected: at the home, in all
+  (default 64) and per peer (default 16), a stream over its share is refused
+  ("too many open sessions") without touching the attach socket; the proxy caps
+  its local connections the same way (an excess connection simply ends) and
+  tracks its tasks, so capacity returns when a stream ends, fails or is
+  cancelled. A held-open but idle admitted stream keeps its place until its
+  peer closes it (no application-progress deadline yet). The server now also closes a
+  finished connection for its peer (it kept a duplicate handle, so a half-closed
+  connection never reached an end), which is what lets a place be given back.
 - **MCP tools** (`amesh mcp --flock-session <sock>` or `AMESH_FLOCK_SESSION`,
   Unix): `flock_whoami`, `flock_inbox`, `flock_status` and `flock_emit{kind,
   refs, body}` join the `mesh_*` tools, only when a session is given. The

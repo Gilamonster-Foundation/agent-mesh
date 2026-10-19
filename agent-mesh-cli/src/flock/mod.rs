@@ -478,6 +478,7 @@ mod unix {
                     &bus,
                     flock_bridge::topic(user.fingerprint(), &id),
                     attach_sock(dir),
+                    flock_bridge::Gate::new(flock_bridge::Limits::default()),
                 );
                 println!("bridge {fp} {} {}", hex::encode(pubkey), bus.local_port());
                 Some(bus)
@@ -514,12 +515,14 @@ mod unix {
         let bus = std::sync::Arc::new(Bus::bind_outbound_only(&user, agent).await?);
         let topic = flock_bridge::topic(user.fingerprint(), &id);
         let signed = flock_bridge::fetch_genesis(&bus, &peer, &topic).await?;
-        flock_bridge::pin_genesis(dir, &id, &signed)?;
+        // the directory is ours (private, locked) for as long as this runs
+        let _attachment = flock_bridge::pin_genesis(dir, &id, &signed)?;
         let listener = bind_private(&sock(dir))?;
         listener.set_nonblocking(true)?;
         let listener = tokio::net::UnixListener::from_std(listener)?;
         println!("serving {}", sock(dir).display());
-        flock_bridge::serve_proxy(bus, peer, topic, listener).await
+        let gate = flock_bridge::Gate::new(flock_bridge::Limits::default());
+        flock_bridge::serve_proxy(bus, peer, topic, listener, gate).await
     }
 
     pub fn invite(dir: &Path, member: &str) -> Result<()> {

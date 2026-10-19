@@ -12,13 +12,18 @@
 
 use agent_mesh_bus::{Bus, IncomingSession, PeerEndpoint, Session, Topic};
 use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp, MAX_MESSAGE};
-use agent_mesh_flock_server::{load_genesis, SignedGenesis, GENESIS_FILE};
+use agent_mesh_flock_server::{
+    load_genesis, private_dir, verify_signed_genesis, SignedGenesis, GENESIS_FILE,
+};
 use agent_mesh_protocol::Fingerprint;
 use anyhow::{anyhow, bail, Context, Result};
 use content_addressable::canonical::to_canonical_dagcbor;
 use content_addressable::{ContentAddressable as _, ContentId};
+use std::collections::HashMap;
+use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -26,6 +31,109 @@ use tokio::net::{UnixListener, UnixStream};
 #[must_use]
 pub fn topic(user: Fingerprint, flock: &ContentId) -> Topic {
     Topic::new(user, format!("flock/{flock}"))
+}
+
+/// How many streams may be open at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// In all.
+    pub total: usize,
+    /// From any one peer.
+    pub per_peer: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            total: 64,
+            per_peer: 16,
+        }
+    }
+}
+
+#[derive(Default)]
+struct Open {
+    total: usize,
+    by_peer: HashMap<String, usize>,
+}
+
+/// Counts open streams against [`Limits`]. A stream holds a [`Permit`] for its
+/// whole life; dropping it (the stream ended, failed, was refused or its task
+/// was cancelled) gives the capacity back. The count is taken *before* the
+/// backend is connected or a task spawned, so a same-user peer that is not a
+/// flock member cannot allocate more than the limits allow.
+pub struct Gate {
+    limits: Limits,
+    open: Mutex<Open>,
+    changed: tokio::sync::Notify,
+}
+
+/// One open stream's share of a [`Gate`].
+pub struct Permit {
+    gate: Arc<Gate>,
+    who: String,
+}
+
+impl Gate {
+    /// A gate with these limits.
+    #[must_use]
+    pub fn new(limits: Limits) -> Arc<Self> {
+        Arc::new(Self {
+            limits,
+            open: Mutex::new(Open::default()),
+            changed: tokio::sync::Notify::new(),
+        })
+    }
+
+    /// Take a place for `who`, or `None` when the total or `who`'s share is full.
+    #[must_use]
+    pub fn try_acquire(self: &Arc<Self>, who: &str) -> Option<Permit> {
+        let mut open = self.open.lock().unwrap();
+        let mine = open.by_peer.get(who).copied().unwrap_or(0);
+        if open.total >= self.limits.total || mine >= self.limits.per_peer {
+            return None;
+        }
+        open.total += 1;
+        open.by_peer.insert(who.to_owned(), mine + 1);
+        Some(Permit {
+            gate: self.clone(),
+            who: who.to_owned(),
+        })
+    }
+
+    /// How many streams are open.
+    #[must_use]
+    pub fn open(&self) -> usize {
+        self.open.lock().unwrap().total
+    }
+
+    /// Resolve once at most `n` streams are open (immediately if already so).
+    pub async fn wait_open_at_most(&self, n: usize) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.open() <= n {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        let mut open = self.gate.open.lock().unwrap();
+        open.total = open.total.saturating_sub(1);
+        if let Some(n) = open.by_peer.get_mut(&self.who) {
+            *n -= 1;
+            if *n == 0 {
+                open.by_peer.remove(&self.who);
+            }
+        }
+        drop(open);
+        self.gate.changed.notify_waiters();
+    }
 }
 
 /// Where the home host is.
@@ -109,11 +217,15 @@ async fn pipe(session: Session, conn: UnixStream) -> Result<()> {
 }
 
 /// Home side: serve this flock's sessions by piping each to the server's
-/// attach socket. Registration is synchronous.
-pub fn serve_home(bus: &Bus, topic: Topic, attach: PathBuf) {
+/// attach socket, at most `gate` at a time. Registration is synchronous.
+pub fn serve_home(bus: &Bus, topic: Topic, attach: PathBuf, gate: Arc<Gate>) {
     bus.handle_sessions(topic, move |incoming: IncomingSession| {
-        let attach = attach.clone();
+        let (attach, gate) = (attach.clone(), gate.clone());
         async move {
+            // capacity first: nothing is connected for a peer over its share
+            let Some(_permit) = gate.try_acquire(&incoming.peer().agent_fp.hex()) else {
+                return incoming.refuse("too many open sessions").await;
+            };
             let conn = match UnixStream::connect(&attach).await {
                 Ok(c) => c,
                 Err(e) => {
@@ -131,7 +243,8 @@ pub fn serve_home(bus: &Bus, topic: Topic, attach: PathBuf) {
 }
 
 /// Remote side: for each connection to `listener`, open a session to the home
-/// and pipe. Runs until the listener fails; abort the task to stop it.
+/// and pipe, at most `gate` at a time. Runs until the listener fails; abort the
+/// task to stop it (its connections stop with it).
 ///
 /// # Errors
 /// The listener failed.
@@ -140,11 +253,20 @@ pub async fn serve_proxy(
     peer: Peer,
     topic: Topic,
     listener: UnixListener,
+    gate: Arc<Gate>,
 ) -> Result<()> {
+    // tracked, so a cancelled proxy takes its connections with it
+    let mut tasks = tokio::task::JoinSet::new();
     loop {
+        while tasks.try_join_next().is_some() {}
         let (conn, _) = listener.accept().await?;
+        // over the limit: this connection just ends; nothing is dialled
+        let Some(permit) = gate.try_acquire("local") else {
+            continue;
+        };
         let (bus, peer, topic) = (bus.clone(), peer.clone(), topic.clone());
-        tokio::spawn(async move {
+        tasks.spawn(async move {
+            let _permit = permit;
             // a failed open (the home refused, is gone) just closes this
             // connection; the client sees an end of stream
             if let Ok(session) = peer.open(&bus, &topic).await {
@@ -177,27 +299,114 @@ pub async fn fetch_genesis(bus: &Bus, peer: &Peer, topic: &Topic) -> Result<Sign
     }
 }
 
-/// Keep `signed` as `dir`'s genesis, but only if it is the flock `id` names:
-/// the id is the out-of-band anchor (like a fingerprint), so a home that
-/// answers with any other genesis is refused before anything is written. The
-/// file is then re-read through the same check the server uses (its signature
-/// by the certificate the genesis itself names).
+/// The checks a genesis from the wire must pass before anything is kept: it
+/// is the flock `id` names, and it verifies as a genesis (signed by the very
+/// certificate it names). In memory only: nothing on disk is touched.
 ///
 /// # Errors
-/// The genesis is not `id`'s, or the directory cannot be written.
-pub fn pin_genesis(dir: &Path, id: &ContentId, signed: &SignedGenesis) -> Result<()> {
+/// Which check failed.
+pub fn check_genesis(id: &ContentId, signed: &SignedGenesis) -> Result<()> {
     let got = signed.node.content_id()?;
     if got != *id {
         bail!("the home's flock is {got}, not the {id} you asked for");
     }
-    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    let path = dir.join(GENESIS_FILE);
-    std::fs::write(&path, to_canonical_dagcbor(signed)?)?;
-    if let Err(e) = load_genesis(dir) {
-        let _ = std::fs::remove_file(&path);
-        bail!("the home's genesis does not verify: {e}");
+    verify_signed_genesis(signed).map_err(|e| anyhow!("the home's genesis does not verify: {e}"))
+}
+
+/// One attached flock directory, owned exclusively for as long as this lives:
+/// a private directory (created 0700, or an existing one only if it is ours
+/// and closed to others) and a `flock(2)` lock, so two attaches cannot share
+/// it and a stale socket can only be replaced by the one that holds it.
+pub struct Attachment {
+    dir: PathBuf,
+    _lock: std::fs::File,
+}
+
+impl Attachment {
+    /// Take the directory.
+    ///
+    /// # Errors
+    /// The directory is not private, or another attach holds it.
+    pub fn open(dir: &Path) -> Result<Self> {
+        private_dir(dir).with_context(|| format!("attach directory {}", dir.display()))?;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            // never through a link: the lock file is ours or it is refused
+            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().try_into().unwrap_or(0))
+            .open(dir.join("attach.lock"))
+            .with_context(|| format!("lock {}", dir.display()))?;
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+            .map_err(|_| anyhow!("another `attach` already holds {}", dir.display()))?;
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            _lock: lock,
+        })
     }
-    Ok(())
+
+    /// Keep `signed` as this directory's genesis. It has been checked (see
+    /// [`check_genesis`]) and is then installed without replacing or following
+    /// anything: an existing pin for the same flock is left exactly as it is,
+    /// one for another flock, a link, or anything that is not a regular file is
+    /// refused, and a new pin goes in through a fresh temporary file, an fsync
+    /// of the file, a rename and an fsync of the directory.
+    ///
+    /// # Errors
+    /// The check failed, the directory holds something else, or I/O.
+    pub fn pin(&self, id: &ContentId, signed: &SignedGenesis) -> Result<()> {
+        check_genesis(id, signed)?;
+        let path = self.dir.join(GENESIS_FILE);
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                if !meta.file_type().is_file() {
+                    bail!("{} is not a regular file; not touching it", path.display());
+                }
+                return match load_genesis(&self.dir) {
+                    Ok(have) if have.node.content_id()? == *id => Ok(()),
+                    Ok(_) => bail!(
+                        "{} holds another flock's genesis; not replacing it",
+                        self.dir.display()
+                    ),
+                    Err(e) => bail!(
+                        "the genesis in {} does not verify ({e}); not replacing it",
+                        self.dir.display()
+                    ),
+                };
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        let tmp = self
+            .dir
+            .join(format!("{GENESIS_FILE}.new.{}", std::process::id()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .with_context(|| format!("create {}", tmp.display()))?;
+        file.write_all(&to_canonical_dagcbor(signed)?)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, &path)?;
+        std::fs::File::open(&self.dir)?.sync_all()?;
+        Ok(())
+    }
+}
+
+/// Check `signed` against `id`, take `dir`, and pin it: nothing is created
+/// unless the genesis is the flock `id` names and verifies. The attachment
+/// (and its lock) lives as long as the returned value.
+///
+/// # Errors
+/// As [`check_genesis`], [`Attachment::open`] and [`Attachment::pin`].
+pub fn pin_genesis(dir: &Path, id: &ContentId, signed: &SignedGenesis) -> Result<Attachment> {
+    check_genesis(id, signed)?;
+    let att = Attachment::open(dir)?;
+    att.pin(id, signed)?;
+    Ok(att)
 }
 
 #[cfg(test)]

@@ -293,3 +293,27 @@ fn serve_without_attach_has_no_attach_socket_to_reach() {
     assert!(!env.tmp.path().join("run").join("attach.sock").exists());
     s.stop();
 }
+
+#[test]
+fn a_client_that_half_closes_sees_the_server_close_its_end() {
+    // The server keeps a duplicate of each connection so `stop` can cut it, so
+    // simply dropping its handle did not close the socket: a client that had
+    // finished writing waited for an end that never came. (A bridge holds a
+    // place for such a connection; it must be able to see it end.)
+    use std::os::unix::net::UnixStream;
+    let r = rig();
+    for sock in [&r.owner, &r.attach] {
+        let mut c = UnixStream::connect(sock).unwrap();
+        write_msg(&mut c, &Req::Hello).unwrap();
+        assert!(matches!(
+            read_msg::<Resp>(&mut c),
+            Ok(Some(Resp::Hello { .. }))
+        ));
+        c.shutdown(std::net::Shutdown::Write).unwrap();
+        // the server's side is closed: a clean end of stream, not a hang (the
+        // timeout only turns a server that never closes into a failure)
+        c.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        assert!(matches!(read_msg::<Resp>(&mut c), Ok(None)));
+    }
+}
