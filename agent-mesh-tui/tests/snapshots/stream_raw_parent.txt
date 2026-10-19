@@ -1,6 +1,6 @@
 amesh-tui · flock fx · id ············ · 7 members
 log ✓ 24 · epoch 1 · live
- Board  [Stream]
+ Board  [Stream]  Lane
 event #11  <cid>
 ✓ signature, session certificate and admission checked; admitted at #11
 kind brief · signed by shep; session <session>

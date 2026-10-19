@@ -70,6 +70,12 @@ pub enum FlockCommand {
         /// `--peer <pubkey>@<addr>`.
         #[arg(long, requires = "bridge")]
         bridge_quiet: bool,
+        /// A directory a member may cite files from, `name=path` (repeatable).
+        /// The roster declares the name (the log never holds the path); a
+        /// member of the flock can read, through the attach socket, a file
+        /// under it whose bytes still hash to the id it was cited with.
+        #[arg(long = "root")]
+        roots: Vec<String>,
     },
     /// Attach to a flock served by another host of the same user: fetch its
     /// genesis (refused unless it is the flock `--id` names), then serve
@@ -270,9 +276,11 @@ pub async fn run(home: PathBuf, cmd: FlockCommand) -> Result<()> {
             bridge,
             bridge_port,
             bridge_quiet,
+            roots,
         } => {
             let bridge = bridge.then_some((bridge_port, !bridge_quiet));
-            unix::serve(&home, &dir, attach, bridge).await
+            let roots = unix::parse_roots(&roots)?;
+            unix::serve(&home, &dir, attach, bridge, roots).await
         }
         #[cfg(unix)]
         FlockCommand::Attach { dir, id, peer } => unix::attach(&home, &dir, &id, &peer).await,
@@ -382,6 +390,7 @@ fn parse_member(spec: &str) -> Result<Member> {
         name: name.into(),
         role,
         devices: vec![],
+        delegate: false,
     })
 }
 
@@ -419,6 +428,7 @@ mod unix {
     use agent_mesh_flock_server::{bind_private, serve as serve_log, serve_with_attach, Server};
     use agent_mesh_flock_session::Policy;
     use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, Fingerprint, UserKey};
+    use anyhow::bail;
     use content_addressable::{ContentAddressable as _, ContentId};
     use std::os::unix::net::UnixStream;
     use std::path::Path;
@@ -450,13 +460,36 @@ mod unix {
         Ok((user, agent))
     }
 
+    /// `name=path` pairs: a plain, unique name and an existing directory.
+    pub fn parse_roots(raw: &[String]) -> Result<std::collections::BTreeMap<String, PathBuf>> {
+        let mut out = std::collections::BTreeMap::new();
+        for r in raw {
+            let (name, path) = r
+                .split_once('=')
+                .ok_or_else(|| anyhow!("--root wants name=path, got {r:?}"))?;
+            if !agent_mesh_flock::roots_well_formed(&[name.to_owned()]) {
+                bail!("--root name {name:?} is not a plain name");
+            }
+            let path = PathBuf::from(path);
+            if !path.is_dir() {
+                bail!("--root {name}: {} is not a directory", path.display());
+            }
+            if out.insert(name.to_owned(), path).is_some() {
+                bail!("--root {name} given twice");
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn serve(
         home: &Path,
         dir: &Path,
         attach: bool,
         bridge: Option<(u16, bool)>,
+        roots: std::collections::BTreeMap<String, PathBuf>,
     ) -> Result<()> {
-        let server = Server::open(dir).with_context(|| format!("open {}", dir.display()))?;
+        let mut server = Server::open(dir).with_context(|| format!("open {}", dir.display()))?;
+        server.serve_roots(roots).context("declare the roots")?;
         let id = server.genesis().content_id()?;
         // The log lock is ours, so any socket file left behind is stale.
         let listener = bind_private(&sock(dir))?;
@@ -589,5 +622,34 @@ mod unix {
         );
         let _ = std::fs::remove_file(&path);
         result.map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::parse_roots;
+
+        fn args(v: &[&str]) -> Vec<String> {
+            v.iter().map(|s| (*s).to_owned()).collect()
+        }
+
+        #[test]
+        fn a_root_is_a_plain_name_and_an_existing_directory() {
+            let dir = tempfile::tempdir().unwrap();
+            let d = dir.path().display().to_string();
+            let ok = parse_roots(&args(&[&format!("notes={d}")])).unwrap();
+            assert_eq!(ok["notes"], dir.path());
+            for bad in [
+                "notes".to_owned(),
+                format!("={d}"),
+                format!("a/b={d}"),
+                format!("..={d}"),
+                "notes=/no/such/dir".to_owned(),
+                format!("notes={d}/missing"),
+            ] {
+                assert!(parse_roots(&args(&[&bad])).is_err(), "{bad}");
+            }
+            let twice = [format!("a={d}"), format!("a={d}")];
+            assert!(parse_roots(&twice).is_err());
+        }
     }
 }

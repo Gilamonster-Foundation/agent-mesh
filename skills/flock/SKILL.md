@@ -89,6 +89,16 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   Devices change only in a server-signed `roster` event (`replace_roster`) or
   genesis; a shepherd's roster must leave them as they are. Operator members
   only. Rosters without devices encode as before;
+- **the delegate** (step 13a): at most one roster member has `delegate: true`
+  (the member that holds the operator's screen; omitted from the encoding when
+  false, so every existing id is unchanged). It is set only by a server-signed
+  `roster` (`replace_roster`) or genesis; a shepherd's roster must leave it as it
+  is (`DelegateLocked`), and two delegates are refused (`MultipleDelegates`).
+  The delegate's hand-off needs a **listed operator device** approval whatever
+  its role, checked before the shepherd-approves-helper rule, so a shepherd
+  cannot approve its delegate's replacement. Approvals are judged at their own
+  index on replay. The delegate gains no operator authority. No signing gesture
+  or `answer` yet (13b/13c);
 - **byte strings**: keys, signatures, fingerprints and nonces are CBOR byte
   strings in the canonical encoding and on the session wire (they were arrays of
   one integer per byte: about 22% larger frames, and a size that varied with the
@@ -123,6 +133,40 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   possession proof, a signature over a fresh challenge bound to flock and
   connection). v1 attaches same-user hosts only: the host-to-host handshake
   (the bus's auto-team rule) requires both hosts to belong to one user;
+- **roots and the cited-file service (step 9c)**, Unix. A roster event may carry
+  `roots`: the *names* of directories members cite files from (never a path;
+  empty roots are not encoded, so every existing id is unchanged). Only a
+  server-signed roster changes them, like operator devices (`roots-locked`),
+  and names are 1-64 of `A-Za-z0-9._-`, not `.`/`..`, unique (`bad-root`). The
+  home host maps name to directory in its own flag, `amesh flock serve --root
+  name=path` (repeatable; the directory must exist; naming a root the roster
+  lacks has the server declare it), so no path is ever in the log. A connection
+  proves membership (`WatchBegin`, then `Prove` with the same signature a
+  `Watch` carries) and may then ask `FileStat{root,path}` (what the file hashes
+  to now) and `File{root,path,id}` (the bytes, **only if they still hash to
+  `id`**; otherwise `ChangedSinceCited{current}`, reported and not served, or
+  `Unavailable{reason}`: unknown root, outside the root, not a regular file,
+  missing, too large). All three are on the attach socket's allow-list.
+  Every request re-checks that the session is still an active one of a current
+  member. The file is opened by `Beneath` (the same helper the TUI's drift
+  check uses): the root is opened once and the path is resolved relative to
+  that descriptor, on Linux by `openat2` with `RESOLVE_BENEATH |
+  RESOLVE_NO_SYMLINKS`, elsewhere by a component walk with `O_NOFOLLOW`, so
+  there is no checked pathname for a swapped directory to make stale. An
+  absolute path or `..` is refused before the file system is touched; **every**
+  symlink on the path is refused, a link that stays inside the root too;
+  mounts and hard links are part of the tree. The open does not block (a fifo
+  cannot hang the server), and the opened file must be a regular file within
+  one message (`MAX_FILE`, a little under 1 MiB; chunking is later).
+  **Limit:** the root is opened by its path, so replacing the mapped
+  directory (or an ancestor) before it is opened is the owner's own mapping
+  changing. On the reader side
+  (`agent_mesh_flock_session::Files`) the bytes are hashed again and must equal
+  the cited id; a server that sends other bytes, bytes past the limit, or
+  "changed" for the id that was cited is refused (`stat` is the server's word:
+  the bytes are not sent). The TUI's drift column asks the server for any root
+  the operator did not map with `--root` (so over a remote attach it asks the
+  home host, through the proxy);
 - **the bridge and `attach` (step 9b)**, Unix, same-user hosts only. `amesh flock
   serve --attach --bridge [--bridge-port N] [--bridge-quiet]` (the home host;
   needs `amesh keygen`) joins the mesh as a bus agent and serves a session
@@ -293,14 +337,14 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   real server and session feeding the model, and the same cargo-tree and
   compile-probe checks as the read side (`tests_common::readside`) run against
   the TUI: neither writer feature resolves and no writer API can be named by a
-  consumer of the crate. The Board scrolls to keep the selected member on screen (header and footer fixed). A frame whose checkpoint cannot be saved is rolled back by the reader itself (`Reader::follow` keeps nothing it did not save, and `Reader::open` makes a checkpoint it finds durable (file and directory fsync) before showing it, or does not open: a rename left visible by a failed directory fsync is never presented as saved until it will survive power loss), so the view and `amesh flock watch` only ever show the saved prefix; the TUI header says `cannot save the checkpoint` and keeps the last saved state. **Stream (step 8c)**: a second tab (`Tab`, or `1`/`2`) lists every admitted event in order (index, kind, signer, lane, one-line summary; conflicts marked) with kind / lane / member filters (`k` `l` `m` cycle through what the log has and back to all, `c` clears) and a follow mode (on at the start; moving up leaves it, `f` or `End` returns). An event's lane is its own or that of the event it answers. `Enter` opens the raw view: id, "✓ signature, session certificate and admission checked", signer (member and session fingerprint), lane, claimed time, parents (`prev` then references, numbered; `1`-`9` jump to one, `Backspace` returns; a filter that hides the parent is cleared), cited files and the pretty-printed body. Everything is folded from the verified board; nothing is fetched or checked again, and the event list is shared and extended between models. Everything drawn passes one function, `inert` (`ui/inert.rs`), which spells out control characters (C0 including ESC/BEL/CR/TAB, DEL, C1 including U+009B, and line/bidi/zero-width controls) as `\x1b`, `\r`, `\x9b` ...: a signature says who spoke, not that the text is safe to print, so a member's status, lane, label, file path or name cannot send the operator's terminal a command (tests: the screens carry no control character, and the bytes sent through a real crossterm backend carry only the renderer's own escapes). A signer is shown as member and session, with no role (the log knows only today's roster). The CLI shares that boundary (`agent_mesh_flock::text::inert`, which the TUI re-exports): `amesh flock log`/`watch`/`inbox`/`status`/`panes`, the MCP tools' errors and the final error printer escape member-authored text the same way, field by field, so a name with a newline cannot forge a row; the nudged and nudge-misfire summaries escape their target too. Lane and Waiting views are 8d-8e.
+  consumer of the crate. The Board scrolls to keep the selected member on screen (header and footer fixed). A frame whose checkpoint cannot be saved is rolled back by the reader itself (`Reader::follow` keeps nothing it did not save, and `Reader::open` makes a checkpoint it finds durable (file and directory fsync) before showing it, or does not open: a rename left visible by a failed directory fsync is never presented as saved until it will survive power loss), so the view and `amesh flock watch` only ever show the saved prefix; the TUI header says `cannot save the checkpoint` and keeps the last saved state. **Stream (step 8c)**: a second tab (`Tab`, or `1`/`2`) lists every admitted event in order (index, kind, signer, lane, one-line summary; conflicts marked) with kind / lane / member filters (`k` `l` `m` cycle through what the log has and back to all, `c` clears) and a follow mode (on at the start; moving up leaves it, `f` or `End` returns). An event's lane is its own or that of the event it answers. `Enter` opens the raw view: id, "✓ signature, session certificate and admission checked", signer (member and session fingerprint), lane, claimed time, parents (`prev` then references, numbered; `1`-`9` jump to one, `Backspace` returns; a filter that hides the parent is cleared), cited files and the pretty-printed body. Everything is folded from the verified board; nothing is fetched or checked again, and the event list is shared and extended between models. Everything drawn passes one function, `inert` (`ui/inert.rs`), which spells out control characters (C0 including ESC/BEL/CR/TAB, DEL, C1 including U+009B, and line/bidi/zero-width controls) as `\x1b`, `\r`, `\x9b` ...: a signature says who spoke, not that the text is safe to print, so a member's status, lane, label, file path or name cannot send the operator's terminal a command (tests: the screens carry no control character, and the bytes sent through a real crossterm backend carry only the renderer's own escapes). A signer is shown as member and session, with no role (the log knows only today's roster). The CLI shares that boundary (`agent_mesh_flock::text::inert`, which the TUI re-exports): `amesh flock log`/`watch`/`inbox`/`status`/`panes`, the MCP tools' errors and the final error printer escape member-authored text the same way, field by field, so a name with a newline cannot forge a row; the nudged and nudge-misfire summaries escape their target too. **Lane (step 8d)**: a third tab (`3`; `Tab`/`BackTab` cycle all three) lists each lane with its latest attempt (`completed, job open` verbatim from the fold), how many older attempts it has and one mark per cited file; the selected lane shows its older attempts, conflicts aimed at an attempt, its reviews and verdicts (head, and `newer result since #n` when the lane has a later non-conflict result: the reviewed head may be stale; the flock cannot see git, so this is the author's head against the log's order) and every file its events cite, first cited first. **Changed since cited**: `--root name=path` (repeatable, home-local; the roster declares no roots yet) maps a cited root to a directory; each file is opened **beneath** it with no pathname re-resolution (`agent_mesh_flock_server::Beneath`: the root is opened once and the file is opened relative to that descriptor, on Linux by one `openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`, elsewhere by a component walk of `openat` with `O_NOFOLLOW`, so a directory swapped for a link after a check cannot lead out; a path with `..` or an absolute path is refused before the file system is touched; **every** symlink on the path is refused, one that stays inside the root too, which shows as `?`; mounts and hard links are not links, and `NO_XDEV` is not set; the open does not block on a FIFO), read (at most 64 MiB, never written, created or touched) and hashed with the same raw content id: `✓` equal, `⚠ changed since cited` (cited and current ids shown), `?` unavailable with the reason (root not mapped, path leaves its root or crosses a link, file missing or unreadable, not a regular file, too big), `…` not checked yet. Files are checked on a worker thread, again when the log cites something new or on `r`; `amesh-tui --once --tab lane` checks synchronously. Everything drawn still passes `inert` (lane, root, path, head). Waiting is 8e.
 
 - **nudge records (step 10a)**: `nudged{target}` and the new `nudge-misfire{target, expected, found}` are signed by the herdr adapter's session only. Each may cite `of` (a brief or review); if it does, `target` must be that work's addressee, and `target` must be on the roster. `expected`/`found` are the adapter's own short, printable descriptions of the pane it chose and the pane it found after prompting (a claim, like `pane`). Neither closes the work or counts as receipt, so a nudged brief still shows as submitted until its addressee acks. The nudge adapter itself (`amesh flock nudge`) is 10b/10c; this is only the record it will write.
 
 **Planned, not built:** operator approval of a **delegate**
 hand-off (#127's other half; waits on the delegate designation, step 13); device changes
 signed by a listed device (server-signed only today); operator-signed events (`answer`); the rest of
-the CLI's `answer`; `amesh-tui`; cited-file service for remote hosts (9c) and a real-sshd run of the attach suite (9d); the
+the CLI's `answer`; `amesh-tui`; the TUI drift column over a remote attach (waits on 8d) and a real-sshd run of the attach suite (9d); the
 `amesh-herdr` adapter beyond the read-only view (nudges, `nudged`); native
 newt receive. Until they land, lanes run on files
 as the herdr-flock skill describes. Status: epic #109.

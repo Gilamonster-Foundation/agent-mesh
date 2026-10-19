@@ -3,6 +3,7 @@
 mod app;
 mod board;
 pub mod inert;
+mod lane;
 pub mod render;
 mod stream;
 

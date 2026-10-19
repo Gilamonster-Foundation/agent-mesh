@@ -164,6 +164,33 @@ fn each_entry_a_remote_session_needs_is_offered_on_the_attach_socket() {
         ),
         ("admit", an_event(&mut r.env)),
         ("watch-begin", Req::WatchBegin),
+        (
+            "prove",
+            Req::Prove {
+                proof: Box::new(Assertion::sign(
+                    &AgentKey::issue(
+                        &agent_mesh_protocol::UserKey::generate(),
+                        support::meta("x"),
+                    ),
+                    &ContentId::from_canonical_bytes(b"x"),
+                )),
+            },
+        ),
+        (
+            "file-stat",
+            Req::FileStat {
+                root: "notes".into(),
+                path: "a".into(),
+            },
+        ),
+        (
+            "file",
+            Req::File {
+                root: "notes".into(),
+                path: "a".into(),
+                id: content_addressable::RawContentId::from_content(b"x"),
+            },
+        ),
         ("end", Req::End),
     ];
     for (name, req) in cases {

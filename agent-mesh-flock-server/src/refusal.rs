@@ -61,8 +61,16 @@ pub enum Reason {
     DevicesLocked,
     /// `devices` on a member that is not an operator.
     DevicesOnNonOperator,
+    /// Only a server-signed roster changes who the delegate is.
+    DelegateLocked,
+    /// More than one roster member is the delegate.
+    MultipleDelegates,
     /// Two roster members share a name.
     DuplicateMember,
+    /// Only a server-signed roster changes the file roots.
+    RootsLocked,
+    /// A root name that is empty, too long, not plain, or declared twice.
+    BadRoot,
     /// A pane or tab claim that is empty, too long or not printable.
     BadClaim,
     /// A `job-end` that does not say exactly one of an exit code and a signal.
@@ -93,8 +101,12 @@ impl From<&Refusal> for Reason {
             Refusal::StaleRoster => Self::StaleRoster,
             Refusal::TooLarge => Self::TooLarge,
             Refusal::DevicesLocked => Self::DevicesLocked,
+            Refusal::DelegateLocked => Self::DelegateLocked,
+            Refusal::MultipleDelegates => Self::MultipleDelegates,
             Refusal::DevicesOnNonOperator => Self::DevicesOnNonOperator,
             Refusal::DuplicateMember => Self::DuplicateMember,
+            Refusal::RootsLocked => Self::RootsLocked,
+            Refusal::BadRoot => Self::BadRoot,
             Refusal::BadClaim => Self::BadClaim,
             Refusal::BadExit => Self::BadExit,
         }

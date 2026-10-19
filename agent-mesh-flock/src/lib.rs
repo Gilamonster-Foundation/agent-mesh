@@ -12,7 +12,7 @@ mod event;
 mod signer;
 pub mod text;
 
-pub use admission::{admit, roster_well_formed, ConflictKind, Refusal, Verdict};
+pub use admission::{admit, roots_well_formed, roster_well_formed, ConflictKind, Refusal, Verdict};
 pub use board::{AttemptState, AttemptView, Board, Entry, LaneView, LogEntry};
 pub use event::{
     Body, EndReason, Event, FileRef, Genesis, HandoffApproval, Kind, Member, Outcome, Role,

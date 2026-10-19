@@ -83,6 +83,13 @@ pub struct Member {
     /// roster without devices has the bytes it always had.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<agent_mesh_protocol::Fingerprint>,
+    /// The flock's one human delegate: the member that holds the operator's
+    /// screen. At most one member; changed only by a server-signed `roster`
+    /// event. Not encoded when false, so a roster without a delegate has the
+    /// bytes it always had. Grants no authority of its own; it only decides
+    /// who may approve this member's hand-off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delegate: bool,
 }
 
 /// How a brief ended.
@@ -145,6 +152,13 @@ pub enum Body {
     Roster {
         /// All members.
         members: Vec<Member>,
+        /// The names of the file roots a member may cite from: a name only,
+        /// never a path (each home host maps its names to directories in its
+        /// own config). Changed only by a server-signed `roster` event. Empty
+        /// roots are not encoded, so a roster without roots has the bytes it
+        /// always had.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        roots: Vec<String>,
     },
     /// A brief for `to` in `lane`.
     Brief {

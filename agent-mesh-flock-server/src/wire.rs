@@ -13,8 +13,8 @@ use agent_mesh_protocol::Assertion;
 #[cfg(feature = "serve")]
 use agent_mesh_protocol::CertChain;
 use content_addressable::canonical::{from_canonical_dagcbor_checked, to_canonical_dagcbor};
-use content_addressable::ContentId;
 use content_addressable::MerkleNode;
+use content_addressable::{ContentId, RawContentId};
 #[cfg(feature = "serve")]
 use ed25519_dalek::Signature;
 use serde::de::DeserializeOwned;
@@ -23,6 +23,11 @@ use std::io::{Read, Write};
 
 /// The largest message either side will read.
 pub const MAX_MESSAGE: usize = 1 << 20;
+
+/// The largest cited file the server will serve: one message, with room for
+/// the response around the bytes. Larger files are `Unavailable` (chunking is
+/// a later step).
+pub const MAX_FILE: usize = MAX_MESSAGE - 4096;
 
 /// A signature as a byte string: dalek's own serde writes 64 integers.
 #[cfg(feature = "serve")]
@@ -124,6 +129,29 @@ pub enum Req {
         /// The signature over [`StreamChallenge::id`].
         proof: Box<Assertion>,
     },
+    /// Prove membership on this connection (after `WatchBegin`, with the
+    /// same signature a `Watch` carries) so that it may ask for cited files.
+    /// One try per challenge.
+    Prove {
+        /// The signature over [`StreamChallenge::id`].
+        proof: Box<Assertion>,
+    },
+    /// The id of the bytes now at `path` under the declared root `root`.
+    FileStat {
+        /// A root name the roster declares.
+        root: String,
+        /// Path under it.
+        path: String,
+    },
+    /// The bytes at `path` under `root`, if they still hash to `id`.
+    File {
+        /// A root name the roster declares.
+        root: String,
+        /// Path under it.
+        path: String,
+        /// The id the file was cited with.
+        id: RawContentId,
+    },
 }
 
 /// What a session signs to open a stream: fresh and bound to this flock and
@@ -220,6 +248,31 @@ pub enum Resp {
     /// The stream is over.
     Closed {
         /// Why.
+        reason: String,
+    },
+    /// Membership proved; file requests are open on this connection.
+    Proved,
+    /// Answer to `FileStat`: what the file hashes to now.
+    FileId {
+        /// The id of the current bytes.
+        id: RawContentId,
+    },
+    /// Answer to `File`: the bytes, which hash to the cited id (a reader
+    /// recomputes this, it does not trust the server).
+    File {
+        /// The file's bytes.
+        #[serde(with = "serde_bytes")]
+        bytes: Vec<u8>,
+    },
+    /// The file is not what was cited. Reported, not served.
+    ChangedSinceCited {
+        /// What the bytes hash to now.
+        current: RawContentId,
+    },
+    /// The file cannot be served, and why.
+    Unavailable {
+        /// Unknown root, outside the root, not a regular file, missing, too
+        /// large.
         reason: String,
     },
     /// Done.

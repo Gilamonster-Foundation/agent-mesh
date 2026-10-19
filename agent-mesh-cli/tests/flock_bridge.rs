@@ -70,11 +70,22 @@ fn home(user: &UserKey, bus: &Bus, name: &str) -> Home {
 }
 
 fn home_gated(user: &UserKey, bus: &Bus, name: &str, gate: Arc<Gate>) -> Home {
+    home_with_roots(user, bus, name, gate, std::collections::BTreeMap::new())
+}
+
+fn home_with_roots(
+    user: &UserKey,
+    bus: &Bus,
+    name: &str,
+    gate: Arc<Gate>,
+    roots: std::collections::BTreeMap<String, PathBuf>,
+) -> Home {
     let dir = tempfile::tempdir().unwrap();
     let member = |n: &str, role| Member {
         name: n.into(),
         role,
         devices: vec![],
+        delegate: false,
     };
     let spec = InitSpec {
         name: name.into(),
@@ -89,7 +100,8 @@ fn home_gated(user: &UserKey, bus: &Bus, name: &str, gate: Arc<Gate>) -> Home {
         issued_at: "t".into(),
     };
     let id = init(dir.path(), user, spec).unwrap();
-    let server = Server::open(dir.path()).unwrap();
+    let mut server = Server::open(dir.path()).unwrap();
+    server.serve_roots(roots).unwrap();
     let owner = dir.path().join("run").join("serve.sock");
     let attach = dir.path().join("run").join("attach.sock");
     let serving = serve_with_attach(
@@ -755,6 +767,7 @@ fn some_genesis(user: &UserKey, name: &str) -> (ContentId, agent_mesh_flock_serv
             name: "shep".into(),
             role: Role::Shepherd,
             devices: vec![],
+            delegate: false,
         }],
         salt: name.into(),
         host: "h".into(),
@@ -1161,4 +1174,47 @@ async fn ending_a_backend_waits_for_the_backend_to_close() {
     let out = done.await;
     assert_eq!(out.unwrap_err().to_string(), "the remote went away");
     let _: Poll<()> = Poll::Pending;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_remote_member_reads_a_cited_file_through_the_proxy_and_a_changed_one_is_only_reported() {
+    use agent_mesh_flock_session::{Cited, Files};
+    let w = world().await;
+    let files = tempfile::tempdir().unwrap();
+    std::fs::write(files.path().join("brief.md"), b"as cited").unwrap();
+    let h = home_with_roots(
+        &w.user,
+        &w.home_bus,
+        "f",
+        Gate::new(Limits::default()),
+        [("notes".to_owned(), files.path().to_owned())].into(),
+    );
+    let a = attach(&w.user, &w.remote_bus, w.home_at, &h).await;
+    let token = h.invite("h1");
+    let sock = a.sock.clone();
+    let dir = files.path().to_owned();
+    blocking(move || {
+        // the key is made here; the home never sees it
+        let (_conn, key, _session, _pending) = enrol_by_hand(&sock, &token, "h1");
+        let prove = |ch: &StreamChallenge| {
+            Ok::<_, agent_mesh_flock_session::ReaderError>(Assertion::sign(&key, &ch.id().unwrap()))
+        };
+        let mut f = Files::open(&sock, &prove).unwrap();
+        let cited = content_addressable::RawContentId::from_content(b"as cited");
+        assert_eq!(f.stat("notes", "brief.md").unwrap(), Ok(cited));
+        assert_eq!(
+            f.read("notes", "brief.md", &cited).unwrap(),
+            Cited::Bytes(b"as cited".to_vec())
+        );
+        std::fs::write(dir.join("brief.md"), b"edited").unwrap();
+        assert!(matches!(
+            f.read("notes", "brief.md", &cited).unwrap(),
+            Cited::Changed { .. }
+        ));
+        assert_eq!(
+            f.read("notes", "../brief.md", &cited).unwrap(),
+            Cited::Unavailable("outside the root".into())
+        );
+    })
+    .await;
 }
