@@ -293,9 +293,9 @@ fn a_logged_answer_whose_device_certificate_is_missing_fails_replay_in_both_read
     drop(log);
     let why = |r: Result<(), ServerError>| r.unwrap_err().to_string();
     let opened = Server::open(&env.dir()).map(|_| ());
-    assert!(why(opened).contains("not registered"), "Server::open");
+    assert!(why(opened).contains("does not hold"), "Server::open");
     let read = Snapshot::read(&env.dir()).map(|_| ());
-    assert!(why(read).contains("not registered"), "Snapshot::read");
+    assert!(why(read).contains("does not hold"), "Snapshot::read");
 }
 
 #[test]
