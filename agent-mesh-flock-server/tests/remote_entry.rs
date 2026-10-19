@@ -390,3 +390,70 @@ fn a_watch_that_disconnects_ends_its_worker_with_nothing_published() {
     }
     drop(conn);
 }
+
+/// Stopping needs no new descriptor for a connection it already holds. The
+/// limit is lowered in a child process (the test re-runs itself), so the
+/// rest of the suite keeps its descriptors.
+#[test]
+fn stop_with_no_spare_descriptors_still_ends_every_connection() {
+    const CHILD: &str = "AMESH_STOP_FD_CHILD";
+    const NAME: &str = "stop_with_no_spare_descriptors_still_ends_every_connection";
+    if std::env::var_os(CHILD).is_none() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
+    let mut r = rig();
+    let serving = r.serving.take().unwrap();
+    let mut clients = vec![];
+    for i in 0..12 {
+        let mut c = UnixStream::connect(if i % 2 == 0 { &r.owner } else { &r.attach }).unwrap();
+        write_msg(&mut c, &Req::Hello).unwrap();
+        assert!(matches!(
+            read_msg::<Resp>(&mut c),
+            Ok(Some(Resp::Hello { .. }))
+        ));
+        clients.push(c);
+    }
+    // 12 idle workers are running (each answered, so each was accepted)
+    assert_eq!(serving.live_connections(), 12);
+    // Leave exactly one free descriptor number, which is what stop's wake of
+    // a listener needs (a duplicate per connection would need twelve more).
+    // The lowest free number is where a new descriptor lands, so a probe
+    // names it; nothing below it is free, and nothing above it may be used.
+    let probe = std::fs::File::open("/dev/null").unwrap();
+    let limit = u64::try_from(std::os::fd::AsRawFd::as_raw_fd(&probe)).unwrap() + 1;
+    drop(probe);
+    rustix::process::setrlimit(
+        rustix::process::Resource::Nofile,
+        rustix::process::Rlimit {
+            current: Some(limit),
+            // the hard limit stays as it was
+            maximum: rustix::process::getrlimit(rustix::process::Resource::Nofile).maximum,
+        },
+    )
+    .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        serving.stop();
+        let _ = tx.send(());
+    });
+    // only a guard: a stop that cannot end a worker would wait forever
+    rx.recv_timeout(std::time::Duration::from_secs(30))
+        .expect("stop did not complete");
+    for mut c in clients {
+        c.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let end = read_msg::<Resp>(&mut c);
+        assert!(matches!(end, Ok(None) | Err(_)), "{end:?}");
+    }
+}

@@ -375,14 +375,16 @@ fn failed(s: &Shared) -> bool {
 /// Shut every connection and wait for its thread, so nothing still holds the
 /// server (and so its log lock) afterwards.
 fn end_connections(s: &Shared) {
-    let socks: Vec<UnixStream> = s
+    // Shut the handles the registry already owns: no descriptor is allocated
+    // here (a duplicate per connection could fail under pressure and leave a
+    // worker blocked, which the joins below would wait on forever). The lock
+    // is held only for the shutdowns, never across a join.
+    for stream in s
         .socks
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .values()
-        .filter_map(|c| c.try_clone().ok())
-        .collect();
-    for stream in socks {
+    {
         let _ = stream.shutdown(std::net::Shutdown::Both);
     }
     let conns = std::mem::take(

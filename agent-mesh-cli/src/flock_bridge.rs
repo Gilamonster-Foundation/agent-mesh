@@ -24,7 +24,7 @@ use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{UnixListener, UnixStream};
 
 /// The bus topic a flock's sessions are served on.
@@ -213,12 +213,21 @@ async fn pipe(session: Session, conn: UnixStream) -> Result<()> {
         Ok::<(), anyhow::Error>(())
     };
     let done = tokio::try_join!(up, down).map(|_| ());
-    // Whatever ended it, the backend connection is ours to see closed: tell
-    // the server we are done and wait for it to close its end, so the caller's
-    // place is held until the backend worker is really gone.
-    let _ = to_socket.shutdown().await;
+    end_backend(from_socket, to_socket, done).await
+}
+
+/// Whatever ended the pipe, the backend connection is ours to see closed: tell
+/// the server we are done writing and wait for it to close its end, so the
+/// caller's place is held until the backend worker is really gone.
+#[doc(hidden)]
+pub async fn end_backend<R, W>(mut from: R, mut to: W, done: Result<()>) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let _ = to.shutdown().await;
     let mut sink = [0u8; 512];
-    while matches!(from_socket.read(&mut sink).await, Ok(n) if n > 0) {}
+    while matches!(from.read(&mut sink).await, Ok(n) if n > 0) {}
     done
 }
 

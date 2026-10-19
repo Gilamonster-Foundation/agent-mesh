@@ -1098,9 +1098,10 @@ async fn the_home_place_is_held_until_the_backend_connection_is_closed() {
         per_peer: 1,
     });
     serve_home(&w.home_bus, t.clone(), attach, gate.clone());
-    const ROUNDS: usize = 24;
-    // Several rounds: without the guarantee the place can still read as held
-    // at the moment the end is seen, so one round proves little.
+    // (the ordering itself is proved deterministically by
+    // `ending_a_backend_waits_for_the_backend_to_close`; this is the same
+    // through the real bridge)
+    const ROUNDS: usize = 1;
     let (saw_end, mut saw_end_rx) = tokio::sync::mpsc::unbounded_channel();
     let (release, release_rx) = std::sync::mpsc::channel::<()>();
     let backend = std::thread::spawn(move || {
@@ -1127,4 +1128,37 @@ async fn the_home_place_is_held_until_the_backend_connection_is_closed() {
         gate.wait_open_at_most(0).await;
     }
     backend.join().unwrap();
+}
+
+#[tokio::test]
+async fn ending_a_backend_waits_for_the_backend_to_close() {
+    // The step that releases a place once a pipe has ended, driven by hand: a
+    // backend that has been told we are done writing but has not closed. The
+    // future must be pending exactly then (an omitted wait would be ready at
+    // its first poll), and complete once the backend closes.
+    use std::future::Future as _;
+    use std::task::{Context, Poll, Waker};
+    let (ours, mut theirs) = tokio::net::UnixStream::pair().unwrap();
+    let (from, to) = ours.into_split();
+    let mut done = Box::pin(agent_mesh_cli::flock_bridge::end_backend(
+        from,
+        to,
+        Err(anyhow::anyhow!("the remote went away")),
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(done.as_mut().poll(&mut cx).is_pending());
+    // the backend sees our end of writing, and still has not closed
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        tokio::io::AsyncReadExt::read(&mut theirs, &mut buf)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(done.as_mut().poll(&mut cx).is_pending());
+    // the backend closing completes it, and the original error is kept
+    drop(theirs);
+    let out = done.await;
+    assert_eq!(out.unwrap_err().to_string(), "the remote went away");
+    let _: Poll<()> = Poll::Pending;
 }
