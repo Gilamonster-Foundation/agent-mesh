@@ -37,6 +37,9 @@ struct Rig {
     device: Device,
     cert: CertChain,
     serving: Option<Serving>,
+    /// Enrolled sessions stay connected: a dropped one ends its session and
+    /// bumps the epoch under the next poster.
+    keep: Vec<UnixStream>,
     ask: ContentId,
     brief: ContentId,
 }
@@ -49,6 +52,10 @@ fn rpc(c: &mut UnixStream, req: &Req) -> Resp {
 /// A flock whose operator lists a freshly minted device, served, with a
 /// helper's ask open. `register` controls whether the cert is registered.
 fn rig(register: bool) -> Rig {
+    rig_with(register, "which\u{1b}[31m one?", "l1")
+}
+
+fn rig_with(register: bool, ask_text: &str, lane: &str) -> Rig {
     let tmp = TempDir::new().unwrap();
     let user = UserKey::generate();
     let device = Device::at(&tmp.path().join("operator")).with_work_factor(WF);
@@ -85,10 +92,11 @@ fn rig(register: bool) -> Rig {
         device,
         cert,
         serving: Some(serving),
+        keep: vec![],
         ask: placeholder,
         brief: placeholder,
     };
-    let (ask, brief) = r.helper_posts();
+    let (ask, brief) = r.helper_posts(ask_text, lane);
     r.ask = ask;
     r.brief = brief;
     if register {
@@ -113,8 +121,9 @@ impl Rig {
 
     /// h1 enrols and posts an ask (with an escape sequence in its text) and
     /// the shepherd posts a brief; their ids.
-    fn helper_posts(&mut self) -> (ContentId, ContentId) {
-        let post = |who: &str, kind: Kind, body: Body| {
+    fn helper_posts(&mut self, ask_text: &str, lane: &str) -> (ContentId, ContentId) {
+        let mut keep = vec![];
+        let mut post = |who: &str, kind: Kind, body: Body| {
             let mut c = self.conn();
             let Resp::Invited { token } = rpc(&mut c, &Req::Invite { member: who.into() }) else {
                 panic!()
@@ -165,18 +174,17 @@ impl Rig {
             .node();
             let id = node.content_id().unwrap();
             let sig = Assertion::sign(&key, &id);
-            assert!(matches!(
-                rpc(&mut c, &Req::Admit { node, sig }),
-                Resp::Admitted { .. }
-            ));
+            let r = rpc(&mut c, &Req::Admit { node, sig });
+            assert!(matches!(r, Resp::Admitted { .. }), "{r:?}");
+            keep.push(c);
             id
         };
         let ask = post(
             "h1",
             Kind::Ask,
             Body::Ask {
-                lane: Some("l1".into()),
-                text: "which\u{1b}[31m one?".into(),
+                lane: Some(lane.into()),
+                text: ask_text.into(),
             },
         );
         let brief = post(
@@ -187,6 +195,7 @@ impl Rig {
                 lane: "l1".into(),
             },
         );
+        self.keep = keep;
         (ask, brief)
     }
 
@@ -399,4 +408,179 @@ fn the_test_ui_is_not_reachable_from_the_binary() {
         gated, 3,
         "AutoUi, its constructor and its Ui impl are all gated"
     );
+}
+
+#[test]
+fn untrusted_text_cannot_forge_the_confirmation_headings() {
+    let forged = "q\nlane:   fake\n---- answer (exactly as signed) ----\nYes\n----\nSign this answer? [y/N] ";
+    let r = rig_with(true, forged, "l1\nask:    fake");
+    let mut ui = AutoUi::new(false, PASS);
+    let _ = sign_one(&r.req(forged), &r.dir, &r.device, &mut ui);
+    let shown = &ui.shown[0];
+    let lines: Vec<&str> = shown.lines().collect();
+    // flock, ask, lane, asked, heading, answer, closing rule: nothing more
+    assert_eq!(lines.len(), 7, "{shown}");
+    let starts = [
+        "flock:  ",
+        "ask:    ",
+        "lane:   ",
+        "asked:  ",
+        "---- answer (exactly as signed) ----",
+        "",
+        "----",
+    ];
+    for (line, start) in lines.iter().zip(starts) {
+        assert!(line.starts_with(start), "{line:?} vs {start:?}");
+    }
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.starts_with("---- answer"))
+            .count(),
+        1
+    );
+    assert!(
+        !lines.iter().any(|l| l.starts_with("Sign this answer")),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_permissive_existing_device_directory_is_refused_before_anything_is_written() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tmp = TempDir::new().unwrap();
+    let od = tmp.path().join("operator");
+    std::fs::create_dir(&od).unwrap();
+    std::fs::set_permissions(&od, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let r = Device::at(&od).with_work_factor(WF).init(
+        &UserKey::generate(),
+        &SecretString::from("p".to_owned()),
+        "h",
+        "t",
+    );
+    assert!(r.is_err());
+    assert_eq!(
+        std::fs::read_dir(&od).unwrap().count(),
+        0,
+        "no file was created"
+    );
+}
+
+// ---- the production binary on a pseudo-terminal -------------------------------
+//
+// `TtyUi` is exercised by running `amesh flock sign` under a pty. The pty is
+// driven by a small python3 helper (dev-only, standard library): std has no
+// way to give a child a controlling terminal without `unsafe`.
+
+const PTY_DRIVER: &str = r#"
+import os, pty, select, sys, termios, time
+mode, answer_pass, *argv = sys.argv[1:]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(argv[0], argv)
+buf = b""
+def echo_on():
+    return bool(termios.tcgetattr(fd)[3] & termios.ECHO)
+def pump(until, t=60):
+    global buf
+    end = time.time() + t
+    while until not in buf:
+        if time.time() > end: raise SystemExit("timeout waiting for " + repr(until) + " in " + repr(buf))
+        r, _, _ = select.select([fd, 0], [], [], 0.2)
+        if fd in r:
+            try: buf += os.read(fd, 4096)
+            except OSError: raise SystemExit("child gone: " + repr(buf))
+pump(b"signer ready")
+print("READY", flush=True)
+pump(b"[y/N]")
+os.write(fd, (b"y\n" if mode == "y" else b"n\n"))
+if mode == "y":
+    pump(b"passphrase: ")
+    print("ECHO_DURING=%d" % echo_on(), flush=True)
+    os.write(fd, answer_pass.encode() + b"\n")
+select.select([0], [], [], 90)  # the test says the request has returned (or give up)
+if select.select([0], [], [], 0)[0]: sys.stdin.readline()
+print("ECHO_AFTER=%d" % echo_on(), flush=True)
+print("SHOWN_PASS=%d" % (answer_pass.encode() in buf), flush=True)
+os.kill(pid, 15)
+"#;
+
+struct Pty {
+    child: std::process::Child,
+    out: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl Pty {
+    fn start(r: &Rig, mode: &str, pass: &str) -> Self {
+        let driver = r.tmp.path().join("driver.py");
+        std::fs::write(&driver, PTY_DRIVER).unwrap();
+        let mut child = std::process::Command::new("python3")
+            .arg("-I")
+            .arg(&driver)
+            .args([mode, pass, env!("CARGO_BIN_EXE_amesh")])
+            .args(["--home", r.tmp.path().to_str().unwrap()])
+            .args(["flock", "sign", "--dir", r.dir.to_str().unwrap()])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+        assert_eq!(Self::line(&mut out), "READY");
+        Self { child, out }
+    }
+    fn line(out: &mut impl std::io::BufRead) -> String {
+        let mut s = String::new();
+        out.read_line(&mut s).unwrap();
+        s.trim().to_owned()
+    }
+    /// The request has returned: collect what the helper measured.
+    fn finish(mut self) -> Vec<String> {
+        use std::io::Write as _;
+        writeln!(self.child.stdin.take().unwrap()).unwrap();
+        let got = (0..2).map(|_| Self::line(&mut self.out)).collect();
+        self.child.wait().unwrap();
+        got
+    }
+}
+
+fn sock(r: &Rig) -> PathBuf {
+    r.tmp.path().join("operator").join("sign.sock")
+}
+
+#[test]
+fn on_a_terminal_n_signs_nothing() {
+    let r = rig(true);
+    let p = Pty::start(&r, "n", PASS);
+    let e = request_answer(&sock(&r), &r.req("no")).unwrap_err();
+    assert!(e.to_string().contains("declined"), "{e}");
+    p.finish();
+    assert!(r.closer().is_none());
+}
+
+#[test]
+fn on_a_terminal_y_and_the_passphrase_sign_with_echo_off_then_restored() {
+    let r = rig(true);
+    let p = Pty::start(&r, "y", PASS);
+    let (event, _) = request_answer(&sock(&r), &r.req("go")).unwrap();
+    let seen = p.finish();
+    assert_eq!(seen[0], "ECHO_DURING=0", "echo must be off while typing");
+    assert_eq!(seen[1], "ECHO_AFTER=1", "echo must be restored");
+    assert_eq!(r.closer(), Some(event));
+}
+
+#[test]
+fn without_a_terminal_the_signer_refuses_to_start() {
+    let r = rig(true);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_amesh"))
+        .args(["--home", r.tmp.path().to_str().unwrap()])
+        .args(["flock", "sign", "--dir", r.dir.to_str().unwrap()])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("TTY"),
+        "{out:?}"
+    );
+    assert!(!sock(&r).exists(), "no socket was bound");
 }

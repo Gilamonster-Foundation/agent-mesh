@@ -8,7 +8,7 @@
 //! the binary; the signer socket is `0600`, which keeps out other users only.
 
 use age::secrecy::{ExposeSecret, SecretString};
-use agent_mesh_flock::text::inert_lines;
+use agent_mesh_flock::text::inert;
 use agent_mesh_flock::{Body, Event, Kind};
 use agent_mesh_flock_server::wire::{read_msg, write_msg, Req, Resp};
 use agent_mesh_flock_server::Snapshot;
@@ -17,7 +17,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use content_addressable::{ContentAddressable as _, ContentId};
 use serde::{Deserialize, Serialize};
 use std::io::{Read as _, Write as _};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
@@ -108,14 +108,17 @@ impl Ui for TtyUi {
 
     fn passphrase(&mut self, prompt: &str) -> Result<SecretString> {
         use rustix::termios::{tcgetattr, tcsetattr, LocalModes, OptionalActions};
-        write!(self.tty, "{prompt}")?;
-        self.tty.flush()?;
+        // echo goes off (and stray type-ahead is dropped) *before* the prompt is
+        // shown, so nothing typed in answer to the prompt can be lost or echoed
         let before = tcgetattr(&self.tty)?;
         let mut quiet = before.clone();
         quiet.local_modes.remove(LocalModes::ECHO);
         tcsetattr(&self.tty, OptionalActions::Flush, &quiet)?;
-        let got = self.line();
-        tcsetattr(&self.tty, OptionalActions::Flush, &before)?;
+        let got = write!(self.tty, "{prompt}")
+            .and_then(|()| self.tty.flush())
+            .map_err(anyhow::Error::from)
+            .and_then(|()| self.line());
+        tcsetattr(&self.tty, OptionalActions::Drain, &before)?;
         writeln!(self.tty)?;
         Ok(SecretString::from(got?))
     }
@@ -201,10 +204,9 @@ impl Device {
         if seed_path.exists() {
             bail!("a device already exists in {}", self.dir.display());
         }
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&self.dir)?;
+        // creates it 0700 if absent; refuses one others can enter, before any
+        // key exists or any file is written
+        agent_mesh_flock_server::private_dir(&self.dir)?;
         let key = AgentKey::issue(
             user,
             AgentMetadata {
@@ -282,11 +284,14 @@ fn shown(
     ask_text: &str,
     text: &str,
 ) -> String {
-    inert_lines(&format!(
-        "flock:  {flock}\nask:    {ask}\nlane:   {}\nasked:  {ask_text}\n---- answer (exactly as signed) ----\n{text}\n----",
-        lane.unwrap_or("-")
-    ))
-    .into_owned()
+    // every untrusted field is escaped on its own (newlines spelled out), so
+    // none can start a line of the signer's own structure
+    format!(
+        "flock:  {flock}\nask:    {ask}\nlane:   {}\nasked:  {}\n---- answer (exactly as signed) ----\n{}\n----",
+        inert(lane.unwrap_or("-")),
+        inert(ask_text),
+        inert(text),
+    )
 }
 
 /// Check one request against the verified log, show it, and only on `y` and a

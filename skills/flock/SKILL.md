@@ -126,7 +126,7 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   any prompt**, shows flock, ask id and text (escaped), lane and the exact
   answer on `/dev/tty`, and only on `y` asks for the passphrase there (no env
   var, no flag), signs that one event id, drops the key, and admits it as-is.
-  There is no "sign these bytes" request and no blanket consent. An agent
+  Each untrusted field (ask text, lane, answer) is escaped on its own, so none can forge the signer's headings; the passphrase prompt turns echo off before it appears. `device-init` refuses an existing device directory that others can enter. The terminal paths are tested through the production binary on a pty. There is no "sign these bytes" request and no blanket consent. An agent
   never holds the key. **Limits:** the signer socket and files are `0600`,
   which keeps out other users, not a process of the same user that can read
   your terminal, ptrace the signer or replace the binary; the passphrase is
