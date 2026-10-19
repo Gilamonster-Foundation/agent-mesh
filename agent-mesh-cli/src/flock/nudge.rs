@@ -17,7 +17,7 @@ use agent_mesh_flock::text::inert;
 use agent_mesh_flock::{Member, Role};
 use anyhow::{anyhow, bail, Result};
 use content_addressable::ContentId;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 
@@ -48,14 +48,14 @@ impl Entry {
         })
     }
 
-    fn covers(&self, p: &Pane) -> bool {
+    /// Whether this entry covers `p`. A workspace is what herdr reports for
+    /// the pane; when it reports none, `unknown` is the answer (a deny rule
+    /// passes `true`, so what cannot be placed is treated as covered).
+    fn covers(&self, p: &Pane, unknown: bool) -> bool {
         match self {
             Self::Tab(t) => &p.tab_id == t,
             Self::Pane(i) => &p.pane_id == i,
-            // `w1:p2` lives in workspace `w1`
-            Self::Workspace(w) => [&p.pane_id, &p.tab_id]
-                .iter()
-                .any(|id| id.split_once(':').is_some_and(|(prefix, _)| prefix == w)),
+            Self::Workspace(w) => p.workspace_id.as_ref().map_or(unknown, |pw| pw == w),
         }
     }
 }
@@ -123,6 +123,8 @@ pub enum Refusal {
     Mapping(String),
     /// The pane this command runs in (the adapter's own).
     OwnPane,
+    /// A pane that is, or may be, the operator's or an adapter's.
+    Protected,
     Denied,
     NotAllowed,
     /// A pane id that is not safe to pass to herdr.
@@ -140,6 +142,7 @@ impl fmt::Display for Refusal {
             Self::ClaimGone(id) => write!(f, "its claimed pane {id} is gone"),
             Self::Mapping(why) => write!(f, "mapping: {why}"),
             Self::OwnPane => f.write_str("the adapter's own pane"),
+            Self::Protected => f.write_str("a protected pane (the operator's or an adapter's)"),
             Self::Denied => f.write_str("on the deny list"),
             Self::NotAllowed => f.write_str("not on the allow list"),
             Self::UnsafeId => f.write_str("a pane id that is not safe to pass"),
@@ -203,13 +206,39 @@ pub fn resolve<'p>(t: &Target<'p>, panes: &'p [Pane]) -> std::result::Result<&'p
     if pane.pane_id == own {
         return Err(Refusal::OwnPane);
     }
-    if t.scope.deny.iter().any(|e| e.covers(pane)) {
+    if protected(t, panes).contains(pane.pane_id.as_str()) {
+        return Err(Refusal::Protected);
+    }
+    if t.scope.deny.iter().any(|e| e.covers(pane, true)) {
         return Err(Refusal::Denied);
     }
-    if !t.scope.allow.is_empty() && !t.scope.allow.iter().any(|e| e.covers(pane)) {
+    if !t.scope.allow.is_empty() && !t.scope.allow.iter().any(|e| e.covers(pane, false)) {
         return Err(Refusal::NotAllowed);
     }
     Ok(pane)
+}
+
+/// Every pane that is, or might be, the operator's or an adapter's: each pane
+/// carrying their label, and each pane `--map` or their session's claim names,
+/// whether or not their own mapping came out unambiguous. `join` leaves an
+/// ambiguous member unplaced, which would free its candidates for someone else.
+fn protected<'p>(t: &'p Target<'_>, panes: &'p [Pane]) -> BTreeSet<&'p str> {
+    let mut out = BTreeSet::new();
+    for m in t
+        .roster
+        .iter()
+        .filter(|m| matches!(m.role, Role::Operator | Role::Adapter))
+    {
+        out.extend(
+            panes
+                .iter()
+                .filter(|p| p.label.as_deref() == Some(m.name.as_str()))
+                .map(|p| p.pane_id.as_str()),
+        );
+        out.extend(t.explicit.get(&m.name).map(String::as_str));
+        out.extend(t.claims.get(&m.name).map(String::as_str));
+    }
+    out
 }
 
 /// What a pane is, for noticing that it changed. Not its status: that changes
@@ -226,6 +255,27 @@ fn identity(p: &Pane, a: &Agent) -> Result<Identity> {
         "pane {} tab {} label {:?} agent {:?} name {:?} terminal {:?}",
         p.pane_id, p.tab_id, p.label, a.agent, a.name, a.terminal_id
     )))
+}
+
+/// The longest description a `nudge-misfire` may carry (the model's rule).
+const DESCRIPTION: usize = 128;
+
+/// `text` as a record field: inert, never empty, at most [`DESCRIPTION`]
+/// bytes, cut on a character boundary with an ellipsis. The full identity is
+/// kept for comparing; only what is emitted is bounded.
+fn describe(text: &str) -> String {
+    let text = inert(text);
+    if text.is_empty() {
+        return "?".to_owned();
+    }
+    if text.len() <= DESCRIPTION {
+        return text.into_owned();
+    }
+    let mut end = DESCRIPTION - '…'.len_utf8();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
 }
 
 /// What to do with the result; the caller emits it.
@@ -295,13 +345,13 @@ pub fn nudge<R: Runner>(h: &HerdrControl<R>, job: &Job<'_>) -> Outcome {
         },
         Ok((_, after, _)) => Outcome::Misfire {
             target: who.to_owned(),
-            expected: before.0,
-            found: after.0,
+            expected: describe(&before.0),
+            found: describe(&after.0),
         },
         Err(e) => Outcome::Misfire {
             target: who.to_owned(),
-            expected: before.0,
-            found: inert(&format!("unreadable: {e}")).into_owned(),
+            expected: describe(&before.0),
+            found: describe(&format!("unreadable: {e}")),
         },
     }
 }
@@ -316,6 +366,7 @@ mod tests {
     struct P {
         pane: &'static str,
         tab: &'static str,
+        ws: Option<&'static str>,
         label: Option<String>,
         kind: &'static str,
         name: Option<String>,
@@ -327,6 +378,7 @@ mod tests {
         P {
             pane,
             tab: "w1:t1",
+            ws: Some("w1"),
             label: Some(label.into()),
             kind: "newt",
             name: Some(label.into()),
@@ -340,6 +392,7 @@ mod tests {
         panes: Vec<P>,
         calls: Vec<Vec<String>>,
         fail: Vec<&'static str>, // "wait" | "prompt" | "get"
+        get_error: Option<String>,
     }
 
     type Hook = Box<dyn FnMut(&mut World)>;
@@ -397,9 +450,10 @@ mod tests {
                             .iter()
                             .map(|p| {
                                 format!(
-                                    r#"{{"pane_id":{},"tab_id":{},"label":{},"agent":{},"agent_status":{}}}"#,
+                                    r#"{{"pane_id":{},"tab_id":{},"workspace_id":{},"label":{},"agent":{},"agent_status":{}}}"#,
                                     q(p.pane),
                                     q(p.tab),
+                                    p.ws.map_or("null".into(), q),
                                     p.label.as_deref().map_or("null".into(), q),
                                     q(p.kind),
                                     q(p.status)
@@ -420,7 +474,10 @@ mod tests {
                                 q(p.pane),
                                 q(p.tab)
                             )),
-                            _ => Err(anyhow!("herdr agent get failed")),
+                            _ => Err(anyhow!(
+                                "{}",
+                                w.get_error.as_deref().unwrap_or("herdr agent get failed")
+                            )),
                         }
                     }
                     "agent wait" if fails("wait") => Err(anyhow!("timed out")),
@@ -812,6 +869,7 @@ mod tests {
         let pane = Pane {
             pane_id: "w1:p1".into(),
             tab_id: "w1:t1".into(),
+            workspace_id: None,
             label: None,
             agent: None,
             agent_session: None,
@@ -828,6 +886,248 @@ mod tests {
         assert!(identity(&pane, &agent("w1:p1", "w1:t1")).is_ok());
         assert!(identity(&pane, &agent("w1:p2", "w1:t1")).is_err());
         assert!(identity(&pane, &agent("w1:p1", "w1:t2")).is_err());
+    }
+
+    /// Admit `outcome` as a real `nudge-misfire` (or whatever it is) into a real
+    /// server's log, as the adapter's session would send it.
+    fn admitted(outcome: &Outcome) -> std::result::Result<(), String> {
+        use agent_mesh_flock_server::{init, InitSpec, Server};
+        use agent_mesh_protocol::{AgentKey, Assertion, UserKey};
+        use content_addressable::ContentAddressable as _;
+        use ed25519_dalek::{Signer as _, SigningKey};
+        let dir = tempfile::tempdir().unwrap();
+        let spec = InitSpec {
+            name: "t".into(),
+            roster: vec![
+                member("shep", Role::Shepherd),
+                member("h1", Role::Helper),
+                member("ad", Role::Adapter),
+            ],
+            salt: "s".into(),
+            host: "fixture".into(),
+            issued_at: "2026-10-15T00:00:00Z".into(),
+        };
+        init(dir.path(), &UserKey::generate(), spec).unwrap();
+        let mut server = Server::open(dir.path()).unwrap();
+        let mut enroll = |who: &str| {
+            let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+            let invite = server.invite(who).unwrap();
+            let ch = server
+                .enroll_begin(&invite.token, who, sk.verifying_key().to_bytes())
+                .unwrap();
+            let done = server
+                .enroll_finish(&ch, &sk.sign(&ch.signing_bytes()))
+                .unwrap();
+            AgentKey::from_seed_and_cert(&sk.to_bytes(), done.cert).unwrap()
+        };
+        let (shep, ad) = (enroll("shep"), enroll("ad"));
+        let mut send = |key: &AgentKey,
+                        kind: agent_mesh_flock::Kind,
+                        refs: BTreeMap<String, ContentId>,
+                        body: agent_mesh_flock::Body| {
+            let author = key.fingerprint().hex();
+            let node = agent_mesh_flock::Event {
+                flock: server.flock(),
+                kind,
+                prev: server.board().head_of(&author),
+                author,
+                refs,
+                files: vec![],
+                at: 0,
+                body,
+            }
+            .node();
+            let sig = Assertion::sign(key, &node.content_id().unwrap());
+            let id = node.content_id().unwrap();
+            server
+                .admit(node, sig)
+                .map(|_| id)
+                .map_err(|e| e.to_string())
+        };
+        let brief = send(
+            &shep,
+            agent_mesh_flock::Kind::Brief,
+            BTreeMap::new(),
+            agent_mesh_flock::Body::Brief {
+                to: "h1".into(),
+                lane: "l".into(),
+            },
+        )
+        .unwrap();
+        let cites = BTreeMap::from([("of".to_owned(), brief)]);
+        let (kind, body) = match outcome {
+            Outcome::Nudged { target } => (
+                agent_mesh_flock::Kind::Nudged,
+                agent_mesh_flock::Body::Nudged {
+                    target: target.clone(),
+                },
+            ),
+            Outcome::Misfire {
+                target,
+                expected,
+                found,
+            } => (
+                agent_mesh_flock::Kind::NudgeMisfire,
+                agent_mesh_flock::Body::NudgeMisfire {
+                    target: target.clone(),
+                    expected: expected.clone(),
+                    found: found.clone(),
+                },
+            ),
+            Outcome::Status(text) => (
+                agent_mesh_flock::Kind::Status,
+                agent_mesh_flock::Body::Status { text: text.clone() },
+            ),
+        };
+        let cites = if kind == agent_mesh_flock::Kind::Status {
+            BTreeMap::new()
+        } else {
+            cites
+        };
+        send(&ad, kind, cites, body).map(drop)
+    }
+
+    #[test]
+    fn a_misfire_the_model_would_refuse_is_never_produced() {
+        // a misfire is admissible at all with ordinary fields (the fixture works)
+        let f = Fake::new(world());
+        f.after("agent get", 2, |w| w.panes[1].kind = "claude");
+        let o = Ctx::new().run(&f);
+        assert!(matches!(o, Outcome::Misfire { .. }));
+        admitted(&o).unwrap();
+
+        for name in [
+            "n".repeat(129),
+            "é".repeat(100),          // 200 bytes, a multibyte char at every boundary
+            "x\u{1b}[31m".repeat(40), // control characters, long
+            "日本語".repeat(30),
+        ] {
+            // changed before the prompt's re-read: expected is the long one
+            let mut w = world();
+            w[1].name = Some(name.clone());
+            let f = Fake::new(w);
+            f.after("agent get", 2, |w| w.panes[1].kind = "claude");
+            let o = Ctx::new().run(&f);
+            let Outcome::Misfire {
+                expected, found, ..
+            } = &o
+            else {
+                panic!("{o:?}")
+            };
+            for d in [expected, found] {
+                assert!(!d.is_empty() && d.len() <= 128, "{} bytes", d.len());
+                assert!(!d.chars().any(char::is_control), "{d:?}");
+            }
+            admitted(&o).unwrap_or_else(|e| panic!("admission refused {name:?}: {e}"));
+        }
+        // the unreadable path with a long error
+        let f = Fake::new(world());
+        f.w.borrow_mut().get_error = Some("e".repeat(500));
+        f.after("agent prompt", 1, |w| w.fail.push("get"));
+        let o = Ctx::new().run(&f);
+        let Outcome::Misfire { found, .. } = &o else {
+            panic!("{o:?}")
+        };
+        assert!(
+            found.starts_with("unreadable") && found.len() <= 128,
+            "{found}"
+        );
+        admitted(&o).unwrap();
+        // and what the sequence says by way of status is admissible too
+        let f = Fake::new(world());
+        f.failing("wait");
+        f.w.borrow_mut().get_error = None;
+        admitted(&Ctx::new().run(&f)).unwrap();
+    }
+
+    #[test]
+    fn a_protected_members_candidate_panes_stay_protected_when_its_own_mapping_is_ambiguous() {
+        let two_ops = || {
+            let mut w = world();
+            w.push(p("w1:p8", "op")); // two panes carry the operator's label
+            w
+        };
+        // a helper --mapped onto one candidate
+        let mut c = Ctx::new();
+        c.explicit.insert("h1".into(), "w1:p9".into());
+        refused(&c, &Fake::new(two_ops()), "protected");
+        // a helper's session claims one
+        let mut c = Ctx::new();
+        c.claims.insert("h1".into(), "w1:p8".into());
+        refused(&c, &Fake::new(two_ops()), "protected");
+        // the same for the adapter: its label on a second pane
+        let mut w = world();
+        w.push(p("w1:p7", "ad"));
+        let mut c = Ctx::new();
+        c.explicit.insert("h1".into(), "w1:p7".into());
+        refused(&c, &Fake::new(w), "protected");
+        // the operator's pane named by --map or a claim, with no label at all
+        let mut c = Ctx::new();
+        c.explicit.insert("op".into(), "w1:p6".into());
+        c.explicit.insert("h1".into(), "w1:p6".into());
+        let mut w = world();
+        w.push(p("w1:p6", "other"));
+        refused(&c, &Fake::new(w), "ambiguous");
+        let mut c = Ctx::new();
+        c.claims.insert("op".into(), "w1:p6".into());
+        c.explicit.insert("h1".into(), "w1:p6".into());
+        let mut w = world();
+        w.push(p("w1:p6", "other"));
+        refused(&c, &Fake::new(w), "ambiguous");
+    }
+
+    #[test]
+    fn a_workspace_rule_uses_the_workspace_herdr_reports_and_fails_closed_without_it() {
+        let ws = |w: Option<&'static str>| {
+            let mut v = world();
+            v[1].ws = w;
+            v
+        };
+        let rule = |w: &str| Scope {
+            deny: vec![Entry::Workspace(w.into())],
+            allow: vec![],
+        };
+        // reported and equal: denied, whatever the pane id looks like
+        let mut c = Ctx::new();
+        c.scope = rule("w1");
+        refused(&c, &Fake::new(ws(Some("w1"))), "deny list");
+        // reported and different: allowed
+        c.scope = rule("w2");
+        assert!(matches!(
+            c.run(&Fake::new(ws(Some("w1")))),
+            Outcome::Nudged { .. }
+        ));
+        // a pane id that merely starts with the denied workspace, in another one
+        let mut w = world();
+        w[1].ws = Some("w7");
+        c.scope = rule("w1");
+        assert!(matches!(c.run(&Fake::new(w)), Outcome::Nudged { .. }));
+        // not reported: a workspace deny cannot be decided, so it denies
+        refused(&c, &Fake::new(ws(None)), "deny list");
+        // and an allow list for a workspace does not admit an unreported one
+        c.scope = Scope {
+            deny: vec![],
+            allow: vec![Entry::Workspace("w1".into())],
+        };
+        refused(&c, &Fake::new(ws(None)), "allow list");
+        // a tab or pane rule does not need the workspace
+        c.scope = Scope {
+            deny: vec![Entry::Tab("w1:t2".into())],
+            allow: vec![],
+        };
+        assert!(matches!(
+            c.run(&Fake::new(ws(None))),
+            Outcome::Nudged { .. }
+        ));
+    }
+
+    #[test]
+    fn a_pane_whose_tab_id_is_not_safe_is_refused_before_anything_runs() {
+        for bad in ["--evil", "-t", "w1 t1", "w1:t1;x"] {
+            let mut w = world();
+            w[1].tab = bad;
+            refused(&Ctx::new(), &Fake::new(w), "not safe");
+        }
     }
 
     #[test]
