@@ -103,6 +103,17 @@ impl Fixture {
         body: Body,
         files: Vec<agent_mesh_flock::FileRef>,
     ) -> ContentId {
+        // admission refuses a citation of a root the roster does not declare,
+        // so the server declares what a fixture cites
+        let mut roots = self.server.board().roots().to_vec();
+        for f in &files {
+            if !roots.contains(&f.root) {
+                roots.push(f.root.clone());
+            }
+        }
+        if roots.len() != self.server.board().roots().len() {
+            self.server.set_roots(roots).unwrap();
+        }
         self.at += 1;
         let node = Event {
             flock: self.server.flock(),

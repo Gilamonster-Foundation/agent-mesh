@@ -71,6 +71,8 @@ pub enum Refusal {
     RootsLocked,
     /// A root name that is empty, too long, not plain, or declared twice.
     BadRoot,
+    /// A cited file whose root the roster does not declare.
+    UndeclaredRoot,
     /// A claim (pane, tab) that is empty, too long or not printable.
     BadClaim,
     /// A `job-end` that does not say exactly one of an exit code and a signal.
@@ -131,6 +133,9 @@ fn decide(board: &Board, node: &MerkleNode<Event>, signer: &Signer) -> Result<Ve
     if let Body::Roster { members, roots } = &ev.body {
         check_devices(board, members, signer)?;
         check_roots(board, roots, signer)?;
+    }
+    if ev.files.iter().any(|f| !board.roots().contains(&f.root)) {
+        return Err(Refusal::UndeclaredRoot);
     }
     writer_chain(board, ev, signer)?;
     let target = check_refs(board, ev)?;

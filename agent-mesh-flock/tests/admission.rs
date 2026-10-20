@@ -758,3 +758,59 @@ fn neither_a_nudge_nor_a_misfire_closes_or_answers_anything() {
         Verdict::Admit
     );
 }
+
+fn brief_citing(fx: &mut Fx, root: &str) -> agent_mesh_flock::Event {
+    let mut ev = fx.event(
+        "shep",
+        Kind::Brief,
+        Body::Brief {
+            to: "h1".into(),
+            lane: "a".into(),
+        },
+        &[],
+    );
+    ev.files = vec![agent_mesh_flock::FileRef {
+        root: root.into(),
+        path: "a.md".into(),
+        id: content_addressable::RawContentId::from_content(b"x"),
+    }];
+    ev
+}
+
+/// Admission refuses a cited file whose root the roster (at that index) does
+/// not declare, and replay of such a log refuses it the same way.
+#[test]
+fn a_cited_root_must_be_declared_by_the_roster_at_that_index() {
+    let mut fx = Fx::new();
+    let undeclared = brief_citing(&mut fx, "notes").node();
+    let shep = fx.signer("shep", false);
+    assert_eq!(
+        agent_mesh_flock::admit(&fx.board, &undeclared, &shep),
+        Verdict::Refuse(Refusal::UndeclaredRoot)
+    );
+    // replay: the same event offered to a fresh board is refused by apply
+    let mut replay = fx.board.clone();
+    let entry = agent_mesh_flock::LogEntry {
+        node: undeclared,
+        signer: shep.clone(),
+    };
+    assert_eq!(
+        replay.apply(&entry),
+        Verdict::Refuse(Refusal::UndeclaredRoot)
+    );
+    // declared by the server's roster, the same citation is admitted ...
+    let genesis = fx.flock;
+    let with = roster_with_roots(&fx, &["notes"]);
+    fx.emit("server", Kind::Roster, with, &[("replaces", genesis)]);
+    let declared = brief_citing(&mut fx, "notes").node();
+    assert_eq!(
+        agent_mesh_flock::admit(&fx.board, &declared, &fx.signer("shep", false)),
+        Verdict::Admit
+    );
+    // ... and a different undeclared root is still refused
+    let other = brief_citing(&mut fx, "other").node();
+    assert_eq!(
+        agent_mesh_flock::admit(&fx.board, &other, &fx.signer("shep", false)),
+        Verdict::Refuse(Refusal::UndeclaredRoot)
+    );
+}

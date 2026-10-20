@@ -26,7 +26,7 @@ pub enum ReaderError {
     /// A live process holds `reader.lock` in this state directory. A file
     /// left behind by an interrupted save is not a holder and does not cause
     /// this.
-    #[error("another process holds the lock on this reader state directory (reader.lock)")]
+    #[error("the lock on this reader state directory is already held (reader.lock)")]
     Locked,
     /// The server's history is not an extension of the saved head: shorter,
     /// rewritten, or with an altered prefix. Never resynchronized silently.
@@ -48,4 +48,17 @@ pub enum ReaderError {
     /// Wire or encoding error.
     #[error("{0}")]
     Wire(#[from] agent_mesh_flock_server::ServerError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReaderError;
+
+    #[test]
+    fn the_locked_message_names_the_lock_and_the_file() {
+        assert_eq!(
+            ReaderError::Locked.to_string(),
+            "the lock on this reader state directory is already held (reader.lock)"
+        );
+    }
 }
