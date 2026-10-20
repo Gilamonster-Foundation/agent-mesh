@@ -198,6 +198,7 @@ fn a_bad_cite_is_refused_before_anything_is_sent() {
             vec!["--cite", "notes:pipe", "--root", &m],
             "not a regular file",
         ),
+        (vec!["--cite", "notes:big", "--root", &m], "too big"),
         // one bad cite among good ones sends nothing
         (
             vec![
