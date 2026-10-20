@@ -23,8 +23,10 @@ pub enum SessionError {
 /// Why reading a flock failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ReaderError {
-    /// Another reader holds this state directory.
-    #[error("another reader holds this state directory")]
+    /// A live process holds `reader.lock` in this state directory. A file
+    /// left behind by an interrupted save is not a holder and does not cause
+    /// this.
+    #[error("another process holds the lock on this reader state directory (reader.lock)")]
     Locked,
     /// The server's history is not an extension of the saved head: shorter,
     /// rewritten, or with an altered prefix. Never resynchronized silently.
