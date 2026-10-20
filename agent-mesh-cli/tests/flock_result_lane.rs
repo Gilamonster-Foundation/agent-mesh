@@ -99,6 +99,8 @@ fn the_lane_cases_that_cannot_work_are_refused_with_the_reason() {
         &["result", "--lane", "l1", "--outcome", "completed"],
     );
     assert!(!o.status.success(), "h1 closed h2's brief?");
+    // the CLI's own answer: h1 has nothing open there (not an admission refusal)
+    assert!(err(&o).contains("no open brief"), "{}", err(&o));
     assert!(!err(&o).contains(&other), "{}", err(&o));
     // several open: named, not guessed
     let (x, y) = (
