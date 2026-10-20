@@ -73,6 +73,8 @@ pub enum Reason {
     RootsLocked,
     /// A root name that is empty, too long, not plain, or declared twice.
     BadRoot,
+    /// A cited file whose root the roster does not declare.
+    UndeclaredRoot,
     /// A pane or tab claim that is empty, too long or not printable.
     BadClaim,
     /// A `job-end` that does not say exactly one of an exit code and a signal.
@@ -110,6 +112,7 @@ impl From<&Refusal> for Reason {
             Refusal::DuplicateMember => Self::DuplicateMember,
             Refusal::RootsLocked => Self::RootsLocked,
             Refusal::BadRoot => Self::BadRoot,
+            Refusal::UndeclaredRoot => Self::UndeclaredRoot,
             Refusal::BadClaim => Self::BadClaim,
             Refusal::BadExit => Self::BadExit,
         }
