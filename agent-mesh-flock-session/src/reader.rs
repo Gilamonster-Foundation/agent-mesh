@@ -61,6 +61,12 @@ impl<F: Fs> Reader<F> {
                 ReaderError::Io(e)
             }
         })?;
+        // Holding the lock, no one else is saving: a leftover temporary file is
+        // a save that was interrupted before its rename, so its head was never
+        // witnessed. Drop it; the saved state is the last durable one. Best
+        // effort: if it cannot go (a directory sits there), the next save says
+        // so as `Save`, which is the accurate error.
+        let _ = fs.remove(&dir.join(format!("{FILE}.tmp")));
         let mut follower = Follower::new(&genesis)?;
         let frames = match fs.read(&dir.join(FILE))? {
             None => vec![],

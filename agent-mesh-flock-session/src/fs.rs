@@ -32,6 +32,11 @@ pub trait Fs {
     /// # Errors
     /// I/O, or `WouldBlock` when another holder has it.
     fn lock_dir(&self, dir: &Path) -> io::Result<Box<dyn std::any::Any + Send>>;
+    /// Remove `path`; absent is not an error.
+    ///
+    /// # Errors
+    /// I/O other than absence.
+    fn remove(&self, path: &Path) -> io::Result<()>;
     /// Read `path`, `None` if absent.
     ///
     /// # Errors
@@ -65,6 +70,12 @@ impl Fs for RealFs {
         flock(&f, FlockOperation::NonBlockingLockExclusive)
             .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))?;
         Ok(Box::new(f))
+    }
+    fn remove(&self, path: &Path) -> io::Result<()> {
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
     }
     fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
         match std::fs::read(path) {

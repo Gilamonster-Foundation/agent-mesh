@@ -305,7 +305,7 @@ Built (plan steps 1–4, 4c read-only herdr view, 4d operator devices):
   (open/recovery and the follower) refuse a log where it is not. Adding members or
   changing devices or roles needs no bump. A request whose frame would not fit one
   stream message is refused (`TooLarge`) before it is committed, so every
-  admitted frame can be watched. One reader per state directory (locked). Ceilings: the journal is in memory; the reader rewrites its
+  admitted frame can be watched. One reader per state directory (`reader.lock`; a refused second reader says so). Opening, under the lock, removes a leftover `reader.state.tmp` from an interrupted save (never renamed, so never witnessed); it is not another reader. Ceilings: the journal is in memory; the reader rewrites its
   whole file per save.
 
 - **the CLI, first half (step 7a)**, Unix only, every write through a session
