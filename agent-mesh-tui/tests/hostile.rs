@@ -47,7 +47,7 @@ fn hostile(payload: &str) -> (Fixture, Model) {
             text: format!("ask{payload}"),
         },
     );
-    // a lane's result cites a file with hostile root and path, and a review's
+    // a lane's result cites a file with a hostile path (a root is a plain name, which admission enforces), and a review's
     // head is whatever the shepherd wrote
     f.emit_files(
         &h1,
@@ -57,7 +57,7 @@ fn hostile(payload: &str) -> (Fixture, Model) {
             outcome: agent_mesh_flock::Outcome::Completed,
         },
         vec![FileRef {
-            root: format!("root{payload}"),
+            root: "root".into(),
             path: format!("path{payload}"),
             id: RawContentId::from_content(b"x"),
         }],
@@ -89,7 +89,7 @@ fn hostile(payload: &str) -> (Fixture, Model) {
             text: format!("status{payload}"),
         },
         vec![FileRef {
-            root: format!("root{payload}"),
+            root: "root".into(),
             path: format!("path{payload}"),
             id: RawContentId::from_content(b"x"),
         }],

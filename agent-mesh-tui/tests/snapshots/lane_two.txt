@@ -1,12 +1,12 @@
 amesh-tui · flock fx · id ············ · 7 members
-log ✓ 15 · epoch 0 · live
+log ✓ 16 · epoch 0 · live
  Board   Stream  [Lane]  Waiting
   LANE       LATEST                             OLDER  FILES
-  l1         #13 submitted, job open            1      ✓⚠????
-▸ l2         #15 submitted                      0
+  l1         #14 submitted, job open            1      ✓⚠????
+▸ l2         #16 submitted                      0
 
 lane l2
-  latest  #15 submitted
+  latest  #16 submitted
   files   (none cited)
 
 
