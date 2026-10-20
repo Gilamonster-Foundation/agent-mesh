@@ -121,6 +121,7 @@ dependencies = [
  "agent-mesh-protocol",
  "agent-mesh-transport",
  "agent-mesh-transport-ssh",
+ "agent-mesh-tui",
  "anyhow",
  "assert_cmd",
  "chrono",

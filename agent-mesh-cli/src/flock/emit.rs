@@ -26,6 +26,28 @@ pub fn emit(home: &Path, w: &Where, kind: Kind, refs: &[(&str, &str)], body: Bod
     Ok(())
 }
 
+/// [`emit`] for a brief or review that cites files (`--cite root:path`).
+/// Nothing is sent if any cite is refused.
+pub fn emit_citing(
+    home: &Path,
+    w: &Where,
+    kind: Kind,
+    cites: &super::Cites,
+    body: Body,
+) -> Result<()> {
+    let files = if cites.files.is_empty() {
+        Vec::new()
+    } else {
+        let mapped = super::unix::parse_roots(&cites.roots)?;
+        let declared = super::cite::declared_roots(&w.dir(home)?)?;
+        super::cite::resolve(&cites.files, &declared, &mapped)?
+    };
+    let (socket, _) = w.session(home)?;
+    let (event, index) = send_files(&socket, kind, BTreeMap::new(), files, body)?;
+    println!("admitted {event} at {index}");
+    Ok(())
+}
+
 /// One `Emit` to the session; the line that says what was admitted. The MCP
 /// `flock_emit` tool goes through here too, so both carry the same rules.
 pub fn send(
@@ -48,7 +70,24 @@ pub fn send_via(
     refs: BTreeMap<String, ContentId>,
     body: Body,
 ) -> Result<(ContentId, u64)> {
-    match call(socket, &CtlReq::Emit { kind, refs, body })? {
+    send_files(socket, kind, refs, Vec::new(), body)
+}
+
+/// [`send_via`], citing `files`.
+pub fn send_files(
+    socket: &Path,
+    kind: Kind,
+    refs: BTreeMap<String, ContentId>,
+    files: Vec<agent_mesh_flock::FileRef>,
+    body: Body,
+) -> Result<(ContentId, u64)> {
+    let req = CtlReq::Emit {
+        kind,
+        refs,
+        body,
+        files,
+    };
+    match call(socket, &req)? {
         CtlResp::Admitted { event, index } => Ok((event, index)),
         _ => bail!("the session answered something else"),
     }

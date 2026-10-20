@@ -3,7 +3,7 @@
 
 use crate::SessionError;
 #[cfg(feature = "emit")]
-use agent_mesh_flock::{Body, Kind};
+use agent_mesh_flock::{Body, FileRef, Kind};
 use agent_mesh_flock_server::wire::{read_msg, write_msg, StreamChallenge};
 use agent_mesh_protocol::Assertion;
 use content_addressable::ContentId;
@@ -28,6 +28,9 @@ pub enum CtlReq {
         refs: BTreeMap<String, ContentId>,
         /// The body.
         body: Body,
+        /// Files the event cites (root, path and the id of the bytes).
+        #[serde(default)]
+        files: Vec<FileRef>,
     },
     /// Tell the log which herdr pane this session was started in. The claim
     /// comes from the session's own environment, never from the caller.

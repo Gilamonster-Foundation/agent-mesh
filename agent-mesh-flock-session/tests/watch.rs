@@ -577,6 +577,10 @@ mod power {
             m.locked = true;
             Ok(Box::new(Guard(self.0.clone())))
         }
+        fn remove(&self, p: &Path) -> io::Result<()> {
+            self.0.lock().unwrap().names.remove(p);
+            Ok(())
+        }
         fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
             let m = self.0.lock().unwrap();
             Ok(m.names.get(p).map(|i| m.inodes[*i].0.clone()))
@@ -766,6 +770,46 @@ fn a_second_reader_on_one_state_directory_is_refused_until_the_first_is_gone() {
         Reader::open(r.genesis(), dir.path(), RealFs),
         Err(ReaderError::Locked)
     ));
+    drop(first);
+    Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
+}
+
+/// A reader killed mid-save leaves `reader.state.tmp` (live: a TUI killed
+/// while saving). Nobody holds `reader.lock`, so the next open must succeed
+/// on the last durable state, and a real second reader must still be refused
+/// with an accurate message.
+#[test]
+fn a_leftover_save_tmp_is_not_another_reader_and_a_real_one_is_refused_accurately() {
+    let mut r = rig();
+    let mut shep = r.enrol("shep");
+    r.brief(&mut shep, "a0");
+    let dir = TempDir::new().unwrap();
+    let mut reader = Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
+    reader.sync(&r.sock, &key_prover(&shep.key)).unwrap();
+    let durable = reader.follower().admitted();
+    drop(reader);
+    // an interrupted save: a truncated, never-renamed file
+    let tmp = dir.path().join("reader.state.tmp");
+    let saved = std::fs::read(dir.path().join("reader.state")).unwrap();
+    std::fs::write(&tmp, &saved[..saved.len() / 2]).unwrap();
+
+    let first = Reader::open(r.genesis(), dir.path(), RealFs)
+        .unwrap_or_else(|e| panic!("a leftover tmp refused the reader: {e}"));
+    assert_eq!(
+        first.follower().admitted(),
+        durable,
+        "the last durable state"
+    );
+    assert!(!tmp.exists(), "the leftover was never witnessed: removed");
+
+    // the live holder's save in flight: a refused open must not remove it
+    std::fs::write(&tmp, b"in flight").unwrap();
+    let Err(e) = Reader::open(r.genesis(), dir.path(), RealFs) else {
+        panic!("a second reader opened")
+    };
+    assert!(tmp.exists(), "a refused open removed the holder's tmp");
+    assert!(matches!(e, ReaderError::Locked));
+    assert!(e.to_string().contains("reader.lock"), "{e}");
     drop(first);
     Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
 }
