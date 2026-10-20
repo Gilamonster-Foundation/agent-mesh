@@ -4,8 +4,9 @@
 //!
 //! herdr has no "prompt only if idle", and a pane's occupant can change
 //! between any two calls, so the sequence is a best effort that records what
-//! it saw: it identifies the pane, waits for idle, identifies it again and
-//! stops if anything moved, prompts by pane id, and looks once more. If the
+//! it saw: it identifies the pane, waits for it to settle (idle, done or
+//! blocked), identifies it again and stops if anything moved or it is not
+//! idle or done, prompts by pane id, and looks once more. If the
 //! occupant changed across the prompt, the text may have gone to the wrong
 //! agent, and the outcome is a misfire record rather than a nudge. The window
 //! between the last look and the prompt remains; the prompt text is harmless
@@ -298,7 +299,7 @@ pub struct Job<'a> {
     pub target: Target<'a>,
     /// The brief or review.
     pub of: &'a ContentId,
-    /// How long to wait for idle before giving up, in milliseconds.
+    /// How long to wait for it to settle before giving up, in milliseconds.
     pub wait_ms: u64,
 }
 
@@ -320,8 +321,8 @@ pub fn nudge<R: Runner>(h: &HerdrControl<R>, job: &Job<'_>) -> Outcome {
         Ok(seen) => seen,
         Err(e) => return stop(e.to_string()),
     };
-    if let Err(e) = h.wait_idle(&pane, job.wait_ms) {
-        return stop(format!("did not become idle: {e}"));
+    if let Err(e) = h.wait_settled(&pane, job.wait_ms) {
+        return stop(format!("did not settle: {e}"));
     }
     match observe(h, &job.target) {
         Err(e) => return stop(format!("changed while waiting: {e}")),
@@ -329,8 +330,11 @@ pub fn nudge<R: Runner>(h: &HerdrControl<R>, job: &Job<'_>) -> Outcome {
             if p != pane || now != before {
                 return stop("the pane changed while waiting".into());
             }
-            if agent.agent_status != "idle" {
-                return stop(format!("no longer idle ({})", agent.agent_status));
+            // `done` is an agent that finished its turn: as ready as `idle`
+            match agent.agent_status.as_str() {
+                "idle" | "done" => {}
+                "blocked" => return stop("blocked: it is waiting on someone".into()),
+                other => return stop(format!("no longer settled ({other})")),
             }
         }
     }
@@ -580,7 +584,7 @@ mod tests {
         for c in &f.w.borrow().calls {
             match c.iter().map(String::as_str).collect::<Vec<_>>()[..] {
                 ["pane", "list"] | ["agent", "get", _] => {}
-                ["agent", "wait", _, "--until", "idle", "--timeout", _] => {}
+                ["agent", "wait", _, "--timeout", _] => {}
                 ["agent", "prompt", _, text] => {
                     assert_eq!(text, format!("amesh flock take {}", cid()));
                 }
@@ -667,8 +671,45 @@ mod tests {
         let f = Fake::new(world());
         f.after("agent wait", 1, |w| w.panes[1].status = "working");
         let o = Ctx::new().run(&f);
-        assert!(status(&o).contains("no longer idle"), "{o:?}");
+        assert!(status(&o).contains("no longer settled"), "{o:?}");
         assert_eq!(f.count("agent prompt"), 0);
+    }
+
+    #[test]
+    fn a_pane_that_finished_its_turn_is_ready_and_prompted() {
+        // live: a pi pane that finished its turn reports `done`, never `idle`
+        let mut w = world();
+        w[1].status = "done";
+        let f = Fake::new(w);
+        let o = Ctx::new().run(&f);
+        assert_eq!(
+            o,
+            Outcome::Nudged {
+                target: "h1".into()
+            }
+        );
+        assert_eq!(f.count("agent prompt"), 1);
+        audit(&f);
+    }
+
+    #[test]
+    fn a_blocked_pane_is_a_status_and_not_prompted() {
+        let mut w = world();
+        w[1].status = "blocked";
+        let f = Fake::new(w);
+        let o = Ctx::new().run(&f);
+        assert!(status(&o).contains("blocked"), "{o:?}");
+        assert_eq!(f.count("agent prompt"), 0);
+        audit(&f);
+    }
+
+    #[test]
+    fn the_wait_names_no_target_state_so_herdr_settles_on_idle_done_or_blocked() {
+        let f = Fake::new(world());
+        Ctx::new().run(&f);
+        let calls = f.calls();
+        let w = calls.iter().find(|c| c.starts_with("agent wait")).unwrap();
+        assert!(!w.contains("--until"), "{w}");
     }
 
     #[test]
@@ -676,7 +717,7 @@ mod tests {
         let f = Fake::new(world());
         f.failing("wait");
         let o = Ctx::new().run(&f);
-        assert!(status(&o).contains("did not become idle"), "{o:?}");
+        assert!(status(&o).contains("did not settle"), "{o:?}");
         assert_eq!(f.count("agent prompt"), 0);
         assert_eq!(f.count("agent wait"), 1, "no retry");
     }

@@ -280,7 +280,7 @@ shows as `completed, job open`.
   `watch`, `answer`. It always goes through the session process.
   - `take` verifies the event, re-hashes its file, and emits the `ack`.
   - `run` wraps a job: a wrapper that dies leaves the `job` open.
-- **herdr nudge:** `agent wait --until idle`, then `agent prompt
+- **herdr nudge:** `agent wait` (settles on idle, done or blocked; prompts on idle or done), then `agent prompt
   "amesh flock take <cid>"`, then emit `nudged`.
   - herdr can't prompt only-if-still-idle, so the adapter re-reads the target
     afterwards and emits `nudge-misfire` if it changed.
