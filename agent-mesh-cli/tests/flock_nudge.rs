@@ -382,6 +382,7 @@ fn set_role(f: &Flock, shep: &Sess, who: &str, role: Role) {
     let r = call(
         &shep.sock,
         &CtlReq::Emit {
+            files: Vec::new(),
             kind: Kind::Roster,
             refs,
             body,

@@ -11,12 +11,11 @@ use agent_mesh_flock_server::Beneath;
 use agent_mesh_flock_session::{session_prover, Files};
 use content_addressable::RawContentId;
 use std::collections::BTreeMap;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 /// The most bytes read from one file. A bigger file is `?`, not a prefix hash
 /// that would claim something about bytes never read.
-pub const MAX_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_BYTES: u64 = agent_mesh_flock_server::MAX_CITED_BYTES;
 
 /// Root names mapped to directories on this host.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -114,23 +113,10 @@ pub fn check_with(roots: &Roots, f: &FileRef, after_root: &mut dyn FnMut()) -> F
     })
 }
 
-/// Hash what `file` (already opened beneath the root) holds.
+/// Hash what `file` (already opened beneath the root) holds: the same rule the
+/// citer used (`agent_mesh_flock_server::file_id`).
 fn read_id(file: std::fs::File) -> Result<RawContentId, String> {
-    let meta = file.metadata().map_err(|e| format!("cannot stat: {e}"))?;
-    if !meta.is_file() {
-        return Err("not a regular file".to_owned());
-    }
-    if meta.len() > MAX_BYTES {
-        return Err("file too big to check".to_owned());
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("cannot read: {e}"))?;
-    if bytes.len() as u64 > MAX_BYTES {
-        return Err("file too big to check".to_owned());
-    }
-    Ok(RawContentId::from_content(&bytes))
+    agent_mesh_flock_server::file_id(file)
 }
 
 /// Where to ask for the roots this host does not map: the flock's server

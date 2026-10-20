@@ -57,6 +57,8 @@ assert_cmd.workspace = true
 predicates.workspace = true
 wiremock.workspace = true
 agent-mesh-transport-ssh.workspace = true
+# The TUI's own check of a cited file, to prove the CLI cites what it checks.
+agent-mesh-tui = { path = "../agent-mesh-tui" }
 ed25519-dalek.workspace = true
 
 [lints]

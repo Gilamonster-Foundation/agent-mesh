@@ -62,6 +62,7 @@ fn world() -> World {
     call(
         &adapter.sock,
         &CtlReq::Emit {
+            files: Vec::new(),
             kind: Kind::Status,
             refs,
             body: Body::Status {
@@ -89,6 +90,7 @@ fn world() -> World {
         call(
             &adapter.sock,
             &CtlReq::Emit {
+                files: Vec::new(),
                 kind,
                 refs: BTreeMap::new(),
                 body,
