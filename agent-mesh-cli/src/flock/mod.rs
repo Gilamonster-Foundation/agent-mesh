@@ -12,6 +12,8 @@ use rand::RngCore;
 use std::path::PathBuf;
 
 #[cfg(unix)]
+mod close;
+#[cfg(unix)]
 mod discover;
 #[cfg(unix)]
 mod emit;
@@ -198,8 +200,13 @@ pub enum FlockCommand {
     Result {
         #[command(flatten)]
         at: Where,
-        /// The brief's content id.
-        brief: String,
+        /// The brief's content id (or use `--lane`).
+        #[arg(required_unless_present = "lane")]
+        brief: Option<String>,
+        /// Close this member's open brief in this lane instead of naming it.
+        /// Refused when there is none or several.
+        #[arg(long, conflicts_with = "brief")]
+        lane: Option<String>,
         /// `completed` or `failed`.
         #[arg(long)]
         outcome: String,
@@ -209,8 +216,13 @@ pub enum FlockCommand {
     Verdict {
         #[command(flatten)]
         at: Where,
-        /// The review's content id.
-        review: String,
+        /// The review's content id (or use `--lane`).
+        #[arg(required_unless_present = "lane")]
+        review: Option<String>,
+        /// Close this member's open review in this lane instead of naming it.
+        /// Refused when there is none or several.
+        #[arg(long, conflicts_with = "review")]
+        lane: Option<String>,
         /// The head the review named.
         #[arg(long)]
         head: String,
@@ -380,8 +392,20 @@ pub async fn run(home: PathBuf, cmd: FlockCommand) -> Result<()> {
             emit::emit(&home, &at, Kind::Ack, &[("of", &cid)], Body::Ack)
         }
         #[cfg(unix)]
-        FlockCommand::Result { at, brief, outcome } => {
+        FlockCommand::Result {
+            at,
+            brief,
+            lane,
+            outcome,
+        } => {
             let outcome = emit::parse_outcome(&outcome)?;
+            let brief = close::pick(
+                &home,
+                &at,
+                close::Closing::Brief,
+                brief.as_deref(),
+                lane.as_deref(),
+            )?;
             emit::emit(
                 &home,
                 &at,
@@ -394,6 +418,7 @@ pub async fn run(home: PathBuf, cmd: FlockCommand) -> Result<()> {
         FlockCommand::Verdict {
             at,
             review,
+            lane,
             head,
             approve,
             reject,
@@ -401,6 +426,13 @@ pub async fn run(home: PathBuf, cmd: FlockCommand) -> Result<()> {
             if approve == reject {
                 return Err(anyhow!("say exactly one of --approve or --reject"));
             }
+            let review = close::pick(
+                &home,
+                &at,
+                close::Closing::Review,
+                review.as_deref(),
+                lane.as_deref(),
+            )?;
             emit::emit(
                 &home,
                 &at,
