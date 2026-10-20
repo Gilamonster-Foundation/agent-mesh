@@ -2,15 +2,16 @@
 //! target that is already closed is admitted as a conflict that closes
 //! nothing, and the lane stays open: correct, but easy to do by accident on a
 //! fix round, when a lane has an old closed brief and a new open one. So the
-//! CLI resolves the target from the verified log instead of trusting the id it
+//! CLI resolves the target from the verified log (the stream, so also from an attached flock) instead of trusting the id it
 //! was handed, and refuses (before sending anything) the one that cannot work.
 
 use super::discover::Where;
 use agent_mesh_flock::text::inert;
 use agent_mesh_flock::{Board, Body, Entry, Kind};
-use agent_mesh_flock_server::Snapshot;
+use agent_mesh_flock_server::private_dir;
+use agent_mesh_flock_session::{session_prover, Reader, RealFs, Seen};
 use anyhow::{anyhow, bail, Context, Result};
-use content_addressable::ContentId;
+use content_addressable::{ContentAddressable as _, ContentId, MerkleNode};
 use std::path::{Path, PathBuf};
 
 /// What is being closed.
@@ -59,6 +60,39 @@ fn flock_dir(home: &Path, w: &Where, socket: &Path) -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("say which flock: --dir <path> or --name <flock>"))
 }
 
+/// The board as the verified stream shows it, caught up: the same path
+/// `watch` takes, so it works on an attached flock directory (a pinned genesis
+/// and a proxy socket, no local log) as at home. The reader keeps its own
+/// state under `<dir>/close/`, apart from `watch`'s.
+fn verified_board(dir: &Path, socket: &Path, member: &str) -> Result<Board> {
+    let genesis = agent_mesh_flock_server::load_genesis(dir)
+        .map_err(|e| anyhow!("read the genesis in {}: {e}", dir.display()))?
+        .node;
+    let id = MerkleNode::genesis(member.to_owned())
+        .content_id()
+        .map_err(|e| anyhow!("name the reader directory: {e}"))?;
+    let base = dir.join("close");
+    let state = base.join(id.to_string());
+    for d in [&base, &state] {
+        private_dir(d).with_context(|| format!("reader directory {}", d.display()))?;
+    }
+    let mut reader = Reader::open(genesis, &state, RealFs).map_err(|e| anyhow!("{e}"))?;
+    let mut board = None;
+    reader
+        .follow(
+            &dir.join("run").join("serve.sock"),
+            &session_prover(socket),
+            true,
+            &mut |seen| {
+                if let Seen::Caught(_, f) = seen {
+                    board = Some(f.board().clone());
+                }
+            },
+        )
+        .map_err(|e| anyhow!("{e}"))?;
+    board.ok_or_else(|| anyhow!("the stream ended before the log was caught up"))
+}
+
 /// `(id, lane)` of `e` if it is a `closing` addressed to `member`.
 fn mine<'a>(e: &'a Entry, closing: Closing, member: &str) -> Option<(ContentId, &'a str)> {
     if e.conflict.is_some() || e.event.kind != closing.kind() {
@@ -97,9 +131,9 @@ pub fn pick(
 ) -> Result<String> {
     let (socket, me) = w.session(home)?;
     let dir = flock_dir(home, w, &socket)?;
-    let snap =
-        Snapshot::read(&dir).with_context(|| format!("read the log in {}", dir.display()))?;
-    let board = snap.board();
+    let board = &verified_board(&dir, &socket, &me.member).context(
+        "read the verified log (the target is resolved from it before anything is sent)",
+    )?;
     let (noun, closer) = (closing.noun(), closing.closer());
     match (cid, lane) {
         (None, Some(lane)) => {
