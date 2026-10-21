@@ -1,7 +1,8 @@
 # agent-mesh-transport-ssh
 
 An SSH-backed transport and authenticated session protocol for carrying
-`agent_mesh_protocol::SignedEnvelope` records between mesh agents.
+`agent_mesh_protocol::SignedEnvelope` records between mesh agents. It also
+carries the bus's long-lived session streams (`Bus::open_session`).
 
 The production Option A topology is:
 

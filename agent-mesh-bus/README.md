@@ -29,6 +29,7 @@ Key types:
   per-key sequence reservations (the `bind_*_reserving` binds), so a peer that
   outlives a bus still admits its successor under the same agent key. The file
   store is Unix-only and fails closed elsewhere
+- `IrohTransport::close` returns only after the endpoint's socket is released
 
 Part of [agent-mesh](https://github.com/Gilamonster-Foundation/agent-mesh), cryptographic peer-to-peer agent coordination — no broker, no centralized configuration.
 
