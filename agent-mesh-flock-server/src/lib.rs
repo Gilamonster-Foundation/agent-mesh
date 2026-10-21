@@ -29,7 +29,7 @@ mod keyfile;
 #[cfg(feature = "serve")]
 mod lock;
 mod log;
-#[cfg(all(unix, feature = "serve"))]
+#[cfg(unix)]
 mod private;
 mod read;
 mod refusal;
@@ -66,7 +66,7 @@ pub use journal::{Head, Resume};
 pub use keyfile::{load_server_key, store_server_key};
 #[cfg(feature = "serve")]
 pub use log::CrashPlan;
-#[cfg(all(unix, feature = "serve"))]
+#[cfg(unix)]
 pub use private::{bind_private, peer_ok, private_dir, uid_allowed};
 pub use read::Snapshot;
 pub use refusal::{Reason, RefusalEntry, RefusalRecord};
