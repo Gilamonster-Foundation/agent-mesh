@@ -15,6 +15,8 @@ Key types:
 - `GitHubBinding` — cross-signature linking a `UserKey` to the ed25519 SSH key GitHub already knows
 - `SignedEnvelope` — the wire format for every mesh message
 - `Fingerprint` — short BLAKE3 identifier for keys and content
+- `Assertion` — a detached author signature over a `ContentId` (flock events are
+  signed this way)
 
 Part of [agent-mesh](https://github.com/Gilamonster-Foundation/agent-mesh), cryptographic peer-to-peer agent coordination — no broker, no centralized configuration.
 

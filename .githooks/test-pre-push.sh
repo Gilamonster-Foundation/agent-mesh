@@ -47,7 +47,7 @@ docs=$(commit docs/note.md)
 flock=$(commit agent-mesh-flock/src/lib.rs)
 data=$(commit agent-mesh-flock/src/data.bin)
 lock=$(commit Cargo.lock)
-leaf=$(commit agent-mesh-transport-ssh/src/lib.rs)
+leaf=$(commit agent-mesh-ratchet/src/lib.rs)
 proto=$(commit agent-mesh-protocol/src/lib.rs)
 
 at "$leaf"
@@ -76,7 +76,7 @@ plan_is full "Cargo.lock -> whole tree"
 
 at "$leaf"
 run "refs/heads/w $leaf refs/heads/w $lock"
-plan_is 'crates: agent-mesh-transport-ssh' "leaf crate -> only itself"
+plan_is 'crates: agent-mesh-ratchet' "leaf crate -> only itself"
 
 run "refs/heads/w $leaf refs/heads/w deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 plan_is full "unknown remote sha -> whole tree, never a skip"
@@ -118,7 +118,7 @@ run "refs/heads/a $flock refs/heads/a $docs" "refs/heads/b $leaf refs/heads/b $l
 refused "one branch at a time" "two code tips are refused"
 
 run "refs/tags/v1 $leaf refs/tags/v1 $ZERO" "(delete) $ZERO refs/heads/x $docs" "refs/heads/w $leaf refs/heads/w $lock"
-plan_is 'crates: agent-mesh-transport-ssh' "tag + deletion + branch: only the branch counts"
+plan_is 'crates: agent-mesh-ratchet' "tag + deletion + branch: only the branch counts"
 
 # Cleanliness: whatever the user's git config says, and ignored inputs.
 at "$proto"

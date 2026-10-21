@@ -131,7 +131,10 @@ epoch-bounded certificate for the key it names.
   refuses one that does not extend it. A stream opens only after the session
   key signs a fresh `StreamChallenge` (an active session of a current member)
   and closes after an epoch-bearing frame once its session is no longer live or its member left the roster (eligibility is published with each frame). Recovery fsyncs the retained log before publishing it, and a request whose frame would not fit one stream message is refused (`TooLarge`).
-- Not yet: operator-signed events, MCP or TUI.
+- Operator devices: `register_device` (the owner socket's `RegisterDevice`) admits a
+  user-certified device key, so an operator's answers to asks can be admitted; the
+  signing itself happens in `amesh flock sign`, never in the server. The MCP tools and
+  the TUI live in `agent-mesh-cli` and `agent-mesh-tui`.
 - Unix only (file modes and `flock(2)`); on other hosts the crate builds, the
   key and lock functions return an unsupported-host error, and the Unix tests
   are not compiled.

@@ -13,8 +13,9 @@ name: Release
 #
 # HOOK PARITY: This workflow does NOT run on every PR / push to main —
 # unlike ci.yml, it's gated on tag events. The pre-push hook in
-# .githooks/pre-push covers the lint/test/coverage bar; wheel building
-# is verified locally with `maturin build --release`.
+# .githooks/pre-push runs lint and tests on the changed scope; coverage,
+# wheel builds and publishing are CI-only (wheels can be checked locally
+# with `maturin build --release`).
 
 on:
   push:
@@ -147,6 +148,9 @@ jobs:
               agent-mesh-transport \
               agent-mesh-bus \
               agent-mesh-transport-ssh \
+              agent-mesh-flock \
+              agent-mesh-flock-server \
+              agent-mesh-flock-session \
               agent-mesh-cli; do
             echo "::group::publishing $crate"
             cargo publish -p "$crate" --token "$CARGO_REGISTRY_TOKEN" || {
