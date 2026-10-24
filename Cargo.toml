@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 rust-version = "1.75"
 license = "Apache-2.0"
@@ -57,8 +57,12 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 
-# SSH key parsing (for github cross-sign and verify)
-ssh-key = { version = "0.6", features = ["ed25519"] }
+# SSH key parsing (for github cross-sign and verify). Bindings are ed25519
+# only, so no default features: `ecdsa` is unused, and `std` names p256,
+# p384, p521 and rsa as weak features (`p256?/std`), which Cargo still writes
+# into Cargo.lock. That made `cargo audit` report crypto-bigint 0.5.5
+# (RUSTSEC-2026-0387) although nothing compiled it.
+ssh-key = { version = "0.6", default-features = false, features = ["ed25519", "alloc"] }
 
 # Filesystem
 dirs = "5"
@@ -77,17 +81,17 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 # need them and they pull in extra deps. `tls-ring` is mandatory (one of the
 # two TLS backends must be enabled).
 iroh = { version = "0.98", default-features = false, features = ["tls-ring"] }
-async-trait = "0.1"
+async-trait = "0.1.92"
 bytes = "1"
 futures = "0.3"
 
 # Internal crates
-agent-mesh-protocol = { path = "agent-mesh-protocol", version = "=0.7.0" }
-agent-mesh-bus = { path = "agent-mesh-bus", version = "=0.7.0" }
-agent-mesh-discovery = { path = "agent-mesh-discovery", version = "=0.7.0" }
-agent-mesh-ratchet = { path = "agent-mesh-ratchet", version = "=0.7.0" }
-agent-mesh-transport = { path = "agent-mesh-transport", version = "=0.7.0" }
-agent-mesh-transport-ssh = { path = "agent-mesh-transport-ssh", version = "=0.7.0" }
+agent-mesh-protocol = { path = "agent-mesh-protocol", version = "=0.7.1" }
+agent-mesh-bus = { path = "agent-mesh-bus", version = "=0.7.1" }
+agent-mesh-discovery = { path = "agent-mesh-discovery", version = "=0.7.1" }
+agent-mesh-ratchet = { path = "agent-mesh-ratchet", version = "=0.7.1" }
+agent-mesh-transport = { path = "agent-mesh-transport", version = "=0.7.1" }
+agent-mesh-transport-ssh = { path = "agent-mesh-transport-ssh", version = "=0.7.1" }
 tests-common = { path = "tests/common" }
 
 # Test deps
