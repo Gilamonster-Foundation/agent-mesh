@@ -20,8 +20,10 @@ pub fn github(home: PathBuf, ssh_key: Option<PathBuf>, username: Option<String>)
     let ssh_path = ssh_key.unwrap_or_else(default_ssh_key_path);
     let ssh_pem = std::fs::read_to_string(&ssh_path)
         .with_context(|| format!("read SSH key from {}", ssh_path.display()))?;
+    // ssh-key is built without `std` (see the workspace Cargo.toml), so its
+    // error is not a `std::error::Error`; format it instead of `.context`.
     let ssh = SshPrivateKey::from_openssh(&ssh_pem)
-        .context("parse SSH key (must be ed25519, unencrypted)")?;
+        .map_err(|e| anyhow::anyhow!("parse SSH key (must be ed25519, unencrypted): {e}"))?;
 
     let binding = GitHubBinding::sign(&user.public(), &ssh, username.clone())?;
 
