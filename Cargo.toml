@@ -61,8 +61,12 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 
-# SSH key parsing (for github cross-sign and verify)
-ssh-key = { version = "0.6", features = ["ed25519"] }
+# SSH key parsing (for github cross-sign and verify). Bindings are ed25519
+# only, so no default features: `ecdsa` is unused, and `std` names p256,
+# p384, p521 and rsa as weak features (`p256?/std`), which Cargo still writes
+# into Cargo.lock. That made `cargo audit` report crypto-bigint 0.5.5
+# (RUSTSEC-2026-0387) although nothing compiled it.
+ssh-key = { version = "0.6", default-features = false, features = ["ed25519", "alloc"] }
 
 # Filesystem
 dirs = "5"
