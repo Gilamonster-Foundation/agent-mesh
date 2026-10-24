@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 rust-version = "1.91"
 license = "Apache-2.0"
@@ -90,18 +90,18 @@ bytes = "1"
 futures = "0.3"
 
 # Internal crates
-agent-mesh-protocol = { path = "agent-mesh-protocol", version = "=0.8.0" }
-agent-mesh-bus = { path = "agent-mesh-bus", version = "=0.8.0" }
-agent-mesh-discovery = { path = "agent-mesh-discovery", version = "=0.8.0" }
-agent-mesh-ratchet = { path = "agent-mesh-ratchet", version = "=0.8.0" }
-agent-mesh-transport = { path = "agent-mesh-transport", version = "=0.8.0" }
-agent-mesh-transport-ssh = { path = "agent-mesh-transport-ssh", version = "=0.8.0" }
-agent-mesh-flock = { path = "agent-mesh-flock", version = "=0.8.0" }
+agent-mesh-protocol = { path = "agent-mesh-protocol", version = "=0.8.1" }
+agent-mesh-bus = { path = "agent-mesh-bus", version = "=0.8.1" }
+agent-mesh-discovery = { path = "agent-mesh-discovery", version = "=0.8.1" }
+agent-mesh-ratchet = { path = "agent-mesh-ratchet", version = "=0.8.1" }
+agent-mesh-transport = { path = "agent-mesh-transport", version = "=0.8.1" }
+agent-mesh-transport-ssh = { path = "agent-mesh-transport-ssh", version = "=0.8.1" }
+agent-mesh-flock = { path = "agent-mesh-flock", version = "=0.8.1" }
 # default-features = false: a member that only reads a flock (verifies and
 # follows its log) takes these as they stand; one that writes asks for the
 # writer ("serve" / "emit"). The crates themselves keep both on by default.
-agent-mesh-flock-server = { path = "agent-mesh-flock-server", version = "=0.8.0", default-features = false }
-agent-mesh-flock-session = { path = "agent-mesh-flock-session", version = "=0.8.0", default-features = false }
+agent-mesh-flock-server = { path = "agent-mesh-flock-server", version = "=0.8.1", default-features = false }
+agent-mesh-flock-session = { path = "agent-mesh-flock-session", version = "=0.8.1", default-features = false }
 tests-common = { path = "tests/common" }
 
 # Test deps
