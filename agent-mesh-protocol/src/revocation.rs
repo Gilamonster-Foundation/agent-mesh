@@ -456,4 +456,33 @@ mod tests {
         seen.user = UserKey::generate().fingerprint();
         assert!(is_state_err(log.extends(&seen)));
     }
+
+    /// Domain separation: a node signed over bare CID bytes, or under the
+    /// Assertion domain, must not verify. Domains are spelled out here, not
+    /// taken from `message()`, so removing the tag there fails this test.
+    #[test]
+    fn signature_without_the_revocation_domain_is_refused() {
+        let user = UserKey::generate();
+        let base = RevocationLog::genesis(&user).unwrap();
+        let head = base.verify().unwrap().head;
+        let node = MerkleNode::new(RevocationEntry::Generation { current: 1 }, [head]);
+        let cid = node.id().unwrap().to_bytes();
+        let assertion = [b"agent-mesh/provenance/assertion/v1\0".as_slice(), &cid].concat();
+        for msg in [cid.clone(), assertion] {
+            let mut log = base.clone();
+            log.entries.push(SignedEntry {
+                node: node.clone(),
+                sig: SerdeSig(user.sign(&msg)),
+            });
+            assert!(matches!(log.verify(), Err(MeshError::BadSignature)));
+        }
+        // control: the right domain over the same node verifies
+        let good = [REVOCATION_DOMAIN, &cid].concat();
+        let mut log = base;
+        log.entries.push(SignedEntry {
+            node,
+            sig: SerdeSig(user.sign(&good)),
+        });
+        log.verify().unwrap();
+    }
 }
