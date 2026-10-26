@@ -26,6 +26,7 @@ pub mod envelope;
 pub mod error;
 pub mod fingerprint;
 pub mod github_binding;
+pub mod revocation;
 pub mod signer;
 pub mod user_key;
 
@@ -46,5 +47,6 @@ pub use envelope::{Recipient, SignedEnvelope};
 pub use error::{MeshError, Result};
 pub use fingerprint::Fingerprint;
 pub use github_binding::{ssh_pubkey_ed25519_bytes, GitHubBinding};
+pub use revocation::{RevocationEntry, RevocationLog, RevocationState, Seen, SignedEntry};
 pub use signer::MeshSigner;
 pub use user_key::{UserKey, UserPublic};

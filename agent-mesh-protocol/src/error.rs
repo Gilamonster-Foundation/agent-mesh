@@ -66,6 +66,19 @@ pub enum MeshError {
     #[error("sequence error: expected {expected}, got {actual}")]
     BadSequence { expected: u64, actual: u64 },
 
+    /// The agent (or a delegating ancestor of the presented chain) is in the
+    /// user's signed revocation log.
+    #[error("revoked: agent {agent}")]
+    Revoked {
+        /// Fingerprint of the revoked agent key.
+        agent: crate::Fingerprint,
+    },
+
+    /// A revocation log is invalid, forked, rolled back, or belongs to a
+    /// different user than the chain checked against it.
+    #[error("revocation state: {0}")]
+    RevocationState(String),
+
     /// A serialization/deserialization failure (hex, serde, etc.).
     #[error("encoding error: {0}")]
     Encoding(String),
