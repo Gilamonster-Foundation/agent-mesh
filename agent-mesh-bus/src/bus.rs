@@ -1867,6 +1867,61 @@ mod tests {
         );
     }
 
+    /// Regression (PR 185 review): an envelope admitted before its sender was
+    /// revoked, but still queued when the revocation lands, is not handed to
+    /// the bus.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queued_envelope_is_not_delivered_once_its_carrier_is_revoked() {
+        use agent_mesh_protocol::{RevocationEntry, RevocationLog};
+        let user = UserKey::generate();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("revocation.json");
+        let mut log = RevocationLog::genesis(&user).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&log).unwrap()).unwrap();
+        let sender = agent(&user, "sender");
+        let recipient = Arc::new(agent(&user, "recipient"));
+        let recipient_fp = recipient.fingerprint();
+        let recipient_id = agent_pubkey_to_iroh(&recipient.public_bytes()).unwrap();
+        let transport = IrohTransport::bind(
+            user.fingerprint(),
+            recipient,
+            0,
+            BusOptions { announce: false },
+            RevocationGuard::open(&path, user.fingerprint()).unwrap(),
+        )
+        .await
+        .unwrap();
+        let addr = SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), transport.local_port());
+        let ep = Endpoint::bind(&sender, 0).await.unwrap();
+        let conn = ep.dial(recipient_id, [addr]).await.unwrap();
+        let msg = BusMessage::Publish {
+            topic: Topic::new(user.fingerprint(), "q").wire(),
+            body: b"queued".to_vec(),
+        };
+        let env = SignedEnvelope::new(
+            &sender,
+            Recipient::Direct { agent_fp: recipient_fp },
+            1,
+            serde_json::to_vec(&msg).unwrap(),
+        );
+        send_env_on_conn(
+            &conn,
+            sender.cert(),
+            &RevocationGuard::in_memory(&user),
+            recipient_fp,
+            &env,
+        )
+        .await
+        .unwrap();
+        // it is queued in the transport; nothing has asked for it yet
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        log.append(&user, RevocationEntry::Revoke { agent: sender.fingerprint() })
+            .unwrap();
+        std::fs::write(&path, serde_json::to_vec(&log).unwrap()).unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(1), transport.recv()).await;
+        assert!(got.is_err(), "a revoked sender's queued envelope was delivered");
+    }
+
     /// Real-boundary regression: a valid envelope signed by A but carried over
     /// sibling B's authenticated QUIC session must not pass common admission or
     /// consume its nonce/sequence. The test receives each transport delivery

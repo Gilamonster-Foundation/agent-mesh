@@ -746,3 +746,89 @@ fn listen_without_a_revocation_log_fails_closed() {
         .failure()
         .stderr(contains("revocation log is required"));
 }
+
+/// Regression (PR 185 review): a peer that completes Hello, is then revoked
+/// in the listener's log, and only then sends its payload must not get the
+/// payload printed. Red before the listener rechecked the peer at envelope
+/// admission.
+#[tokio::test(flavor = "multi_thread")]
+async fn listener_refuses_the_payload_of_a_peer_revoked_after_hello() {
+    use agent_mesh_protocol::{
+        AgentKey, AgentMetadata, Caveats, Recipient, RevocationEntry, RevocationLog, SignedEnvelope,
+        UserKey,
+    };
+    use agent_mesh_transport::{
+        do_handshake, identity::agent_pubkey_to_iroh, send_envelope, Endpoint, RevocationGuard,
+    };
+
+    let dir = TempDir::new().unwrap();
+    Command::cargo_bin("amesh")
+        .unwrap()
+        .args(["--home", dir.path().to_str().unwrap(), "keygen"])
+        .assert()
+        .success();
+    revocation_log::ensure_log(dir.path());
+    let bin = assert_cmd::cargo::cargo_bin("amesh");
+    let mut listener = std::process::Command::new(&bin)
+        .args(["--home", dir.path().to_str().unwrap(), "listen", "--duration", "30s"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn listener");
+    let (tx, rx) = mpsc::channel();
+    let _o = forward_child_lines(listener.stdout.take().unwrap(), "stdout", tx.clone());
+    let _e = forward_child_lines(listener.stderr.take().unwrap(), "stderr", tx);
+    let mut transcript = Vec::new();
+    let mut field = |needle: &str| -> String {
+        let line = recv_until(&rx, &mut transcript, Duration::from_secs(10), |l| l.contains(needle))
+            .unwrap_or_else(|| panic!("listener never printed {needle}"));
+        line.split_once(needle).unwrap().1.trim().to_string()
+    };
+    let port: u16 = field("listening on udp/").parse().unwrap();
+    let pubkey: [u8; 32] = hex::decode(field("agent_pubkey=")).unwrap().try_into().unwrap();
+
+    let user = UserKey::load(&dir.path().join("user.key")).unwrap();
+    let agent = AgentKey::issue(
+        &user,
+        AgentMetadata {
+            role: "late".into(),
+            host: "t".into(),
+            capabilities: vec![],
+            issued_at: "2026-10-26T00:00:00Z".into(),
+            expires_at: None,
+            caveats: Caveats::top(),
+        },
+    );
+    let ep = Endpoint::bind(&agent, 0).await.unwrap();
+    let conn = ep
+        .dial(
+            agent_pubkey_to_iroh(&pubkey).unwrap(),
+            [std::net::SocketAddr::from(([127, 0, 0, 1], port))],
+        )
+        .await
+        .unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    do_handshake(agent.cert(), &mut send, &mut recv, true, &RevocationGuard::in_memory(&user))
+        .await
+        .expect("hello completes");
+
+    // revoke the dialer in the listener's log, then send the payload
+    let log_path = dir.path().join("revocation.json");
+    let mut log: RevocationLog = serde_json::from_slice(&std::fs::read(&log_path).unwrap()).unwrap();
+    log.append(&user, RevocationEntry::Revoke { agent: agent.fingerprint() }).unwrap();
+    std::fs::write(&log_path, serde_json::to_vec(&log).unwrap()).unwrap();
+    let env = SignedEnvelope::new(
+        &agent,
+        Recipient::Direct { agent_fp: agent.fingerprint() },
+        0,
+        b"must-not-be-printed".to_vec(),
+    );
+    let _ = send_envelope(&mut send, &env).await;
+    let _ = send.finish();
+    let leaked = recv_until(&rx, &mut transcript, Duration::from_secs(3), |l| {
+        l.contains("must-not-be-printed")
+    });
+    let _ = listener.kill();
+    let _ = listener.wait();
+    assert!(leaked.is_none(), "payload of a revoked peer was printed:\n{}", transcript.join("\n"));
+}

@@ -505,4 +505,140 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
         assert!(near.write_all(b"x").await.is_err());
     }
+
+    /// Pad `bytes` (JSON) with trailing spaces to exactly `len`.
+    fn padded(mut bytes: Vec<u8>, len: usize) -> Vec<u8> {
+        assert!(bytes.len() <= len);
+        bytes.resize(len, b' ');
+        bytes
+    }
+
+    fn set_mtime(path: &Path, t: SystemTime) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    /// Regression (PR 185 review): file metadata is not the log's identity. A
+    /// newer, valid log written over the old one with the same length and
+    /// mtime must be seen on the next check.
+    #[test]
+    fn an_equal_length_same_mtime_replacement_is_detected() {
+        let f = Fixture::new();
+        let (a, b) = (agent(&f.user), agent(&f.user));
+        let mut old = f.read();
+        old.append(&f.user, RevocationEntry::Revoke { agent: b.fingerprint() })
+            .unwrap();
+        let mut new = old.clone();
+        new.append(&f.user, RevocationEntry::Revoke { agent: a.fingerprint() })
+            .unwrap();
+        let (old, new) = (serde_json::to_vec(&old).unwrap(), serde_json::to_vec(&new).unwrap());
+        let len = old.len().max(new.len());
+        fs::write(f.path(), padded(old, len)).unwrap();
+        let stamp = fs::metadata(f.path()).unwrap().modified().unwrap();
+        let guard = f.open().unwrap();
+        guard.check(a.cert()).unwrap();
+
+        fs::write(f.path(), padded(new, len)).unwrap();
+        set_mtime(&f.path(), stamp);
+        assert!(
+            matches!(guard.check(a.cert()), Err(TransportError::Revoked(_))),
+            "the replacement revokes a, even with identical metadata"
+        );
+    }
+
+    /// An equal-length corrupt replacement with the old mtime fails closed.
+    #[test]
+    fn an_equal_length_same_mtime_corrupt_replacement_fails_closed() {
+        let f = Fixture::new();
+        let guard = f.open().unwrap();
+        let stamp = fs::metadata(f.path()).unwrap().modified().unwrap();
+        let len = fs::metadata(f.path()).unwrap().len() as usize;
+        fs::write(f.path(), vec![b'x'; len]).unwrap();
+        set_mtime(&f.path(), stamp);
+        assert!(unavailable(guard.state()));
+    }
+
+    /// Two guards on one home persist `Seen` under one exclusive lock held
+    /// across read, check and write: while another holder has it, opening
+    /// waits instead of racing the record.
+    #[test]
+    fn opening_waits_for_the_seen_lock() {
+        let f = Fixture::new();
+        f.open().unwrap();
+        let lock = fs::File::options()
+            .create(true)
+            .append(true)
+            .open(f.path().with_extension("seen.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let (path, fp) = (f.path(), f.user.fingerprint());
+        let opened = std::thread::spawn(move || RevocationGuard::open(path, fp).is_ok());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!opened.is_finished(), "open must wait for the lock");
+        drop(lock);
+        assert!(opened.join().unwrap());
+    }
+
+    /// `Seen` only advances: a guard whose view is older than what another
+    /// guard persisted is refused and leaves the record where it was.
+    #[test]
+    fn seen_never_goes_backwards_across_guards() {
+        let f = Fixture::new();
+        let l1 = f.read();
+        f.revoke(&agent(&f.user));
+        let l2 = f.read();
+        f.revoke(&agent(&f.user));
+        let l3 = f.read();
+        f.write(&l1);
+        let a = f.open().unwrap();
+        f.write(&l3);
+        let b = f.open().unwrap();
+        let persisted = |f: &Fixture| fs::read(f.path().with_extension("seen.json")).unwrap();
+        let at_l3 = persisted(&f);
+        f.write(&l2);
+        assert!(unavailable(a.state()));
+        assert!(unavailable(b.state()));
+        assert_eq!(persisted(&f), at_l3, "Seen is still L3");
+        f.write(&l3);
+        a.state().unwrap();
+        assert_eq!(persisted(&f), at_l3);
+    }
+
+    /// Regression (PR 185 review): two envelopes already buffered in the
+    /// reader; the peer is revoked between them; the second must be refused,
+    /// not handed on from the buffer.
+    #[tokio::test]
+    async fn a_buffered_second_envelope_is_refused_after_revocation() {
+        use crate::stream::EnvelopeReader;
+        use agent_mesh_protocol::{Fingerprint, Recipient, SignedEnvelope};
+        let f = Fixture::new();
+        let a = agent(&f.user);
+        let live = LiveCheck::new(f.open().unwrap(), a.cert().clone()).unwrap();
+        let (near, mut far) = tokio::io::duplex(1 << 16);
+        let mut reader = EnvelopeReader::new(Revocable::new(near, Arc::new(Mutex::new(live))));
+        // A large first frame leaves the reader's buffer large, so its next
+        // read takes the two small frames behind it in one go.
+        let mut all = Vec::new();
+        for (n, size) in [2000usize, 10, 10].into_iter().enumerate() {
+            let env = SignedEnvelope::new(
+                &a,
+                Recipient::Direct { agent_fp: Fingerprint::of_bytes(b"r") },
+                n as u64,
+                vec![n as u8; size],
+            );
+            let body = serde_json::to_vec(&env).unwrap();
+            all.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+            all.extend_from_slice(&body);
+        }
+        far.write_all(&all).await.unwrap();
+        assert_eq!(reader.next().await.unwrap().unwrap().sequence, 0);
+        assert_eq!(reader.next().await.unwrap().unwrap().sequence, 1);
+        f.revoke(&a);
+        let third = reader.next().await;
+        assert!(third.is_err(), "the buffered envelope of a revoked peer is refused");
+    }
 }
