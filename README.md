@@ -174,7 +174,7 @@ amesh revocation export <path>       # atomic copy of the verified log
 amesh revocation init                # genesis log for a user key that has none
 ```
 
-Every write verifies the log first and refuses one that fails `verify()`.
+Every write holds a lock on `revocation.json.lock`, verifies the log first and refuses one that fails `verify()`. The pip-installed `amesh` has the same commands.
 
 ## Python Usage
 
