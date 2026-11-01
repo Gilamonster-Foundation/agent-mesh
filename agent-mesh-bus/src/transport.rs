@@ -89,10 +89,9 @@ pub struct SessionStream {
     pub send: Box<dyn AsyncWrite + Send + Sync + Unpin>,
     /// Bytes from the peer.
     pub recv: Box<dyn AsyncRead + Send + Sync + Unpin>,
-    /// Re-checks the peer against the local revocation log. When present,
-    /// every envelope read off `recv` is admitted through it; `None` only for
-    /// a carrier that checks its peer on every record itself (SSH).
-    pub live: Option<agent_mesh_transport::LiveCheck>,
+    /// Re-checks the peer against the local revocation log. Every envelope
+    /// read off `recv` is admitted through it, as the bus takes it.
+    pub live: agent_mesh_transport::LiveCheck,
 }
 
 /// One inbound envelope, its authenticated delivery provenance, and the route

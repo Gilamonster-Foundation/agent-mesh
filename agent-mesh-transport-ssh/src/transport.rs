@@ -15,7 +15,9 @@ use agent_mesh_bus::{
     SessionStream, Transport,
 };
 use agent_mesh_protocol::{AgentKey, Fingerprint, SignedEnvelope};
-use agent_mesh_transport::{send_envelope as write_frame, EnvelopeReader, RevocationGuard};
+use agent_mesh_transport::{
+    send_envelope as write_frame, EnvelopeReader, LiveCheck, RevocationGuard,
+};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -59,6 +61,13 @@ async fn teardown_gate(peer: &Fingerprint) {
 const SESSION_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 /// Bytes buffered between the bus and a stream's record bridge, each way.
 const STREAM_PIPE_BYTES: usize = 64 * 1024;
+
+/// An envelope the transport admitted and queued for the bus, with the check
+/// that must still pass when the bus takes it.
+struct Queued {
+    inbound: Inbound,
+    live: LiveCheck,
+}
 
 /// Resource, trust-context, and deadline policy for [`SshTransport`].
 #[derive(Debug, Clone)]
@@ -173,8 +182,8 @@ pub struct SshTransport {
     options: SshTransportOptions,
     dialer: Dialer,
     targets: RwLock<HashMap<Fingerprint, SshTarget>>,
-    inbound_rx: AsyncMutex<mpsc::Receiver<Inbound>>,
-    inbound_tx: mpsc::Sender<Inbound>,
+    inbound_rx: AsyncMutex<mpsc::Receiver<Queued>>,
+    inbound_tx: mpsc::Sender<Queued>,
     local_addr: SocketAddr,
     session_slots: Arc<Semaphore>,
     outbound_sessions: OutboundSessions,
@@ -703,9 +712,19 @@ impl Transport for SshTransport {
             return None;
         }
         let mut inbound = self.inbound_rx.lock().await;
-        tokio::select! {
-            value = inbound.recv() => value,
-            _ = shutdown.changed() => None,
+        loop {
+            let queued = tokio::select! {
+                value = inbound.recv() => value?,
+                _ = shutdown.changed() => return None,
+            };
+            // admitted when it arrived, possibly long ago: the carrier may
+            // have been revoked while the envelope waited
+            match queued.live.admit() {
+                Ok(()) => return Some(queued.inbound),
+                Err(error) => {
+                    tracing::warn!(%error, "SSH transport: dropped a queued envelope");
+                }
+            }
         }
     }
 
@@ -780,7 +799,7 @@ async fn run_accept_loop(
     listener: TcpListener,
     agent: Arc<AgentKey>,
     options: SshTransportOptions,
-    inbound_tx: mpsc::Sender<Inbound>,
+    inbound_tx: mpsc::Sender<Queued>,
     session_slots: Arc<Semaphore>,
     mut shutdown: watch::Receiver<bool>,
     session_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
@@ -874,7 +893,7 @@ async fn run_session_reader(
     route: Arc<SshReplyRoute>,
     process: Option<UnauthenticatedSshCarrier>,
     permit: OwnedSemaphorePermit,
-    inbound_tx: mpsc::Sender<Inbound>,
+    inbound_tx: mpsc::Sender<Queued>,
     mut shutdown: watch::Receiver<bool>,
     outbound_sessions: Option<OutboundSessions>,
 ) {
@@ -891,11 +910,14 @@ async fn run_session_reader(
                 Err(error) => break error.to_string(),
             },
         };
-        let inbound = Inbound {
-            envelope,
-            provenance: DeliveryProvenance::Direct { carrier: peer },
-            reply_route: route.clone(),
-            stream: None,
+        let inbound = Queued {
+            inbound: Inbound {
+                envelope,
+                provenance: DeliveryProvenance::Direct { carrier: peer },
+                reply_route: route.clone(),
+                stream: None,
+            },
+            live: reader.live(),
         };
         tokio::select! {
             result = inbound_tx.send(inbound) => {
@@ -947,7 +969,7 @@ async fn serve_stream(
     mut reader: SessionReader,
     route: Arc<SshReplyRoute>,
     permit: OwnedSemaphorePermit,
-    inbound_tx: mpsc::Sender<Inbound>,
+    inbound_tx: mpsc::Sender<Queued>,
     mut shutdown: watch::Receiver<bool>,
     tasks: &Arc<Mutex<Vec<JoinHandle<()>>>>,
 ) {
@@ -962,14 +984,18 @@ async fn serve_stream(
             }
         },
     };
+    let live = reader.live();
     let Some(stream) = bridge_stream(reader, route.clone(), None, permit, shutdown, tasks) else {
         return;
     };
-    let inbound = Inbound {
-        envelope,
-        provenance: DeliveryProvenance::Direct { carrier: peer },
-        reply_route: route,
-        stream: Some(stream),
+    let inbound = Queued {
+        inbound: Inbound {
+            envelope,
+            provenance: DeliveryProvenance::Direct { carrier: peer },
+            reply_route: route,
+            stream: Some(stream),
+        },
+        live,
     };
     // Dropping a refused inbound drops the stream, which ends the bridge.
     let _ = inbound_tx.send(inbound).await;
@@ -993,7 +1019,9 @@ fn bridge_stream(
     let (bus_send, mut to_peer) = tokio::io::duplex(STREAM_PIPE_BYTES);
     let (mut from_peer, bus_recv) = tokio::io::duplex(STREAM_PIPE_BYTES);
     let peer = reader.peer();
+    let live = reader.live();
     let task = tokio::spawn({
+        let live = live.clone();
         let route = route.clone();
         let mut shutdown = shutdown.clone();
         async move {
@@ -1001,8 +1029,7 @@ fn bridge_stream(
             // A clean EOF from the bus ends only this pump: a split session
             // may close its sender and still await the peer's final reply.
             let outbound = async {
-                // local bus frames bound for the peer: the SSH writer checks each record
-                let mut frames = EnvelopeReader::unchecked(&mut to_peer);
+                let mut frames = EnvelopeReader::new(&mut to_peer, live.clone());
                 loop {
                     let env = tokio::select! {
                         _ = route.dead() => return,
@@ -1073,8 +1100,7 @@ fn bridge_stream(
     Some(SessionStream {
         send: Box::new(bus_send),
         recv: Box::new(bus_recv),
-        // every record already passed the SSH session's own revocation check
-        live: None,
+        live,
     })
 }
 
@@ -2088,11 +2114,17 @@ mod tests {
         let f = crate::test_log::LogFixture::new();
         let (alice, bob, alice_transport, bob_transport) = revocable_pair(&f).await;
         let env = plain(&alice, bob.fingerprint(), 0, b"queued".to_vec());
-        alice_transport.send_to(bob.fingerprint(), env).await.unwrap();
+        alice_transport
+            .send_to(bob.fingerprint(), env)
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         f.revoke(&alice);
         let got = tokio::time::timeout(Duration::from_secs(1), bob_transport.recv()).await;
-        assert!(got.is_err(), "a revoked carrier's queued message was delivered");
+        assert!(
+            got.is_err(),
+            "a revoked carrier's queued message was delivered"
+        );
     }
 
     /// Regression (PR 185 round 3): session frames already in the bridge's
@@ -2101,7 +2133,10 @@ mod tests {
     async fn buffered_session_frames_are_refused_once_the_carrier_is_revoked() {
         let f = crate::test_log::LogFixture::new();
         let (alice, bob, alice_transport, bob_transport) = revocable_pair(&f).await;
-        let (_, mut out) = alice_transport.open_stream_to(bob.fingerprint()).await.unwrap();
+        let (_, mut out) = alice_transport
+            .open_stream_to(bob.fingerprint())
+            .await
+            .unwrap();
         for seq in 0..3 {
             let env = plain(&alice, bob.fingerprint(), seq, vec![seq as u8]);
             write_frame(&mut out.send, &env).await.unwrap();
@@ -2111,8 +2146,11 @@ mod tests {
         // the two frames behind the open arrive in bob's pipe, unread
         tokio::time::sleep(Duration::from_millis(300)).await;
         f.revoke(&alice);
-        let mut reader = EnvelopeReader::unchecked(theirs.recv);
+        let mut reader = EnvelopeReader::new(theirs.recv, theirs.live);
         let next = reader.next().await;
-        assert!(next.is_err(), "a buffered frame of a revoked carrier was read: {next:?}");
+        assert!(
+            next.is_err(),
+            "a buffered frame of a revoked carrier was read: {next:?}"
+        );
     }
 }

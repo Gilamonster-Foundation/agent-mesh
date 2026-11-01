@@ -72,7 +72,9 @@ transport takes one and nothing is checked without it.
   ever advances. Read of the log, `extends` against the persisted `Seen`, and
   the write of a strictly longer head happen under one exclusive lock
   (`revocation.seen.lock`, `File::lock`), so guards and processes sharing a home
-  cannot interleave and move it backwards; the temp file is renamed into place.
+  cannot interleave and move it backwards. It is published through the shared
+  `atomic_write` helper (exclusive `create_new` temp file with a random name and
+  mode 0600, `sync_all`, rename, directory `sync_all`), also used by `amesh`.
   A log rolled back to an older copy, or forked, is refused at startup and while
   running.
 - **Handshakes.** The iroh handshake (`handshake.rs::ensure_trustable`) and the
@@ -88,14 +90,21 @@ transport takes one and nothing is checked without it.
   are refused too, and so are `amesh listen` and the PyO3 `accept_envelope`
   (both call `recv_envelope`; there is no unchecked variant on an iroh path).
   The iroh transport also re-checks an admitted envelope when the bus takes it
-  off its queue. `Revocable` additionally ends the stream's reads and writes.
-  SSH records are checked right after the record is read, before the envelope
-  is returned for dispatch, and before one is written. A refusal poisons the
-  half. Descendants go with their revoked ancestor because `verify_with` checks
-  every link.
+  off its queue, and `Revocable` ends the stream's reads and writes. There is no
+  unchecked reader: `EnvelopeReader` and `SessionStream` require a `LiveCheck`.
+  SSH records are checked right after the record is read and before one is
+  written; the SSH transport hands the same `LiveCheck` to everything that
+  buffers beyond the record layer, so its queued messages are re-checked in
+  `SshTransport::recv` and a bus session's bridge pipe is read through
+  `EnvelopeReader::new(.., live)`. A refusal poisons the half, and the check
+  stays refused. Descendants go with their revoked ancestor because
+  `verify_with` checks every link.
 - **Change detection** reads the log file on every check and compares its bytes
-  with the ones last verified: identical bytes are the same head, anything else
-  is verified afresh (signatures, parents, `Seen`), and an unreadable or
+  with the ones last verified, and the cached verdict only stands while the
+  persisted `Seen` is exactly the one it wrote: if another guard or process has
+  advanced `Seen`, the check reloads under the lock, so a file restored to
+  older bytes is refused even by a guard that cached them. Different bytes are
+  verified afresh (signatures, parents, `Seen`), and an unreadable or
   non-extending file refuses every peer. File metadata is never trusted.
 - **SSH generation.** The log's generation is the session's causal generation
   (`SessionParameters.current_generation` is overwritten), so two peers on

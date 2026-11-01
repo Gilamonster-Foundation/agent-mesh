@@ -22,6 +22,7 @@
 #![doc(html_root_url = "https://docs.rs/agent-mesh-transport")]
 
 pub mod alpn;
+pub mod atomic;
 pub mod endpoint;
 pub mod error;
 pub mod handshake;
@@ -34,6 +35,7 @@ pub mod stream;
 pub mod pyo3_module;
 
 pub use alpn::ALPN;
+pub use atomic::atomic_write;
 pub use endpoint::Endpoint;
 pub use error::{Result, TransportError};
 pub use handshake::{do_handshake, HelloMsg, RejectMsg};

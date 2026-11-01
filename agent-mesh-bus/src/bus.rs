@@ -963,7 +963,7 @@ fn session_stream(send: SendStream, recv: RecvStream, live: LiveCheck) -> Sessio
     SessionStream {
         send: Box::new(Revocable::new(send, live.clone())),
         recv: Box::new(Revocable::new(recv, live.clone())),
-        live: Some(live),
+        live,
     }
 }
 
@@ -1418,17 +1418,15 @@ impl IrohTransport {
             let first =
                 tokio::time::timeout(window, next_envelope(&conn, &agent, &revocation)).await;
             if let Ok(Some((provenance, envelope, stream))) = first {
-                if let Some(live) = stream.live {
-                    let _ = inbound_tx.send(Queued {
-                        inbound: Inbound {
-                            envelope,
-                            provenance,
-                            reply_route: route,
-                            stream: None,
-                        },
-                        live,
-                    });
-                }
+                let _ = inbound_tx.send(Queued {
+                    inbound: Inbound {
+                        envelope,
+                        provenance,
+                        reply_route: route,
+                        stream: None,
+                    },
+                    live: stream.live,
+                });
             }
         });
     }
@@ -1509,9 +1507,7 @@ async fn accept_conn(
     });
     while let Some((provenance, envelope, stream)) = next_envelope(&conn, &agent, &revocation).await
     {
-        let Some(live) = stream.live.clone() else {
-            continue;
-        };
+        let live = stream.live.clone();
         let inbound = Inbound {
             envelope,
             provenance,

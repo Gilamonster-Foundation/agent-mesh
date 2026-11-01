@@ -84,7 +84,8 @@ fallback to envelope-only authentication or unbound provenance.
   link revoked, valid at the log's generation, which replaces the generation
   in `SessionParameters`. Every record read or written re-checks the peer, so
   a revocation the log learns mid-session ends the session before the revoked
-  peer's next envelope is dispatched. A missing or invalid log refuses every
+  peer's next envelope is dispatched, including envelopes already queued or
+  buffered in the bus session pipe (the same check runs again at delivery). A missing or invalid log refuses every
   peer. The current bus envelope verifier is still context-free and therefore
   rejects generation-scoped envelope certs even if the session handshake
   succeeds.

@@ -409,10 +409,7 @@ fn halves(
         _keepalive: keepalive.clone(),
     };
     let rx = SessionReceiver {
-        reader: match stream.live {
-            Some(live) => EnvelopeReader::new(stream.recv, live),
-            None => EnvelopeReader::unchecked(stream.recv),
-        },
+        reader: EnvelopeReader::new(stream.recv, stream.live),
         link,
         next_seq: rx_seq,
         idle: timing.idle,
@@ -653,8 +650,19 @@ mod tests {
         SessionStream {
             send: Box::new(send),
             recv: Box::new(recv),
-            live: None,
+            live: test_live(),
         }
+    }
+
+    /// A live check over an empty in-memory log: nothing is revoked.
+    fn test_live() -> agent_mesh_transport::LiveCheck {
+        let user = UserKey::generate();
+        let agent = agent(&user, "live");
+        agent_mesh_transport::LiveCheck::new(
+            agent_mesh_transport::RevocationGuard::in_memory(&user),
+            agent.cert().clone(),
+        )
+        .unwrap()
     }
 
     fn pipe(capacity: usize) -> (SessionStream, SessionStream) {
@@ -720,7 +728,7 @@ mod tests {
             let opening = tokio::spawn(async move {
                 Session::initiate(alice, bob_peer, a, &topic, timing, shutdown).await
             });
-            let open = EnvelopeReader::unchecked(&mut b.recv)
+            let open = EnvelopeReader::new(&mut b.recv, b.live.clone())
                 .next()
                 .await
                 .unwrap()

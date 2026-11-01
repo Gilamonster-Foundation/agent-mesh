@@ -113,7 +113,16 @@ impl RevocationGuard {
         };
         match fs::read(&file.log) {
             Ok(now) => {
-                if let Some(cached) = cache.as_ref().filter(|c| c.bytes == now) {
+                // Unchanged bytes are the same log, but not necessarily still
+                // acceptable: another guard or process may have advanced the
+                // shared `Seen` past it (this file is then a rollback). The
+                // cache only stands while `Seen` is exactly what it persisted;
+                // anything else goes through `load`, which re-checks it under
+                // the lock.
+                if let Some(cached) = cache
+                    .as_ref()
+                    .filter(|c| c.bytes == now && seen_is(&file.seen, &c.state))
+                {
                     return Ok(cached.state.clone());
                 }
             }
@@ -187,6 +196,15 @@ impl RevocationGuard {
     }
 }
 
+/// Whether the persisted `Seen` is exactly the one `state` produced. The
+/// record is replaced by atomic rename, so an unlocked read sees a whole one.
+fn seen_is(path: &Path, state: &RevocationState) -> bool {
+    fs::read(path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Seen>(&raw).ok())
+        .is_some_and(|seen| seen == state.seen())
+}
+
 fn unavailable(what: &str, e: &dyn std::fmt::Display) -> TransportError {
     TransportError::RevocationUnavailable(format!("{what}: {e}"))
 }
@@ -202,13 +220,10 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Write `seen` beside the log by temp file + rename, so a crash leaves the
-/// old record or the new one, never half of one.
+/// Publish `seen` beside the log: exclusive temp file, synced, renamed, with
+/// the directory synced ([`crate::atomic_write`]).
 fn persist_seen(path: &Path, seen: &Seen) -> io::Result<()> {
-    // the seen lock is held, so one writer at a time; pid keeps processes apart
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    fs::write(&tmp, serde_json::to_vec(seen).map_err(io::Error::other)?)?;
-    fs::rename(&tmp, path)
+    crate::atomic::atomic_write(path, &serde_json::to_vec(seen).map_err(io::Error::other)?)
 }
 
 /// A peer's chain, re-checked whenever the log's head moves.

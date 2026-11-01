@@ -546,6 +546,14 @@ impl<R, W> AuthenticatedMeshSession<R, W> {
         self.transcript_id
     }
 
+    /// The peer's revocation check, shared by every record of this session.
+    /// Hand it to whatever queues or buffers envelopes beyond the record layer
+    /// so they are admitted through it again at the last step.
+    #[must_use]
+    pub fn live(&self) -> LiveCheck {
+        self.live.clone()
+    }
+
     /// This endpoint's ordered session role.
     #[must_use]
     pub fn role(&self) -> SessionRole {
@@ -652,6 +660,12 @@ impl<R> AuthenticatedSessionReader<R> {
     #[must_use]
     pub fn peer_cert(&self) -> &CertChain {
         &self.peer_cert
+    }
+
+    /// The peer's revocation check, shared by every record of this session.
+    #[must_use]
+    pub fn live(&self) -> LiveCheck {
+        self.live.clone()
     }
 
     /// Fresh connection transcript identifier.

@@ -73,7 +73,7 @@ pub async fn recv_envelope<R: AsyncRead + Unpin>(
     recv.read_exact(&mut buf)
         .await
         .map_err(|e| TransportError::Iroh(format!("read body: {e}")))?;
-    decode_envelope(&buf, Some(live))
+    decode_envelope(&buf, live)
 }
 
 /// The body length a 4-byte prefix announces, refused past
@@ -90,15 +90,13 @@ fn body_len(prefix: [u8; 4]) -> Result<usize> {
 
 /// The one place a received envelope is decoded and admitted: signature
 /// verified, then the peer that sent it re-checked against the revocation log
-/// (`live`, `None` only for a stream whose records the carrier already checks).
-fn decode_envelope(body: &[u8], live: Option<&LiveCheck>) -> Result<SignedEnvelope> {
+/// (`live`).
+fn decode_envelope(body: &[u8], live: &LiveCheck) -> Result<SignedEnvelope> {
     let env: SignedEnvelope = serde_json::from_slice(body)
         .map_err(|e| TransportError::BadEnvelope(format!("deserialize: {e}")))?;
     env.verify()
         .map_err(|e| TransportError::BadEnvelope(e.to_string()))?;
-    if let Some(live) = live {
-        live.admit()?;
-    }
+    live.admit()?;
     Ok(env)
 }
 
@@ -112,7 +110,7 @@ fn decode_envelope(body: &[u8], live: Option<&LiveCheck>) -> Result<SignedEnvelo
 pub struct EnvelopeReader<R> {
     inner: R,
     buf: Vec<u8>,
-    live: Option<LiveCheck>,
+    live: LiveCheck,
 }
 
 impl<R: AsyncRead + Unpin> EnvelopeReader<R> {
@@ -123,18 +121,7 @@ impl<R: AsyncRead + Unpin> EnvelopeReader<R> {
         Self {
             inner,
             buf: Vec::new(),
-            live: Some(live),
-        }
-    }
-
-    /// Read envelopes from `inner` with no revocation check. Only for a stream
-    /// whose carrier has already checked its peer per record (the SSH session
-    /// layer); every iroh path uses [`Self::new`].
-    pub fn unchecked(inner: R) -> Self {
-        Self {
-            inner,
-            buf: Vec::new(),
-            live: None,
+            live,
         }
     }
 
@@ -151,7 +138,7 @@ impl<R: AsyncRead + Unpin> EnvelopeReader<R> {
             if let Ok(prefix) = <[u8; 4]>::try_from(self.buf.get(..4).unwrap_or_default()) {
                 let end = 4 + body_len(prefix)?;
                 if self.buf.len() >= end {
-                    let env = decode_envelope(&self.buf[4..end], self.live.as_ref());
+                    let env = decode_envelope(&self.buf[4..end], &self.live);
                     self.buf.drain(..end);
                     return env.map(Some);
                 }
@@ -244,7 +231,7 @@ mod tests {
     async fn reader_is_cancel_safe_and_tells_a_clean_end_from_a_cut_one() {
         let env = fixture_envelope();
         let (mut a, b) = tokio::io::duplex(1 << 16);
-        let mut reader = EnvelopeReader::unchecked(b);
+        let mut reader = EnvelopeReader::new(b, test_live());
         send_envelope(&mut a, &env).await.unwrap();
         let bytes = serde_json::to_vec(&env).unwrap();
         let prefix = u32::try_from(bytes.len()).unwrap().to_be_bytes();
@@ -264,7 +251,7 @@ mod tests {
         a.write_all(&bytes[..10]).await.unwrap();
         drop(a);
         assert!(matches!(
-            EnvelopeReader::unchecked(b).next().await,
+            EnvelopeReader::new(b, test_live()).next().await,
             Err(TransportError::PeerClosed)
         ));
     }
@@ -282,7 +269,7 @@ mod tests {
         a.write_all(&(MAX_ENVELOPE_BYTES + 1).to_be_bytes())
             .await
             .unwrap();
-        let mut reader = EnvelopeReader::unchecked(b);
+        let mut reader = EnvelopeReader::new(b, test_live());
         let read = tokio::time::timeout(std::time::Duration::from_secs(1), reader.next());
         assert!(matches!(
             read.await,
@@ -297,7 +284,7 @@ mod tests {
         let big = envelope_of(vec![9; 8192]);
         let (small, other) = (fixture_envelope(), envelope_of(b"second".to_vec()));
         let (mut a, b) = tokio::io::duplex(1 << 20);
-        let mut reader = EnvelopeReader::unchecked(b);
+        let mut reader = EnvelopeReader::new(b, test_live());
         send_envelope(&mut a, &big).await.unwrap();
         assert_eq!(reader.next().await.unwrap(), Some(big));
         send_envelope(&mut a, &small).await.unwrap();
