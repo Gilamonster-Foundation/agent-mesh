@@ -15,7 +15,7 @@ use agent_mesh_bus::{
     SessionStream, Transport,
 };
 use agent_mesh_protocol::{AgentKey, Fingerprint, SignedEnvelope};
-use agent_mesh_transport::{send_envelope as write_frame, EnvelopeReader};
+use agent_mesh_transport::{send_envelope as write_frame, EnvelopeReader, RevocationGuard};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -63,8 +63,13 @@ const STREAM_PIPE_BYTES: usize = 64 * 1024;
 /// Resource, trust-context, and deadline policy for [`SshTransport`].
 #[derive(Debug, Clone)]
 pub struct SshTransportOptions {
-    /// Generation context bound into the inner handshake.
+    /// Generation context bound into the inner handshake.  The generation the
+    /// session runs at is the one in `revocation`'s log.
     pub session_parameters: SessionParameters,
+    /// The local user's revocation log: both certs are checked against it in
+    /// the inner handshake, and an established session ends when it revokes
+    /// the peer.  A missing or invalid log refuses every peer.
+    pub revocation: RevocationGuard,
     /// One overall authentication deadline and one per-record deadline.
     pub session_timeouts: SessionTimeouts,
     /// Combined cap for authenticating and established inbound/outbound
@@ -74,10 +79,13 @@ pub struct SshTransportOptions {
     pub inbound_capacity: usize,
 }
 
-impl Default for SshTransportOptions {
-    fn default() -> Self {
+impl SshTransportOptions {
+    /// Default limits and deadlines, enforcing `revocation`.
+    #[must_use]
+    pub fn new(revocation: RevocationGuard) -> Self {
         Self {
             session_parameters: SessionParameters::new(None),
+            revocation,
             session_timeouts: SessionTimeouts::default(),
             max_sessions: DEFAULT_MAX_SESSIONS,
             inbound_capacity: DEFAULT_INBOUND_CAPACITY,
@@ -241,10 +249,10 @@ impl SshTransport {
                 "authentication and record timeouts must be non-zero".into(),
             ));
         }
-        verify_cert(
-            agent.cert(),
-            options.session_parameters.current_generation(),
-        )?;
+        options
+            .revocation
+            .check(agent.cert())
+            .map_err(|e| SshTransportError::InvalidConfig(format!("local identity: {e}")))?;
 
         let listener = TcpListener::bind(listen_addr).await?;
         let local_addr = listener.local_addr()?;
@@ -430,6 +438,7 @@ impl SshTransport {
             peer_fp,
             self.options.session_parameters.clone(),
             self.options.session_timeouts,
+            self.options.revocation.clone(),
         )
         .with_purpose(purpose);
         let authenticated = tokio::select! {
@@ -813,6 +822,7 @@ async fn run_accept_loop(
                 agent,
                 options.session_parameters,
                 options.session_timeouts,
+                options.revocation,
             );
             let authenticated = tokio::select! {
                 _ = task_shutdown.changed() => return,
@@ -1079,14 +1089,6 @@ fn track_task(
     Ok(())
 }
 
-fn verify_cert(cert: &agent_mesh_protocol::CertChain, generation: Option<u64>) -> Result<()> {
-    match generation {
-        Some(generation) => cert.verify_at(generation)?,
-        None => cert.verify()?,
-    }
-    Ok(())
-}
-
 fn backend_error(error: SshTransportError) -> BusError {
     BusError::TransportBackend(error.to_string())
 }
@@ -1112,14 +1114,15 @@ mod stream_tests {
 
     impl Fabric for Ssh {
         fn node<'a>(&'a self, user: &'a UserKey, agent: AgentKey) -> Boxed<'a, Node> {
-            let _ = user;
             Box::pin(async move {
                 let pubkey = agent.public_bytes();
                 let agent = Arc::new(agent);
                 let transport = Arc::new(
                     SshTransport::bind_loopback_for_test(
                         agent.clone(),
-                        SshTransportOptions::default(),
+                        SshTransportOptions::new(agent_mesh_transport::RevocationGuard::in_memory(
+                            user,
+                        )),
                     )
                     .await
                     .unwrap(),
@@ -1199,7 +1202,7 @@ mod stream_tests {
             bob.clone(),
             SshTransportOptions {
                 max_sessions: 1,
-                ..SshTransportOptions::default()
+                ..SshTransportOptions::new(agent_mesh_transport::RevocationGuard::in_memory(&user))
             },
         )
         .await
@@ -1207,6 +1210,7 @@ mod stream_tests {
         let connect = |purpose| {
             let (alice, bob_fp, addr) =
                 (alice.clone(), bob.fingerprint(), bob_transport.local_addr());
+            let guard = agent_mesh_transport::RevocationGuard::in_memory(&user);
             async move {
                 let (r, w) = TcpStream::connect(addr).await.unwrap().into_split();
                 UnauthenticatedMeshSession::initiator(
@@ -1216,6 +1220,7 @@ mod stream_tests {
                     bob_fp,
                     SessionParameters::new(None),
                     SessionTimeouts::default(),
+                    guard,
                 )
                 .with_purpose(purpose)
                 .authenticate()
@@ -1312,7 +1317,54 @@ mod tests {
     use agent_mesh_protocol::{AgentMetadata, Caveats, Recipient, UserKey};
     use tempfile::TempDir;
 
+    /// One in-memory revocation guard per test user, keyed by the user's
+    /// fingerprint, so a helper holding only an agent can get the right one.
+    static GUARDS: std::sync::Mutex<
+        Vec<(
+            agent_mesh_protocol::Fingerprint,
+            agent_mesh_transport::RevocationGuard,
+        )>,
+    > = std::sync::Mutex::new(Vec::new());
+
+    fn register_user(user: &UserKey) {
+        GUARDS.lock().unwrap().push((
+            user.fingerprint(),
+            agent_mesh_transport::RevocationGuard::in_memory(user),
+        ));
+    }
+
+    trait UserOf {
+        fn user_fp(&self) -> agent_mesh_protocol::Fingerprint;
+    }
+    impl UserOf for AgentKey {
+        fn user_fp(&self) -> agent_mesh_protocol::Fingerprint {
+            self.cert().user_fingerprint()
+        }
+    }
+    impl UserOf for Arc<AgentKey> {
+        fn user_fp(&self) -> agent_mesh_protocol::Fingerprint {
+            self.cert().user_fingerprint()
+        }
+    }
+    impl UserOf for agent_mesh_protocol::CertChain {
+        fn user_fp(&self) -> agent_mesh_protocol::Fingerprint {
+            self.user_fingerprint()
+        }
+    }
+
+    /// The test user's guard (an empty log: nothing revoked).
+    fn guard_for(of: &impl UserOf) -> agent_mesh_transport::RevocationGuard {
+        let fp = of.user_fp();
+        let guards = GUARDS.lock().unwrap();
+        guards
+            .iter()
+            .find(|(f, _)| *f == fp)
+            .map(|(_, g)| g.clone())
+            .expect("agent was issued by a test helper that registers its user")
+    }
+
     fn agent(user: &UserKey, role: &str) -> Arc<AgentKey> {
+        register_user(user);
         Arc::new(AgentKey::issue(
             user,
             AgentMetadata {
@@ -1365,6 +1417,7 @@ mod tests {
             tokio::io::WriteHalf<tokio::io::DuplexStream>,
         >,
     ) {
+        let (initiator_guard, responder_guard) = (guard_for(&initiator), guard_for(&responder));
         let (left, right) = tokio::io::duplex(128 * 1024);
         let (left_read, left_write) = tokio::io::split(left);
         let (right_read, right_write) = tokio::io::split(right);
@@ -1377,6 +1430,7 @@ mod tests {
             responder.fingerprint(),
             parameters.clone(),
             timeouts,
+            initiator_guard,
         );
         let right = UnauthenticatedMeshSession::responder(
             right_read,
@@ -1384,6 +1438,7 @@ mod tests {
             responder,
             parameters,
             timeouts,
+            responder_guard,
         );
         tokio::try_join!(left.authenticate(), right.authenticate()).expect("mutual authentication")
     }
@@ -1395,6 +1450,7 @@ mod tests {
         AuthenticatedMeshSession<BoxReader, BoxWriter>,
         AuthenticatedMeshSession<BoxReader, BoxWriter>,
     ) {
+        let (initiator_guard, responder_guard) = (guard_for(&initiator), guard_for(&responder));
         let (left, right) = tokio::io::duplex(128 * 1024);
         let (left_read, left_write) = tokio::io::split(left);
         let (right_read, right_write) = tokio::io::split(right);
@@ -1407,6 +1463,7 @@ mod tests {
             responder.fingerprint(),
             parameters.clone(),
             timeouts,
+            initiator_guard,
         );
         let right = UnauthenticatedMeshSession::responder(
             Box::new(right_read) as BoxReader,
@@ -1414,6 +1471,7 @@ mod tests {
             responder,
             parameters,
             timeouts,
+            responder_guard,
         );
         tokio::try_join!(left.authenticate(), right.authenticate()).expect("mutual authentication")
     }
@@ -1447,7 +1505,7 @@ mod tests {
         let bob = agent(&user, "bob");
         let options = SshTransportOptions {
             max_sessions: 1,
-            ..SshTransportOptions::default()
+            ..SshTransportOptions::new(agent_mesh_transport::RevocationGuard::in_memory(&user))
         };
 
         let alice_transport = Arc::new(
@@ -1539,7 +1597,7 @@ mod tests {
                 record: Duration::from_secs(2),
             },
             max_sessions: 4,
-            ..SshTransportOptions::default()
+            ..SshTransportOptions::new(guard_for(&bob))
         };
         let alice_transport = Arc::new(
             SshTransport::bind_loopback_for_test(alice.clone(), options.clone())
@@ -1719,7 +1777,7 @@ mod tests {
         let bob = agent(&user, "bob");
         let options = SshTransportOptions {
             max_sessions: 2,
-            ..SshTransportOptions::default()
+            ..SshTransportOptions::new(guard_for(&alice))
         };
         let alice_transport = Arc::new(
             SshTransport::bind_loopback_for_test(alice.clone(), options.clone())
@@ -1785,7 +1843,7 @@ mod tests {
                 alice.clone(),
                 SshTransportOptions {
                     max_sessions: 1,
-                    ..SshTransportOptions::default()
+                    ..SshTransportOptions::new(guard_for(&alice))
                 },
             )
             .await
@@ -1877,11 +1935,12 @@ mod tests {
     async fn zero_session_limit_is_refused() {
         let user = UserKey::generate();
         let local = agent(&user, "local");
+        let guard = guard_for(&local);
         let error = match SshTransport::bind_loopback_for_test(
             local,
             SshTransportOptions {
                 max_sessions: 0,
-                ..SshTransportOptions::default()
+                ..SshTransportOptions::new(guard)
             },
         )
         .await
@@ -1896,12 +1955,13 @@ mod tests {
     async fn oversized_resource_limits_are_refused_without_panicking() {
         let user = UserKey::generate();
         let local = agent(&user, "local");
+        let guard = guard_for(&local);
         let error = match SshTransport::bind_loopback_for_test(
             local,
             SshTransportOptions {
                 max_sessions: usize::MAX,
                 inbound_capacity: usize::MAX,
-                ..SshTransportOptions::default()
+                ..SshTransportOptions::new(guard)
             },
         )
         .await
@@ -1927,7 +1987,7 @@ mod tests {
                         record: Duration::from_secs(2),
                     },
                     max_sessions: 1,
-                    ..SshTransportOptions::default()
+                    ..SshTransportOptions::new(guard_for(&local))
                 },
             )
             .await
