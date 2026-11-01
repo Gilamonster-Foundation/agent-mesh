@@ -40,6 +40,17 @@ pub enum TransportError {
     #[error("cert chain rejected: {0}")]
     BadCertChain(String),
 
+    /// The peer's chain, or a link of it, is revoked by the local user's
+    /// revocation log.
+    #[error("peer revoked: agent {0}")]
+    Revoked(String),
+
+    /// There is no usable revocation log (missing, unreadable, invalid,
+    /// another user's, or not extending what was last seen). Fail closed:
+    /// every peer is refused until it is fixed.
+    #[error("revocation log unavailable: {0}")]
+    RevocationUnavailable(String),
+
     /// A received `SignedEnvelope` failed `verify()` — bad signature,
     /// payload CID mismatch, or cert chain issue.
     #[error("envelope rejected: {0}")]

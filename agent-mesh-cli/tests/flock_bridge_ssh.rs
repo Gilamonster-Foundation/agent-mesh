@@ -13,14 +13,18 @@ mod support;
 use agent_mesh_bus::{Bus, Transport};
 use agent_mesh_cli::flock_bridge::Peer;
 use agent_mesh_protocol::UserKey;
+use agent_mesh_transport::RevocationGuard;
 use agent_mesh_transport_ssh::{OpenSshClient, SshTransport, SshTransportOptions};
 use std::sync::Arc;
 use support::{agent, blocking, World};
 
 /// Both ends over ssh. The sshd comes back too: it must outlive the world.
 async fn ssh_world() -> Option<(World, sshd::Sshd)> {
-    let opts = SshTransportOptions::default;
     let user = Arc::new(UserKey::generate());
+    let opts = {
+        let user = user.clone();
+        move || SshTransportOptions::new(RevocationGuard::in_memory(&user))
+    };
     let home_key = Arc::new(agent(&user, "home"));
     let home_fp = home_key.fingerprint();
     let home_transport =

@@ -73,7 +73,8 @@ pub async fn run(home: PathBuf, quiet: bool, flock_session: Option<PathBuf>) -> 
     }
 
     let announce = !quiet;
-    let bus = Bus::bind_with(&user, agent, 0, BusOptions { announce }).await?;
+    let revocation = util::revocation_guard(&home, &user)?;
+    let bus = Bus::bind_with(&user, agent, 0, BusOptions { announce }, revocation).await?;
     let (resolver, resolver_handle) = PeerResolver::start()?;
 
     // Handshake/progress chatter goes to stderr: stdout is the
@@ -576,7 +577,8 @@ mod tests {
                 caveats: Caveats::top(),
             },
         );
-        let bus = Bus::bind_with(&user, agent, 0, BusOptions { announce: false })
+        let revocation = agent_mesh_transport::RevocationGuard::in_memory(&user);
+        let bus = Bus::bind_with(&user, agent, 0, BusOptions { announce: false }, revocation)
             .await
             .expect("bind");
         let (resolver, resolver_handle) = PeerResolver::start().expect("resolver");

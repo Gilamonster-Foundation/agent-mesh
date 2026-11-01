@@ -58,6 +58,12 @@ async def run(home: Path, duration: Optional[str]) -> int:
     user_fp = user.fingerprint()
     cert = agent.cert()
 
+    try:
+        revocation = util.revocation_guard(home, user)
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
     # Bind iroh first so we know the port to announce.
     endpoint = await Endpoint.bind(agent, 0)
     port = await endpoint.local_port()
@@ -108,7 +114,9 @@ async def run(home: Path, duration: Optional[str]) -> int:
                 # still interrupts the awaitable.
                 timeout_ms = 60_000
             try:
-                accepted = await endpoint.accept_envelope(cert, timeout_ms)
+                accepted = await endpoint.accept_envelope(
+                    cert, timeout_ms, revocation
+                )
             except Exception as e:  # noqa: BLE001 — log per-conn failures, keep listening
                 print(f"connection error: {e}", file=sys.stderr)
                 continue

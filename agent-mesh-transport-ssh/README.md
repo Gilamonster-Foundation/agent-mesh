@@ -79,11 +79,16 @@ fallback to envelope-only authentication or unbound provenance.
   concurrent sessions, and shutdown. A length cap without a body-read timeout
   is not sufficient.
 - Reap SSH children and cancel session tasks on close.
-- Use generation-aware cert verification when current generation state is
-  available. Generation policy is fixed when the transport binds, so callers
-  must close and rebind it on a generation bump. The current bus envelope
-  verifier is still context-free and therefore rejects generation-scoped
-  envelope certs even if the session handshake succeeds.
+- Check both certs against the local user's revocation log
+  (`SshTransportOptions::revocation`, see `docs/decisions/revocation.md`): no
+  link revoked, valid at the log's generation, which replaces the generation
+  in `SessionParameters`. Every record read or written re-checks the peer, so
+  a revocation the log learns mid-session ends the session before the revoked
+  peer's next envelope is dispatched, including envelopes already queued or
+  buffered in the bus session pipe (the same check runs again at delivery). A missing or invalid log refuses every
+  peer. The current bus envelope verifier is still context-free and therefore
+  rejects generation-scoped envelope certs even if the session handshake
+  succeeds.
 - Reuse one authenticated, counter-continuous session per outbound peer until
   it closes or reaches its idle/read deadline; concurrent writes are
   serialized and cancellation poisons the session.
@@ -102,8 +107,9 @@ do not rely on it as an automatic wall-clock expiry control.
   cross-session replay, and captured-record injection; they do not detect that
   live relay.
 - SSH encryption ends at `sshd`; the loopback hop is plaintext.
-- Generation revocation requires current policy state and live-session
-  teardown.
+- Revocation is only as current as the log file on this machine: nothing
+  distributes it, and a session idle since the revocation ends at its next
+  record, not at once.
 
 An in-process SSH server or authenticated proxy metadata channel is required
 if a future deployment must bind the accepted SSH identity directly to the

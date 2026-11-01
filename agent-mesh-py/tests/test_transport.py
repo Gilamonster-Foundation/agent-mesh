@@ -39,3 +39,20 @@ def test_alpn_constant_exported() -> None:
     assert hasattr(transport, "ALPN")
     assert isinstance(transport.ALPN, bytes)
     assert transport.ALPN == b"agent-mesh/v1"
+
+
+def test_revocation_guard_fails_closed_without_a_log(tmp_path) -> None:
+    user = core.UserKey.generate()
+    with pytest.raises(RuntimeError):
+        transport.RevocationGuard.open(str(tmp_path / "revocation.json"), user.fingerprint())
+
+
+def test_revocation_guard_opens_a_persisted_log(tmp_path) -> None:
+    user = core.UserKey.generate()
+    log = core.RevocationLog.genesis(user)
+    path = tmp_path / "revocation.json"
+    path.write_text(log.to_json())
+    transport.RevocationGuard.open(str(path), user.fingerprint())
+    # another user's log is refused
+    with pytest.raises(RuntimeError):
+        transport.RevocationGuard.open(str(path), core.UserKey.generate().fingerprint())

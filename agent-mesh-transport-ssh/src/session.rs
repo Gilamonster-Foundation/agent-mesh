@@ -12,7 +12,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_mesh_bus::AuthenticatedPeer;
-use agent_mesh_protocol::{AgentKey, CertChain, Fingerprint, SerdeSig, SignedEnvelope};
+use agent_mesh_protocol::{
+    AgentKey, CertChain, Fingerprint, MeshError, RevocationState, SerdeSig, SignedEnvelope,
+};
+use agent_mesh_transport::{LiveCheck, RevocationGuard, TransportError};
 use ed25519_dalek::{Signature, VerifyingKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -109,7 +112,9 @@ impl SessionRole {
 /// Wire-format and allocation limits are deliberately fixed.  The only
 /// contextual input is the causal generation used to validate both certs; a
 /// mismatch therefore fails the handshake instead of letting peers silently
-/// apply different revocation views.
+/// apply different revocation views.  A session always runs against the
+/// local [`RevocationGuard`]'s log, and that log's generation replaces
+/// whatever generation was set here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionParameters {
@@ -238,6 +243,16 @@ pub enum SessionError {
     #[error("peer certificate rejected: {0}")]
     BadPeerCertificate(String),
 
+    /// The peer, or a link of its chain, is revoked by the local user's
+    /// revocation log (at the handshake, or learned while the session ran).
+    #[error("peer revoked: agent {0}")]
+    PeerRevoked(String),
+
+    /// No usable revocation log: missing, unreadable, invalid, another user's,
+    /// or not extending what was last seen.  Fail closed.
+    #[error("revocation log unavailable: {0}")]
+    RevocationUnavailable(String),
+
     /// The peer roots at a different user.
     #[error("peer user {peer} does not match local user {local}")]
     DifferentUser {
@@ -304,6 +319,7 @@ pub struct UnauthenticatedMeshSession<R, W> {
     parameters: SessionParameters,
     timeouts: SessionTimeouts,
     purpose: SessionPurpose,
+    revocation: RevocationGuard,
 }
 
 impl<R, W> UnauthenticatedMeshSession<R, W> {
@@ -315,7 +331,9 @@ impl<R, W> UnauthenticatedMeshSession<R, W> {
     }
 
     /// Create the spoke/initiator side.  The responder AgentKey fingerprint is
-    /// mandatory and is carried inside the signed transcript.
+    /// mandatory and is carried inside the signed transcript.  Both certs are
+    /// checked against `revocation`, and the session ends if it later revokes
+    /// the peer.
     #[must_use]
     pub fn initiator(
         reader: R,
@@ -324,6 +342,7 @@ impl<R, W> UnauthenticatedMeshSession<R, W> {
         expected_responder: Fingerprint,
         parameters: SessionParameters,
         timeouts: SessionTimeouts,
+        revocation: RevocationGuard,
     ) -> Self {
         Self {
             reader,
@@ -334,11 +353,13 @@ impl<R, W> UnauthenticatedMeshSession<R, W> {
             parameters,
             timeouts,
             purpose: SessionPurpose::Messages,
+            revocation,
         }
     }
 
     /// Create the hub/responder side.  The peer's Hello must name this exact
-    /// responder before authentication succeeds.
+    /// responder before authentication succeeds.  Both certs are checked
+    /// against `revocation`, and the session ends if it later revokes the peer.
     #[must_use]
     pub fn responder(
         reader: R,
@@ -346,6 +367,7 @@ impl<R, W> UnauthenticatedMeshSession<R, W> {
         local_agent: Arc<AgentKey>,
         parameters: SessionParameters,
         timeouts: SessionTimeouts,
+        revocation: RevocationGuard,
     ) -> Self {
         Self {
             reader,
@@ -356,6 +378,7 @@ impl<R, W> UnauthenticatedMeshSession<R, W> {
             parameters,
             timeouts,
             purpose: SessionPurpose::Messages,
+            revocation,
         }
     }
 }
@@ -378,11 +401,14 @@ where
                 duration: timeout,
             })??;
 
+        let live =
+            LiveCheck::new(self.revocation, outcome.peer_cert.clone()).map_err(revocation_error)?;
         Ok(AuthenticatedMeshSession {
             reader: self.reader,
             writer: self.writer,
             local_agent: self.local_agent,
             role: self.role,
+            live,
             peer: outcome.peer,
             peer_cert: outcome.peer_cert,
             peer_verifying_key: outcome.peer_verifying_key,
@@ -397,8 +423,12 @@ where
     }
 
     async fn authenticate_inner(&mut self) -> Result<HandshakeOutcome, SessionError> {
+        // The local log decides the generation; peers on different ones
+        // fail the parameter comparison instead of applying different views.
+        let state = self.revocation.state().map_err(revocation_error)?;
+        self.parameters.current_generation = Some(state.generation);
         self.parameters.validate()?;
-        validate_local_identity(&self.local_agent, self.parameters.current_generation)?;
+        validate_local_identity(&self.local_agent, &state)?;
 
         let local_hello = HelloFrame::new(
             self.role,
@@ -421,6 +451,7 @@ where
             &peer_hello,
             self.local_agent.cert(),
             &self.parameters,
+            &state,
         )?;
 
         let transcript_id = match self.role {
@@ -476,6 +507,8 @@ pub struct AuthenticatedMeshSession<R, W> {
     writer: W,
     local_agent: Arc<AgentKey>,
     role: SessionRole,
+    /// Re-checks the peer against the revocation log on every record.
+    live: LiveCheck,
     peer: AuthenticatedPeer,
     peer_cert: CertChain,
     peer_verifying_key: VerifyingKey,
@@ -513,6 +546,14 @@ impl<R, W> AuthenticatedMeshSession<R, W> {
         self.transcript_id
     }
 
+    /// The peer's revocation check, shared by every record of this session.
+    /// Hand it to whatever queues or buffers envelopes beyond the record layer
+    /// so they are admitted through it again at the last step.
+    #[must_use]
+    pub fn live(&self) -> LiveCheck {
+        self.live.clone()
+    }
+
     /// This endpoint's ordered session role.
     #[must_use]
     pub fn role(&self) -> SessionRole {
@@ -526,6 +567,7 @@ impl<R, W> AuthenticatedMeshSession<R, W> {
         (
             AuthenticatedSessionReader {
                 reader: self.reader,
+                live: self.live.clone(),
                 role: self.role,
                 peer: self.peer,
                 peer_cert: self.peer_cert,
@@ -537,6 +579,7 @@ impl<R, W> AuthenticatedMeshSession<R, W> {
             },
             AuthenticatedSessionWriter {
                 writer: self.writer,
+                live: self.live,
                 local_agent: self.local_agent,
                 role: self.role,
                 peer: self.peer,
@@ -556,6 +599,7 @@ where
 {
     /// Send one carrier-signed, session-bound envelope record.
     pub async fn send_envelope(&mut self, env: &SignedEnvelope) -> Result<(), SessionError> {
+        admit(&self.live, &mut self.send_poisoned)?;
         send_authenticated_record(
             &mut self.writer,
             &self.local_agent,
@@ -573,7 +617,7 @@ where
 
     /// Receive, authenticate, then parse one session-bound envelope record.
     pub async fn recv_envelope(&mut self) -> Result<SignedEnvelope, SessionError> {
-        receive_authenticated_record(
+        let env = receive_authenticated_record(
             &mut self.reader,
             &self.peer_verifying_key,
             RecordIoContext {
@@ -584,13 +628,17 @@ where
             &mut self.receive_counter,
             &mut self.receive_poisoned,
         )
-        .await
+        .await?;
+        // Before the envelope is handed on for dispatch.
+        admit(&self.live, &mut self.receive_poisoned)?;
+        Ok(env)
     }
 }
 
 /// Receive half of a split authenticated session.
 pub struct AuthenticatedSessionReader<R> {
     reader: R,
+    live: LiveCheck,
     role: SessionRole,
     peer: AuthenticatedPeer,
     peer_cert: CertChain,
@@ -614,6 +662,12 @@ impl<R> AuthenticatedSessionReader<R> {
         &self.peer_cert
     }
 
+    /// The peer's revocation check, shared by every record of this session.
+    #[must_use]
+    pub fn live(&self) -> LiveCheck {
+        self.live.clone()
+    }
+
     /// Fresh connection transcript identifier.
     #[must_use]
     pub fn transcript_id(&self) -> [u8; 32] {
@@ -633,7 +687,7 @@ where
 {
     /// Receive, authenticate, then parse one session-bound envelope record.
     pub async fn recv_envelope(&mut self) -> Result<SignedEnvelope, SessionError> {
-        receive_authenticated_record(
+        let env = receive_authenticated_record(
             &mut self.reader,
             &self.peer_verifying_key,
             RecordIoContext {
@@ -644,13 +698,17 @@ where
             &mut self.receive_counter,
             &mut self.poisoned,
         )
-        .await
+        .await?;
+        // Before the envelope is handed on for dispatch.
+        admit(&self.live, &mut self.poisoned)?;
+        Ok(env)
     }
 }
 
 /// Send half of a split authenticated session.
 pub struct AuthenticatedSessionWriter<W> {
     writer: W,
+    live: LiveCheck,
     local_agent: Arc<AgentKey>,
     role: SessionRole,
     peer: AuthenticatedPeer,
@@ -686,6 +744,7 @@ where
 {
     /// Send one carrier-signed, session-bound envelope record.
     pub async fn send_envelope(&mut self, env: &SignedEnvelope) -> Result<(), SessionError> {
+        admit(&self.live, &mut self.poisoned)?;
         send_authenticated_record(
             &mut self.writer,
             &self.local_agent,
@@ -925,8 +984,30 @@ fn random_nonce() -> [u8; 32] {
     nonce
 }
 
-fn validate_local_identity(agent: &AgentKey, generation: Option<u64>) -> Result<(), SessionError> {
-    verify_cert(agent.cert(), generation)
+/// Re-check the peer against the revocation log; a failure poisons the half,
+/// so the session stays down.
+fn admit(live: &LiveCheck, poisoned: &mut bool) -> Result<(), SessionError> {
+    if *poisoned {
+        return Err(SessionError::Poisoned);
+    }
+    live.admit().map_err(|error| {
+        *poisoned = true;
+        revocation_error(error)
+    })
+}
+
+/// A transport-level revocation failure, as the session error it is.
+fn revocation_error(error: TransportError) -> SessionError {
+    match error {
+        TransportError::Revoked(agent) => SessionError::PeerRevoked(agent),
+        other => SessionError::RevocationUnavailable(other.to_string()),
+    }
+}
+
+fn validate_local_identity(agent: &AgentKey, state: &RevocationState) -> Result<(), SessionError> {
+    agent
+        .cert()
+        .verify_with(state)
         .map_err(|error| SessionError::InvalidLocalIdentity(error.to_string()))?;
     if agent.verifying_key().as_bytes() != &agent.cert().agent_pubkey {
         return Err(SessionError::InvalidLocalIdentity(
@@ -941,6 +1022,7 @@ fn validate_peer_hello(
     peer: &HelloFrame,
     local_cert: &CertChain,
     parameters: &SessionParameters,
+    state: &RevocationState,
 ) -> Result<VerifyingKey, SessionError> {
     if peer.protocol != PROTOCOL_LABEL
         || peer.version != PROTOCOL_VERSION
@@ -973,8 +1055,6 @@ fn validate_peer_hello(
         }
     }
 
-    verify_cert(&peer.cert, parameters.current_generation)
-        .map_err(|error| SessionError::BadPeerCertificate(error.to_string()))?;
     let local_user = local_cert.user_fingerprint();
     let peer_user = peer.cert.user_fingerprint();
     if peer_user != local_user {
@@ -983,15 +1063,12 @@ fn validate_peer_hello(
             local: local_user.hex(),
         });
     }
+    peer.cert.verify_with(state).map_err(|error| match error {
+        MeshError::Revoked { agent } => SessionError::PeerRevoked(agent.hex()),
+        other => SessionError::BadPeerCertificate(other.to_string()),
+    })?;
     VerifyingKey::from_bytes(&peer.cert.agent_pubkey)
         .map_err(|_| SessionError::BadPeerCertificate("invalid ed25519 leaf key".into()))
-}
-
-fn verify_cert(cert: &CertChain, generation: Option<u64>) -> agent_mesh_protocol::Result<()> {
-    match generation {
-        Some(current) => cert.verify_at(current),
-        None => cert.verify(),
-    }
 }
 
 fn make_transcript_id(initiator_hello: &[u8], responder_hello: &[u8]) -> [u8; 32] {
@@ -1259,6 +1336,7 @@ mod tests {
     use tokio::io::{DuplexStream, ReadHalf, WriteHalf};
 
     use super::*;
+    use crate::test_log::LogFixture;
 
     type TestSession = AuthenticatedMeshSession<ReadHalf<DuplexStream>, WriteHalf<DuplexStream>>;
     type TestPending = UnauthenticatedMeshSession<ReadHalf<DuplexStream>, WriteHalf<DuplexStream>>;
@@ -1274,7 +1352,56 @@ mod tests {
         }
     }
 
+    /// One in-memory revocation guard per test user, keyed by the user's
+    /// fingerprint, so a helper holding only an agent can get the right one.
+    static GUARDS: std::sync::Mutex<
+        Vec<(
+            agent_mesh_protocol::Fingerprint,
+            agent_mesh_transport::RevocationGuard,
+        )>,
+    > = std::sync::Mutex::new(Vec::new());
+
+    fn register_user(user: &UserKey) {
+        GUARDS.lock().unwrap().push((
+            user.fingerprint(),
+            agent_mesh_transport::RevocationGuard::in_memory(user),
+        ));
+    }
+
+    trait UserOf {
+        fn user_fp(&self) -> agent_mesh_protocol::Fingerprint;
+    }
+    impl UserOf for AgentKey {
+        fn user_fp(&self) -> agent_mesh_protocol::Fingerprint {
+            self.cert().user_fingerprint()
+        }
+    }
+    impl UserOf for Arc<AgentKey> {
+        fn user_fp(&self) -> agent_mesh_protocol::Fingerprint {
+            self.cert().user_fingerprint()
+        }
+    }
+    impl UserOf for CertChain {
+        fn user_fp(&self) -> agent_mesh_protocol::Fingerprint {
+            self.user_fingerprint()
+        }
+    }
+
+    /// The test user's guard (an empty log: nothing revoked).
+    fn guard_for(of: &impl UserOf) -> agent_mesh_transport::RevocationGuard {
+        let fp = of.user_fp();
+        let guards = GUARDS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guards
+            .iter()
+            .find(|(f, _)| *f == fp)
+            .map(|(_, g)| g.clone())
+            .expect("agent was issued by a test helper that registers its user")
+    }
+
     fn agent(user: &UserKey, role: &str) -> Arc<AgentKey> {
+        register_user(user);
         Arc::new(AgentKey::issue(user, metadata(role)))
     }
 
@@ -1315,6 +1442,7 @@ mod tests {
         timeouts: SessionTimeouts,
         capacity: usize,
     ) -> (TestSession, TestSession) {
+        let (initiator_guard, responder_guard) = (guard_for(&initiator), guard_for(&responder));
         let (left, right) = tokio::io::duplex(capacity);
         let (left_reader, left_writer) = tokio::io::split(left);
         let (right_reader, right_writer) = tokio::io::split(right);
@@ -1325,6 +1453,7 @@ mod tests {
             responder.fingerprint(),
             parameters.clone(),
             timeouts,
+            initiator_guard,
         );
         let right = UnauthenticatedMeshSession::responder(
             right_reader,
@@ -1332,6 +1461,7 @@ mod tests {
             responder,
             parameters,
             timeouts,
+            responder_guard,
         );
         let (left, right) = tokio::join!(left.authenticate(), right.authenticate());
         (
@@ -1361,6 +1491,7 @@ mod tests {
         timeouts: SessionTimeouts,
     ) -> TestPending {
         let (reader, writer) = tokio::io::split(stream);
+        let guard = guard_for(&local);
         UnauthenticatedMeshSession::initiator(
             reader,
             writer,
@@ -1368,6 +1499,7 @@ mod tests {
             expected_responder,
             SessionParameters::default(),
             timeouts,
+            guard,
         )
     }
 
@@ -1903,7 +2035,8 @@ mod tests {
                 &reflected_hello,
                 &reflected_hello,
                 shared.cert(),
-                &SessionParameters::default()
+                &SessionParameters::default(),
+                &guard_for(shared.cert()).state().unwrap()
             ),
             Err(SessionError::RoleMismatch)
         ));
@@ -2042,7 +2175,8 @@ mod tests {
                 &local,
                 &wrong_version,
                 alice.cert(),
-                &SessionParameters::default()
+                &SessionParameters::default(),
+                &guard_for(alice.cert()).state().unwrap()
             ),
             Err(SessionError::ProtocolMismatch)
         ));
@@ -2053,7 +2187,8 @@ mod tests {
                 &local,
                 &wrong_transport,
                 alice.cert(),
-                &SessionParameters::default()
+                &SessionParameters::default(),
+                &guard_for(alice.cert()).state().unwrap()
             ),
             Err(SessionError::ProtocolMismatch)
         ));
@@ -2078,8 +2213,14 @@ mod tests {
             SessionParameters::default(),
             None,
         );
-        validate_peer_hello(&local, &peer, alice.cert(), &SessionParameters::default())
-            .expect("baseline hello");
+        validate_peer_hello(
+            &local,
+            &peer,
+            alice.cert(),
+            &SessionParameters::default(),
+            &guard_for(alice.cert()).state().unwrap(),
+        )
+        .expect("baseline hello");
 
         let mut changed = peer.clone();
         changed.protocol = "wrong".into();
@@ -2088,7 +2229,8 @@ mod tests {
                 &local,
                 &changed,
                 alice.cert(),
-                &SessionParameters::default()
+                &SessionParameters::default(),
+                &guard_for(alice.cert()).state().unwrap()
             ),
             Err(SessionError::ProtocolMismatch)
         ));
@@ -2099,7 +2241,8 @@ mod tests {
                 &local,
                 &changed,
                 alice.cert(),
-                &SessionParameters::default()
+                &SessionParameters::default(),
+                &guard_for(alice.cert()).state().unwrap()
             ),
             Err(SessionError::RoleMismatch)
         ));
@@ -2110,7 +2253,8 @@ mod tests {
                 &local,
                 &changed,
                 alice.cert(),
-                &SessionParameters::default()
+                &SessionParameters::default(),
+                &guard_for(alice.cert()).state().unwrap()
             ),
             Err(SessionError::ParameterMismatch)
         ));
@@ -2121,7 +2265,8 @@ mod tests {
                 &wrong_expected,
                 &peer,
                 alice.cert(),
-                &SessionParameters::default()
+                &SessionParameters::default(),
+                &guard_for(alice.cert()).state().unwrap()
             ),
             Err(SessionError::UnexpectedResponder)
         ));
@@ -2134,7 +2279,8 @@ mod tests {
                 &local,
                 &changed,
                 alice.cert(),
-                &SessionParameters::default()
+                &SessionParameters::default(),
+                &guard_for(alice.cert()).state().unwrap()
             ),
             Err(SessionError::BadPeerCertificate(_))
         ));
@@ -2160,7 +2306,8 @@ mod tests {
                 &local_for_stranger,
                 &stranger_hello,
                 alice.cert(),
-                &SessionParameters::default()
+                &SessionParameters::default(),
+                &guard_for(alice.cert()).state().unwrap()
             ),
             Err(SessionError::DifferentUser { .. })
         ));
@@ -2168,25 +2315,31 @@ mod tests {
 
     #[tokio::test]
     async fn generation_context_is_applied_to_both_certificates() {
-        let user = UserKey::generate();
+        // The log's generation is the session's causal generation: certs scoped
+        // to generation 5 authenticate under a log bumped to 5, and not under
+        // an unbumped one.
+        let f = LogFixture::new();
         let scoped = |role: &str| {
             let mut metadata = metadata(role);
             metadata.caveats = Caveats {
                 valid_for_generation: Scope::only([5]),
                 ..Caveats::top()
             };
-            Arc::new(AgentKey::issue(&user, metadata))
+            Arc::new(AgentKey::issue(&f.user, metadata))
         };
-        let alice = scoped("alice");
-        let bob = scoped("bob");
-        let (left, right) = authenticated_pair_with(
-            alice,
-            bob,
-            SessionParameters::new(Some(5)),
-            short_timeouts(),
-            64,
+        let (alice, bob) = (scoped("alice"), scoped("bob"));
+        let (stale, _) = pair_with_guards(
+            alice.clone(),
+            bob.clone(),
+            f.guard(),
+            RevocationGuard::in_memory(&f.user),
         )
         .await;
+        assert!(stale.is_err(), "generation 0 does not admit gen-5 certs");
+
+        f.bump(5);
+        let (left, right) = pair_with_guards(alice, bob, f.guard(), f.guard()).await;
+        let (left, right) = (left.unwrap(), right.unwrap());
         assert_eq!(left.transcript_id(), right.transcript_id());
     }
 
@@ -2231,6 +2384,7 @@ mod tests {
         let bob = agent(&user, "bob");
         let (local, _stalled_peer) = tokio::io::duplex(64 * 1024);
         let (reader, writer) = tokio::io::split(local);
+        let guard = guard_for(&alice);
         let pending = UnauthenticatedMeshSession::initiator(
             reader,
             writer,
@@ -2241,6 +2395,7 @@ mod tests {
                 authentication: Duration::from_millis(10),
                 record: Duration::from_secs(1),
             },
+            guard,
         );
         let error = match pending.authenticate().await {
             Ok(_) => panic!("stalled peer authenticated"),
@@ -2674,5 +2829,129 @@ mod tests {
             alice_writer.send_envelope(&large).await,
             Err(SessionError::Poisoned)
         ));
+    }
+
+    /// Both ends authenticate over a pipe, each against its own guard.
+    async fn pair_with_guards(
+        initiator: Arc<AgentKey>,
+        responder: Arc<AgentKey>,
+        initiator_guard: RevocationGuard,
+        responder_guard: RevocationGuard,
+    ) -> (
+        Result<TestSession, SessionError>,
+        Result<TestSession, SessionError>,
+    ) {
+        let (left, right) = tokio::io::duplex(64 * 1024);
+        let (left_reader, left_writer) = tokio::io::split(left);
+        let (right_reader, right_writer) = tokio::io::split(right);
+        let left = UnauthenticatedMeshSession::initiator(
+            left_reader,
+            left_writer,
+            initiator,
+            responder.fingerprint(),
+            SessionParameters::default(),
+            roomy_timeouts(),
+            initiator_guard,
+        );
+        let right = UnauthenticatedMeshSession::responder(
+            right_reader,
+            right_writer,
+            responder,
+            SessionParameters::default(),
+            roomy_timeouts(),
+            responder_guard,
+        );
+        tokio::join!(left.authenticate(), right.authenticate())
+    }
+
+    /// A revoked agent cannot complete the SSH session handshake, whichever
+    /// end it sits at: the end holding the log refuses it by name.
+    #[tokio::test]
+    async fn a_revoked_agent_cannot_complete_the_session_handshake() {
+        let f = LogFixture::new();
+        let (alice, bob) = (agent(&f.user, "alice"), agent(&f.user, "bob"));
+        f.revoke(&alice);
+        let (_, responder) = pair_with_guards(
+            alice.clone(),
+            bob.clone(),
+            RevocationGuard::in_memory(&f.user),
+            f.guard(),
+        )
+        .await;
+        assert!(
+            matches!(responder, Err(SessionError::PeerRevoked(_))),
+            "responder must refuse a revoked initiator: {:?}",
+            responder.map(|_| ())
+        );
+        let f = LogFixture::new();
+        let (alice, bob) = (agent(&f.user, "alice"), agent(&f.user, "bob"));
+        f.revoke(&bob);
+        let (initiator, _) =
+            pair_with_guards(alice, bob, f.guard(), RevocationGuard::in_memory(&f.user)).await;
+        assert!(
+            matches!(initiator, Err(SessionError::PeerRevoked(_))),
+            "initiator must refuse a revoked responder: {:?}",
+            initiator.map(|_| ())
+        );
+    }
+
+    /// With no usable log the handshake fails closed.
+    #[tokio::test]
+    async fn a_missing_log_cannot_authenticate_anyone() {
+        let f = LogFixture::new();
+        let (alice, bob) = (agent(&f.user, "alice"), agent(&f.user, "bob"));
+        let guard = f.guard();
+        std::fs::write(f.path(), b"not a log").unwrap();
+        let (left, _) =
+            pair_with_guards(alice, bob, guard, RevocationGuard::in_memory(&f.user)).await;
+        assert!(
+            matches!(left, Err(SessionError::RevocationUnavailable(_))),
+            "{:?}",
+            left.map(|_| ())
+        );
+    }
+
+    /// A revocation the log learns mid-session ends it before the revoked
+    /// peer's next envelope is returned for dispatch, and the half stays down.
+    #[tokio::test]
+    async fn revoking_a_connected_peer_ends_its_session_before_its_next_envelope() {
+        let f = LogFixture::new();
+        let (alice, bob) = (agent(&f.user, "alice"), agent(&f.user, "bob"));
+        let (alice_session, bob_session) = pair_with_guards(
+            alice.clone(),
+            bob.clone(),
+            RevocationGuard::in_memory(&f.user),
+            f.guard(),
+        )
+        .await;
+        let (mut alice_session, mut bob_session) = (alice_session.unwrap(), bob_session.unwrap());
+
+        alice_session
+            .send_envelope(&envelope(&alice, bob.fingerprint(), 0, b"one".to_vec()))
+            .await
+            .unwrap();
+        let first = bob_session.recv_envelope().await.unwrap();
+        assert_eq!(first.payload.as_ref(), b"one");
+
+        f.revoke(&alice);
+        alice_session
+            .send_envelope(&envelope(&alice, bob.fingerprint(), 1, b"two".to_vec()))
+            .await
+            .unwrap();
+        let second = bob_session.recv_envelope().await;
+        assert!(
+            matches!(second, Err(SessionError::PeerRevoked(_))),
+            "the envelope of a revoked peer must not be dispatched: {:?}",
+            second.map(|e| e.payload)
+        );
+        assert!(matches!(
+            bob_session.recv_envelope().await,
+            Err(SessionError::Poisoned)
+        ));
+        let reply = envelope(&bob, alice.fingerprint(), 0, b"late".to_vec());
+        assert!(
+            bob_session.send_envelope(&reply).await.is_err(),
+            "nothing is sent to a revoked peer"
+        );
     }
 }

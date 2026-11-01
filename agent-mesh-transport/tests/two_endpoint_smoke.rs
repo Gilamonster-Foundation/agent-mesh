@@ -12,7 +12,7 @@ use agent_mesh_protocol::{
 };
 use agent_mesh_transport::{
     do_handshake, identity::agent_pubkey_to_iroh, recv_envelope, send_envelope, Endpoint,
-    TransportError,
+    LiveCheck, RevocationGuard, TransportError,
 };
 
 /// Issue a deterministic-metadata agent key for tests.
@@ -48,6 +48,8 @@ async fn two_endpoints_same_user_can_exchange_envelope() {
 
     within_10s("same-user exchange", async {
         let user = UserKey::generate();
+        let alice_guard = RevocationGuard::in_memory(&user);
+        let bob_guard = alice_guard.clone();
         let alice = agent_for(&user, "alice");
         let bob = agent_for(&user, "bob");
         let bob_fp = bob.fingerprint();
@@ -86,10 +88,13 @@ async fn two_endpoints_same_user_can_exchange_envelope() {
             let incoming = bob_ep.accept().await.expect("bob got incoming");
             let conn = incoming.await.expect("bob handshake");
             let (mut send, mut recv) = conn.accept_bi().await.expect("bob accept_bi");
-            let peer_cert = do_handshake(&bob_cert, &mut send, &mut recv, false)
+            let peer_cert = do_handshake(&bob_cert, &mut send, &mut recv, false, &bob_guard)
                 .await
                 .expect("bob handshake");
-            let env = recv_envelope(&mut recv).await.expect("bob recv envelope");
+            let live = LiveCheck::new(bob_guard.clone(), peer_cert.clone()).unwrap();
+            let env = recv_envelope(&mut recv, &live)
+                .await
+                .expect("bob recv envelope");
             (peer_cert, env)
         });
 
@@ -99,7 +104,7 @@ async fn two_endpoints_same_user_can_exchange_envelope() {
             .await
             .expect("alice dial");
         let (mut send, mut recv) = conn.open_bi().await.expect("alice open_bi");
-        let peer_cert = do_handshake(&alice_cert, &mut send, &mut recv, true)
+        let peer_cert = do_handshake(&alice_cert, &mut send, &mut recv, true, &alice_guard)
             .await
             .expect("alice handshake");
         assert_eq!(peer_cert.agent_fingerprint(), bob.fingerprint());
@@ -130,6 +135,8 @@ async fn different_users_rejected_by_handshake() {
     within_10s("different-user rejection", async {
         let user_a = UserKey::generate();
         let user_b = UserKey::generate();
+        let alice_guard = RevocationGuard::in_memory(&user_a);
+        let bob_guard = RevocationGuard::in_memory(&user_b);
         let alice = agent_for(&user_a, "alice");
         let bob = agent_for(&user_b, "bob");
 
@@ -167,7 +174,7 @@ async fn different_users_rejected_by_handshake() {
             let conn = incoming.await.expect("bob handshake");
             let (mut send, mut recv) = conn.accept_bi().await.expect("bob accept_bi");
             // Acceptor side should see DifferentUser and refuse.
-            do_handshake(&bob_cert, &mut send, &mut recv, false).await
+            do_handshake(&bob_cert, &mut send, &mut recv, false, &bob_guard).await
         });
 
         let conn = alice_ep
@@ -175,7 +182,7 @@ async fn different_users_rejected_by_handshake() {
             .await
             .expect("alice dial");
         let (mut send, mut recv) = conn.open_bi().await.expect("alice open_bi");
-        let res = do_handshake(&alice_cert, &mut send, &mut recv, true).await;
+        let res = do_handshake(&alice_cert, &mut send, &mut recv, true, &alice_guard).await;
 
         // Both sides should err with DifferentUser.
         match res {
@@ -197,6 +204,8 @@ async fn tampered_payload_is_rejected_on_receipt() {
 
     within_10s("tampered envelope rejection", async {
         let user = UserKey::generate();
+        let alice_guard = RevocationGuard::in_memory(&user);
+        let bob_guard = alice_guard.clone();
         let alice = agent_for(&user, "alice");
         let bob = agent_for(&user, "bob");
         let bob_fp = bob.fingerprint();
@@ -233,15 +242,16 @@ async fn tampered_payload_is_rejected_on_receipt() {
             let incoming = bob_ep.accept().await.expect("incoming");
             let conn = incoming.await.expect("connect");
             let (mut send, mut recv) = conn.accept_bi().await.expect("accept_bi");
-            do_handshake(&bob_cert, &mut send, &mut recv, false)
+            let peer = do_handshake(&bob_cert, &mut send, &mut recv, false, &bob_guard)
                 .await
                 .expect("handshake");
-            recv_envelope(&mut recv).await
+            let live = LiveCheck::new(bob_guard.clone(), peer).unwrap();
+            recv_envelope(&mut recv, &live).await
         });
 
         let conn = alice_ep.dial(bob_pubkey, bob_addrs).await.expect("dial");
         let (mut send, mut recv) = conn.open_bi().await.expect("open_bi");
-        do_handshake(&alice_cert, &mut send, &mut recv, true)
+        do_handshake(&alice_cert, &mut send, &mut recv, true, &alice_guard)
             .await
             .expect("handshake");
 
@@ -272,4 +282,73 @@ async fn fingerprint_referenced_in_test_to_keep_used() {
     // not reference it directly.
     let fp = Fingerprint::of_bytes(b"x");
     assert_eq!(fp.hex().len(), 64);
+}
+
+/// Handshake between two agents of one user whose log revokes one of them.
+/// Returns what the refusing side saw.
+async fn revoked_handshake(revoked_dials: bool) -> Result<(), TransportError> {
+    use agent_mesh_protocol::{RevocationEntry, RevocationLog};
+
+    let user = UserKey::generate();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("revocation.json");
+    let mut log = RevocationLog::genesis(&user).unwrap();
+    let (alice, bob) = (agent_for(&user, "alice"), agent_for(&user, "bob"));
+    let agent = if revoked_dials { &alice } else { &bob }.fingerprint();
+    log.append(&user, RevocationEntry::Revoke { agent })
+        .unwrap();
+    std::fs::write(&path, serde_json::to_vec(&log).unwrap()).unwrap();
+    let guard = RevocationGuard::open(&path, user.fingerprint()).unwrap();
+
+    let (alice_cert, bob_cert) = (alice.cert().clone(), bob.cert().clone());
+    let alice_ep = Endpoint::bind(&alice, 0).await.unwrap();
+    let bob_ep = Endpoint::bind(&bob, 0).await.unwrap();
+    let bob_pubkey = agent_pubkey_to_iroh(&bob.public_bytes()).unwrap();
+    let addrs = [std::net::SocketAddr::from((
+        std::net::Ipv4Addr::LOCALHOST,
+        bob_ep.port(),
+    ))];
+    let bob_guard = guard.clone();
+    let bob_task = tokio::spawn(async move {
+        let conn = bob_ep.accept().await.unwrap().await.unwrap();
+        let (mut send, mut recv) = conn.accept_bi().await.unwrap();
+        let res = do_handshake(&bob_cert, &mut send, &mut recv, false, &bob_guard).await;
+        // keep the connection open until the dialer has read its answer
+        (res.map(|_| ()), bob_ep, conn, send, recv)
+    });
+    let conn = alice_ep.dial(bob_pubkey, addrs).await.unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    let alice_res = do_handshake(&alice_cert, &mut send, &mut recv, true, &guard).await;
+    let (bob_res, bob_ep, ..) = bob_task.await.unwrap();
+    alice_ep.close().await;
+    bob_ep.close().await;
+    // The acceptor's refusal is sent to the dialer; a dialer refusing the
+    // acceptor just closes, so the acceptor's own handshake has finished.
+    if revoked_dials {
+        assert!(alice_res.is_err(), "{alice_res:?}");
+        bob_res
+    } else {
+        alice_res.map(|_| ())
+    }
+}
+
+/// A revoked dialer is refused by the acceptor with `Revoked`; red before
+/// `ensure_trustable` consulted the log.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_dialer_cannot_complete_the_handshake() {
+    within_10s("revoked dialer", async {
+        let res = revoked_handshake(true).await;
+        assert!(matches!(res, Err(TransportError::Revoked(_))), "{res:?}");
+    })
+    .await;
+}
+
+/// A revoked acceptor is refused by the dialer with `Revoked`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_acceptor_cannot_complete_the_handshake() {
+    within_10s("revoked acceptor", async {
+        let res = revoked_handshake(false).await;
+        assert!(matches!(res, Err(TransportError::Revoked(_))), "{res:?}");
+    })
+    .await;
 }

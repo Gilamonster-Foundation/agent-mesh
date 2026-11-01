@@ -10,7 +10,6 @@
 use agent_mesh_protocol::{Fingerprint, RevocationEntry, RevocationLog, RevocationState, UserKey};
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// File name of the log, beside `user.key`.
@@ -175,18 +174,8 @@ fn save(path: &Path, log: &RevocationLog) -> Result<()> {
     }
     let dir = dir_of(path);
     std::fs::create_dir_all(dir)?;
-    let (tmp, mut f) = create_tmp(dir, path)?;
-    let written = f
-        .write_all(serde_json::to_string_pretty(log)?.as_bytes())
-        .and_then(|()| f.sync_all())
-        .and_then(|()| std::fs::rename(&tmp, path));
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e).with_context(|| format!("write {}", path.display()));
-    }
-    #[cfg(unix)]
-    std::fs::File::open(dir)?.sync_all()?;
-    Ok(())
+    agent_mesh_transport::atomic_write(path, serde_json::to_string_pretty(log)?.as_bytes())
+        .with_context(|| format!("write {}", path.display()))
 }
 
 fn dir_of(path: &Path) -> &Path {
@@ -194,27 +183,6 @@ fn dir_of(path: &Path) -> &Path {
         Some(d) if !d.as_os_str().is_empty() => d,
         _ => Path::new("."),
     }
-}
-
-/// A fresh temp file beside `dest`: `create_new` (never follows or truncates an
-/// existing path) under an unpredictable name, mode 0600 on Unix.
-fn create_tmp(dir: &Path, dest: &Path) -> Result<(PathBuf, std::fs::File)> {
-    let name = dest
-        .file_name()
-        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    for _ in 0..8 {
-        let tmp = dir.join(format!(".{name}.{:032x}.tmp", rand::random::<u128>()));
-        let mut o = std::fs::OpenOptions::new();
-        o.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-        match o.open(&tmp) {
-            Ok(f) => return Ok((tmp, f)),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e).with_context(|| format!("create {}", tmp.display())),
-        }
-    }
-    bail!("could not create a temp file in {}", dir.display())
 }
 
 /// Run `f` holding an exclusive lock on `<path>.lock`, so read → extends-check
