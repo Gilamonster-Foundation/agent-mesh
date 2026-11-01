@@ -28,6 +28,7 @@ pub mod transport;
 #[cfg(feature = "pyo3")]
 pub mod pyo3_module;
 
+pub use agent_mesh_transport::RevocationGuard;
 pub use bus::{Bus, BusOptions, IrohTransport, PeerEndpoint};
 pub use error::{BusError, Result};
 pub use inbox::{BusMessage, Inbox, OutgoingReply, RequestContext};

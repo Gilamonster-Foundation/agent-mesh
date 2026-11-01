@@ -65,12 +65,13 @@ pub async fn run(
 
     let (iroh_pubkey, socket_addrs) = dial_route(&user, peer_fp, addr, pubkey, &timeout).await?;
 
+    let revocation = util::revocation_guard(&home, &user)?;
     let local_ep = Endpoint::bind(&agent, 0).await?;
     println!("dialing peer at {socket_addrs:?} (alpn agent-mesh/v1)...");
     let conn = local_ep.dial(iroh_pubkey, socket_addrs).await?;
     let (mut send, mut recv) = conn.open_bi().await.context("open bidi stream")?;
 
-    let peer_cert = do_handshake(agent.cert(), &mut send, &mut recv, true).await?;
+    let peer_cert = do_handshake(agent.cert(), &mut send, &mut recv, true, &revocation).await?;
     let peer_agent_fp = peer_cert.agent_fingerprint();
 
     let envelope = SignedEnvelope::new(

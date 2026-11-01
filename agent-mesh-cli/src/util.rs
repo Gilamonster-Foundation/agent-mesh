@@ -4,7 +4,10 @@
 //! Currently: a `2s`/`30s`/`5m`/`1h` duration parser and a hostname
 //! resolver.
 
-use anyhow::{anyhow, Result};
+use agent_mesh_protocol::UserKey;
+use agent_mesh_transport::RevocationGuard;
+use anyhow::{anyhow, Context, Result};
+use std::path::Path;
 use std::time::Duration;
 
 /// Parse a human-friendly duration string like `100ms`, `5s`, `2m`,
@@ -34,6 +37,19 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
 
 fn bad_duration(s: &str) -> anyhow::Error {
     anyhow!("invalid duration '{s}' — expected e.g. '5s', '2m', '1h', '500ms'")
+}
+
+/// The user's revocation log, `<home>/revocation.json`, as the guard every
+/// handshake checks peers against. Fails closed: with no usable log there is
+/// no peer to talk to.
+pub fn revocation_guard(home: &Path, user: &UserKey) -> Result<RevocationGuard> {
+    let path = home.join("revocation.json");
+    RevocationGuard::open(&path, user.fingerprint()).with_context(|| {
+        format!(
+            "open {} — a revocation log is required (`amesh revocation init`)",
+            path.display()
+        )
+    })
 }
 
 /// Resolve the system hostname via `hostname(1)`. Falls back to

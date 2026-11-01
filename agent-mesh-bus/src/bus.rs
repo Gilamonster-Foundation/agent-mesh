@@ -44,12 +44,13 @@ use agent_mesh_transport::{
     do_handshake,
     identity::agent_pubkey_to_iroh,
     iroh_reexports::{Connection, Incoming, IncomingAddr, PublicKey, RecvStream, SendStream},
-    recv_envelope, send_envelope, Endpoint, PeerResolver, ResolverHandle, TransportError,
+    recv_envelope, send_envelope, Endpoint, LiveCheck, PeerResolver, ResolverHandle, Revocable,
+    RevocationGuard, TransportError,
 };
 use async_trait::async_trait;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex, Notify};
 use tokio::task::{JoinHandle, JoinSet};
@@ -206,8 +207,18 @@ impl Bus {
     /// Returns once the endpoint is bound, the resolver is running,
     /// and the accept task is spawned — the bus is immediately ready
     /// to send and receive.
-    pub async fn bind(user: &UserKey, agent: AgentKey, port: u16) -> Result<Self> {
-        Self::bind_with(user, agent, port, BusOptions::default()).await
+    ///
+    /// `revocation` is the local user's revocation log (see
+    /// [`RevocationGuard::open`]): a peer it revokes is refused in the
+    /// handshake and cut off mid-session, and a log that is missing or invalid
+    /// refuses every peer (fail closed).
+    pub async fn bind(
+        user: &UserKey,
+        agent: AgentKey,
+        port: u16,
+        revocation: RevocationGuard,
+    ) -> Result<Self> {
+        Self::bind_with(user, agent, port, BusOptions::default(), revocation).await
     }
 
     /// Bind a bus with explicit [`BusOptions`]. See [`Self::bind`].
@@ -216,8 +227,9 @@ impl Bus {
         agent: AgentKey,
         port: u16,
         opts: BusOptions,
+        revocation: RevocationGuard,
     ) -> Result<Self> {
-        Self::bind_listening(user, agent, port, opts, Sequencer::in_memory()).await
+        Self::bind_listening(user, agent, port, opts, Sequencer::in_memory(), revocation).await
     }
 
     /// [`Self::bind_with`], sequencing its envelopes from `reservations`, so a
@@ -232,8 +244,17 @@ impl Bus {
         port: u16,
         opts: BusOptions,
         reservations: Arc<dyn SequenceReservations>,
+        revocation: RevocationGuard,
     ) -> Result<Self> {
-        Self::bind_listening(user, agent, port, opts, Sequencer::reserving(reservations)?).await
+        Self::bind_listening(
+            user,
+            agent,
+            port,
+            opts,
+            Sequencer::reserving(reservations)?,
+            revocation,
+        )
+        .await
     }
 
     async fn bind_listening(
@@ -242,13 +263,14 @@ impl Bus {
         port: u16,
         opts: BusOptions,
         sequence: Sequencer,
+        revocation: RevocationGuard,
     ) -> Result<Self> {
         // The verified certified root is the local admission policy. Reject a
         // mismatched explicit UserKey consistently in debug and release builds.
         let user_fp = verified_local_user(&agent)?;
         ensure_local_user(user.fingerprint(), user_fp)?;
         let agent = Arc::new(agent);
-        let transport = IrohTransport::bind(user_fp, agent.clone(), port, opts).await?;
+        let transport = IrohTransport::bind(user_fp, agent.clone(), port, opts, revocation).await?;
         Self::assemble(agent, Arc::new(transport), sequence)
     }
 
@@ -283,8 +305,12 @@ impl Bus {
     /// request future does not close its reply window: until the window
     /// lapses, the connection closes, or one envelope has been read, a request
     /// or publish from that peer can still arrive and run its handler.
-    pub async fn bind_outbound_only(user: &UserKey, agent: AgentKey) -> Result<Self> {
-        Self::bind_outbound(user, agent, Sequencer::in_memory()).await
+    pub async fn bind_outbound_only(
+        user: &UserKey,
+        agent: AgentKey,
+        revocation: RevocationGuard,
+    ) -> Result<Self> {
+        Self::bind_outbound(user, agent, Sequencer::in_memory(), revocation).await
     }
 
     /// [`Self::bind_outbound_only`], sequencing its envelopes from
@@ -302,16 +328,28 @@ impl Bus {
         user: &UserKey,
         agent: AgentKey,
         reservations: Arc<dyn SequenceReservations>,
+        revocation: RevocationGuard,
     ) -> Result<Self> {
-        Self::bind_outbound(user, agent, Sequencer::reserving(reservations)?).await
+        Self::bind_outbound(user, agent, Sequencer::reserving(reservations)?, revocation).await
     }
 
-    async fn bind_outbound(user: &UserKey, agent: AgentKey, sequence: Sequencer) -> Result<Self> {
+    async fn bind_outbound(
+        user: &UserKey,
+        agent: AgentKey,
+        sequence: Sequencer,
+        revocation: RevocationGuard,
+    ) -> Result<Self> {
         let user_fp = verified_local_user(&agent)?;
         ensure_local_user(user.fingerprint(), user_fp)?;
         let agent = Arc::new(agent);
-        let transport =
-            IrohTransport::bind_posture(user_fp, agent.clone(), 0, Posture::OutboundOnly).await?;
+        let transport = IrohTransport::bind_posture(
+            user_fp,
+            agent.clone(),
+            0,
+            Posture::OutboundOnly,
+            revocation,
+        )
+        .await?;
         Self::assemble(agent, Arc::new(transport), sequence)
     }
 
@@ -827,11 +865,13 @@ async fn dial_peer(
 fn authenticated_iroh_peer(
     session_id: &PublicKey,
     peer_cert: &CertChain,
+    revocation: &RevocationGuard,
 ) -> Result<AuthenticatedPeer> {
-    // `do_handshake` verifies this too, but keep the constructor honest when
+    // `do_handshake` checks this too, but keep the constructor honest when
     // used on either side of a connection: the evidence is derived only from a
-    // valid cert whose leaf key is byte-for-byte the QUIC/TLS session identity.
-    peer_cert.verify()?;
+    // cert that stands against the revocation log and whose leaf key is
+    // byte-for-byte the QUIC/TLS session identity.
+    revocation.check(peer_cert)?;
     if &peer_cert.agent_pubkey != session_id.as_bytes() {
         return Err(BusError::Transport(TransportError::Handshake(format!(
             "peer Hello certificate agent {} is not bound to QUIC session {}",
@@ -861,24 +901,25 @@ fn ensure_intended_iroh_peer(peer: AuthenticatedPeer, expected_peer_fp: Fingerpr
 async fn open_bound_stream(
     conn: &Connection,
     our_cert: &CertChain,
+    revocation: &RevocationGuard,
     expected_peer_fp: Fingerprint,
-) -> Result<(AuthenticatedPeer, SendStream, RecvStream)> {
+) -> Result<(AuthenticatedPeer, CertChain, SendStream, RecvStream)> {
     let (mut send, mut recv) = conn
         .open_bi()
         .await
         .map_err(|e| BusError::Transport(TransportError::Iroh(format!("open_bi: {e}"))))?;
     let peer_cert = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        do_handshake(our_cert, &mut send, &mut recv, true),
+        do_handshake(our_cert, &mut send, &mut recv, true, revocation),
     )
     .await
     .map_err(|_| BusError::Timeout(HANDSHAKE_TIMEOUT))??;
     // Bind the Hello identity on the dialer side too. Otherwise a QUIC endpoint
     // authenticated as B could present a copied, valid same-user cert for A and
     // receive traffic intended for A.
-    let peer = authenticated_iroh_peer(&conn.remote_id(), &peer_cert)?;
+    let peer = authenticated_iroh_peer(&conn.remote_id(), &peer_cert, revocation)?;
     ensure_intended_iroh_peer(peer, expected_peer_fp)?;
-    Ok((peer, send, recv))
+    Ok((peer, peer_cert, send, recv))
 }
 
 /// Ship one already-signed envelope on a fresh bound stream (see
@@ -887,10 +928,12 @@ async fn open_bound_stream(
 async fn send_env_on_conn(
     conn: &Connection,
     our_cert: &CertChain,
+    revocation: &RevocationGuard,
     expected_peer_fp: Fingerprint,
     env: &SignedEnvelope,
 ) -> Result<()> {
-    let (_, mut send, _recv) = open_bound_stream(conn, our_cert, expected_peer_fp).await?;
+    let (_, _, mut send, _recv) =
+        open_bound_stream(conn, our_cert, revocation, expected_peer_fp).await?;
     send_envelope(&mut send, env).await?;
     send.finish()
         .map_err(|e| BusError::Transport(TransportError::Iroh(format!("finish: {e}"))))?;
@@ -904,17 +947,28 @@ async fn send_env_on_conn(
 async fn open_session_stream(
     conn: &Connection,
     our_cert: &CertChain,
+    revocation: &RevocationGuard,
     expected_peer_fp: Fingerprint,
 ) -> Result<(AuthenticatedPeer, SessionStream)> {
-    let (peer, send, recv) = open_bound_stream(conn, our_cert, expected_peer_fp).await?;
-    Ok((peer, session_stream(send, recv)))
+    let (peer, peer_cert, send, recv) =
+        open_bound_stream(conn, our_cert, revocation, expected_peer_fp).await?;
+    Ok((peer, session_stream(send, recv, revocation, peer_cert)?))
 }
 
-fn session_stream(send: SendStream, recv: RecvStream) -> SessionStream {
-    SessionStream {
-        send: Box::new(send),
-        recv: Box::new(recv),
-    }
+/// The two halves of a session stream, each ending with an error as soon as
+/// the local revocation log revokes `peer_cert` (checked on every read and
+/// write, so before the next envelope of the session is dispatched).
+fn session_stream(
+    send: SendStream,
+    recv: RecvStream,
+    revocation: &RevocationGuard,
+    peer_cert: CertChain,
+) -> Result<SessionStream> {
+    let live = Arc::new(Mutex::new(LiveCheck::new(revocation.clone(), peer_cert)?));
+    Ok(SessionStream {
+        send: Box::new(Revocable::new(send, live.clone())),
+        recv: Box::new(Revocable::new(recv, live)),
+    })
 }
 
 /// The bus-level receive loop, transport-agnostic: pull each inbound envelope
@@ -1088,6 +1142,9 @@ pub struct IrohTransport {
     resolver: Arc<PeerResolver>,
     /// Our own key — its cert is presented in every handshake.
     agent: Arc<AgentKey>,
+    /// The local user's revocation log: every peer chain is checked against it
+    /// in the handshake, and every session stream re-checks it as it runs.
+    revocation: RevocationGuard,
     /// Keeps the mDNS browser thread alive for the life of the transport.
     _resolver_handle: ResolverHandle,
     /// Keeps the mDNS announcer alive; `None` for a quiet ([`BusOptions`]
@@ -1107,16 +1164,20 @@ pub struct IrohTransport {
 impl IrohTransport {
     /// Bind the iroh endpoint on `port` (`0` = OS-picked), start the mDNS
     /// resolver + (optional) announcer, and spawn the internal accept loop.
+    ///
+    /// `revocation` must be the log of `agent`'s user; peers it revokes are
+    /// refused in the handshake and cut off mid-session.
     pub async fn bind(
         user_fp: Fingerprint,
         agent: Arc<AgentKey>,
         port: u16,
         opts: BusOptions,
+        revocation: RevocationGuard,
     ) -> Result<Self> {
         let posture = Posture::Accepting {
             announce: opts.announce,
         };
-        Self::bind_posture(user_fp, agent, port, posture).await
+        Self::bind_posture(user_fp, agent, port, posture, revocation).await
     }
 
     async fn bind_posture(
@@ -1124,9 +1185,13 @@ impl IrohTransport {
         agent: Arc<AgentKey>,
         port: u16,
         posture: Posture,
+        revocation: RevocationGuard,
     ) -> Result<Self> {
         let certified_user_fp = verified_local_user(&agent)?;
         ensure_local_user(user_fp, certified_user_fp)?;
+        // Fail closed at bind: no usable log of this user, no transport.
+        let log_user = revocation.state()?.user;
+        ensure_local_user(log_user, certified_user_fp)?;
         let endpoint = Endpoint::bind(&agent, port).await?;
         let local_port = endpoint.port();
         let endpoint = Arc::new(endpoint);
@@ -1157,6 +1222,7 @@ impl IrohTransport {
         let accept_task = spawn_iroh_accept_loop(
             endpoint.clone(),
             agent.clone(),
+            revocation.clone(),
             inbound_tx.clone(),
             posture,
             stop.clone(),
@@ -1166,6 +1232,7 @@ impl IrohTransport {
             endpoint,
             resolver,
             agent,
+            revocation,
             _resolver_handle: resolver_handle,
             _announcer: announcer,
             inbound: AsyncMutex::new(inbound_rx),
@@ -1181,12 +1248,19 @@ impl IrohTransport {
 impl Transport for IrohTransport {
     async fn send_to(&self, fp: Fingerprint, env: SignedEnvelope) -> Result<()> {
         let conn = dial_peer(&self.endpoint, &self.resolver, fp).await?;
-        send_env_on_conn(&conn, self.agent.cert(), fp, &env).await
+        send_env_on_conn(&conn, self.agent.cert(), &self.revocation, fp, &env).await
     }
 
     async fn send_to_endpoint(&self, peer: &PeerEndpoint, env: SignedEnvelope) -> Result<()> {
         let conn = dial_endpoint(&self.endpoint, *peer).await?;
-        send_env_on_conn(&conn, self.agent.cert(), peer.fingerprint(), &env).await
+        send_env_on_conn(
+            &conn,
+            self.agent.cert(),
+            &self.revocation,
+            peer.fingerprint(),
+            &env,
+        )
+        .await
     }
 
     async fn send_request_to(
@@ -1196,7 +1270,7 @@ impl Transport for IrohTransport {
         window: Duration,
     ) -> Result<()> {
         let conn = dial_peer(&self.endpoint, &self.resolver, fp).await?;
-        send_env_on_conn(&conn, self.agent.cert(), fp, &env).await?;
+        send_env_on_conn(&conn, self.agent.cert(), &self.revocation, fp, &env).await?;
         self.await_reply_on(conn, window);
         Ok(())
     }
@@ -1208,14 +1282,21 @@ impl Transport for IrohTransport {
         window: Duration,
     ) -> Result<()> {
         let conn = dial_endpoint(&self.endpoint, *peer).await?;
-        send_env_on_conn(&conn, self.agent.cert(), peer.fingerprint(), &env).await?;
+        send_env_on_conn(
+            &conn,
+            self.agent.cert(),
+            &self.revocation,
+            peer.fingerprint(),
+            &env,
+        )
+        .await?;
         self.await_reply_on(conn, window);
         Ok(())
     }
 
     async fn open_stream_to(&self, fp: Fingerprint) -> Result<(AuthenticatedPeer, SessionStream)> {
         let conn = dial_peer(&self.endpoint, &self.resolver, fp).await?;
-        open_session_stream(&conn, self.agent.cert(), fp).await
+        open_session_stream(&conn, self.agent.cert(), &self.revocation, fp).await
     }
 
     async fn open_stream_to_endpoint(
@@ -1223,7 +1304,13 @@ impl Transport for IrohTransport {
         peer: &PeerEndpoint,
     ) -> Result<(AuthenticatedPeer, SessionStream)> {
         let conn = dial_endpoint(&self.endpoint, *peer).await?;
-        open_session_stream(&conn, self.agent.cert(), peer.fingerprint()).await
+        open_session_stream(
+            &conn,
+            self.agent.cert(),
+            &self.revocation,
+            peer.fingerprint(),
+        )
+        .await
     }
 
     async fn reply(&self, fp: Fingerprint, route: &ReplyRoute, env: SignedEnvelope) -> Result<()> {
@@ -1234,7 +1321,9 @@ impl Transport for IrohTransport {
         let route = route.downcast_ref::<IrohReplyRoute>();
         if let Some(route) = route {
             if Fingerprint::of_bytes(route.conn.remote_id().as_bytes()) == fp {
-                match send_env_on_conn(&route.conn, self.agent.cert(), fp, &env).await {
+                match send_env_on_conn(&route.conn, self.agent.cert(), &self.revocation, fp, &env)
+                    .await
+                {
                     Ok(()) => return Ok(()),
                     Err(e) => tracing::debug!(
                         peer = %fp.short(),
@@ -1246,7 +1335,7 @@ impl Transport for IrohTransport {
         }
         let reverse = route.and_then(|r| r.reverse);
         let conn = dial_reply_peer(&self.endpoint, &self.resolver, fp, reverse).await?;
-        send_env_on_conn(&conn, self.agent.cert(), fp, &env).await
+        send_env_on_conn(&conn, self.agent.cert(), &self.revocation, fp, &env).await
     }
 
     async fn recv(&self) -> Option<Inbound> {
@@ -1298,7 +1387,11 @@ impl IrohTransport {
     /// the inbox and its handler (see [`Bus::bind_outbound_only`]). A late
     /// *reply* is verified and admitted, then finds no waiter to wake.
     fn await_reply_on(&self, conn: Connection, window: Duration) {
-        let (agent, inbound_tx) = (self.agent.clone(), self.inbound_tx.clone());
+        let (agent, revocation, inbound_tx) = (
+            self.agent.clone(),
+            self.revocation.clone(),
+            self.inbound_tx.clone(),
+        );
         let mut tasks = self
             .reply_tasks
             .lock()
@@ -1310,7 +1403,8 @@ impl IrohTransport {
                 conn: conn.clone(),
                 reverse: None,
             });
-            let first = tokio::time::timeout(window, next_envelope(&conn, &agent)).await;
+            let first =
+                tokio::time::timeout(window, next_envelope(&conn, &agent, &revocation)).await;
             if let Ok(Some((provenance, envelope, _stream))) = first {
                 let _ = inbound_tx.send(Inbound {
                     envelope,
@@ -1330,6 +1424,7 @@ impl IrohTransport {
 fn spawn_iroh_accept_loop(
     endpoint: Arc<Endpoint>,
     agent: Arc<AgentKey>,
+    revocation: RevocationGuard,
     inbound_tx: mpsc::UnboundedSender<Inbound>,
     posture: Posture,
     stop: Arc<Notify>,
@@ -1355,9 +1450,10 @@ fn spawn_iroh_accept_loop(
                 continue;
             }
             let agent = agent.clone();
+            let revocation = revocation.clone();
             let inbound_tx = inbound_tx.clone();
             conns.spawn(async move {
-                if let Err(e) = accept_conn(incoming, agent, inbound_tx).await {
+                if let Err(e) = accept_conn(incoming, agent, revocation, inbound_tx).await {
                     tracing::warn!(error = %e, "iroh transport: incoming connection error");
                 }
             });
@@ -1372,6 +1468,7 @@ fn spawn_iroh_accept_loop(
 async fn accept_conn(
     incoming: Incoming,
     agent: Arc<AgentKey>,
+    revocation: RevocationGuard,
     inbound_tx: mpsc::UnboundedSender<Inbound>,
 ) -> Result<()> {
     // The UDP source the connection physically arrived from. QUIC uses one
@@ -1393,7 +1490,8 @@ async fn accept_conn(
         conn: conn.clone(),
         reverse: reverse_addr.map(|addr| (conn.remote_id(), addr)),
     });
-    while let Some((provenance, envelope, stream)) = next_envelope(&conn, &agent).await {
+    while let Some((provenance, envelope, stream)) = next_envelope(&conn, &agent, &revocation).await
+    {
         let inbound = Inbound {
             envelope,
             provenance,
@@ -1415,6 +1513,7 @@ async fn accept_conn(
 async fn next_envelope(
     conn: &Connection,
     agent: &AgentKey,
+    revocation: &RevocationGuard,
 ) -> Option<(DeliveryProvenance, SignedEnvelope, SessionStream)> {
     loop {
         let (mut send, mut recv) = match conn.accept_bi().await {
@@ -1427,7 +1526,7 @@ async fn next_envelope(
         let cert = agent.cert().clone();
         let peer_cert = match tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
-            do_handshake(&cert, &mut send, &mut recv, false),
+            do_handshake(&cert, &mut send, &mut recv, false, revocation),
         )
         .await
         {
@@ -1444,7 +1543,7 @@ async fn next_envelope(
         // A valid Hello cert is not proof that the QUIC peer owns its leaf key:
         // bind it explicitly to the TLS-authenticated endpoint identity before
         // turning it into carrier evidence.
-        let carrier = match authenticated_iroh_peer(&conn.remote_id(), &peer_cert) {
+        let carrier = match authenticated_iroh_peer(&conn.remote_id(), &peer_cert, revocation) {
             Ok(peer) => peer,
             Err(e) => {
                 tracing::warn!(error = %e, "iroh transport: Hello/session identity mismatch");
@@ -1452,10 +1551,12 @@ async fn next_envelope(
             }
         };
         match recv_envelope(&mut recv).await {
-            Ok(env) => {
-                let stream = session_stream(send, recv);
-                return Some((DeliveryProvenance::Direct { carrier }, env, stream));
-            }
+            Ok(env) => match session_stream(send, recv, revocation, peer_cert) {
+                Ok(stream) => {
+                    return Some((DeliveryProvenance::Direct { carrier }, env, stream));
+                }
+                Err(e) => tracing::warn!(error = %e, "iroh transport: peer revoked"),
+            },
             Err(e) => tracing::warn!(error = %e, "iroh transport: envelope read failed"),
         }
     }
@@ -1746,7 +1847,9 @@ mod tests {
         let b = agent(&user, "b");
         let a_session = agent_pubkey_to_iroh(&a.public_bytes()).expect("valid ed25519 key");
         let b_session = agent_pubkey_to_iroh(&b.public_bytes()).expect("valid ed25519 key");
-        let peer = authenticated_iroh_peer(&a_session, a.cert()).expect("A owns A's session");
+        let peer =
+            authenticated_iroh_peer(&a_session, a.cert(), &RevocationGuard::in_memory(&user))
+                .expect("A owns A's session");
         assert_eq!(peer.agent_fp, a.fingerprint());
         assert_eq!(peer.user_fp, user.fingerprint());
         ensure_intended_iroh_peer(peer, a.fingerprint()).expect("A is the intended target");
@@ -1756,7 +1859,8 @@ mod tests {
             "an authenticated A session must not satisfy an intended B target, got {err:?}"
         );
 
-        let err = authenticated_iroh_peer(&b_session, a.cert()).unwrap_err();
+        let err = authenticated_iroh_peer(&b_session, a.cert(), &RevocationGuard::in_memory(&user))
+            .unwrap_err();
         assert!(
             matches!(err, BusError::Transport(TransportError::Handshake(_))),
             "a copied A Hello cert on B's TLS session must be rejected, got {err:?}"
@@ -1782,6 +1886,7 @@ mod tests {
             recipient.clone(),
             0,
             BusOptions { announce: false },
+            RevocationGuard::in_memory(&user),
         )
         .await
         .expect("bind recipient transport");
@@ -1817,9 +1922,15 @@ mod tests {
             .dial(recipient_id, [recipient_addr])
             .await
             .expect("sibling dials recipient");
-        send_env_on_conn(&sibling_conn, sibling_carrier.cert(), recipient_fp, &env)
-            .await
-            .expect("relay bytes reach the recipient boundary");
+        send_env_on_conn(
+            &sibling_conn,
+            sibling_carrier.cert(),
+            &RevocationGuard::in_memory(&user),
+            recipient_fp,
+            &env,
+        )
+        .await
+        .expect("relay bytes reach the recipient boundary");
         drop(sibling_conn);
         let relayed = tokio::time::timeout(Duration::from_secs(3), recipient_transport.recv())
             .await
@@ -1858,9 +1969,15 @@ mod tests {
             .dial(recipient_id, [recipient_addr])
             .await
             .expect("signer dials recipient");
-        send_env_on_conn(&signer_conn, original_signer.cert(), recipient_fp, &env)
-            .await
-            .expect("honest envelope reaches recipient");
+        send_env_on_conn(
+            &signer_conn,
+            original_signer.cert(),
+            &RevocationGuard::in_memory(&user),
+            recipient_fp,
+            &env,
+        )
+        .await
+        .expect("honest envelope reaches recipient");
         let honest = tokio::time::timeout(Duration::from_secs(3), recipient_transport.recv())
             .await
             .expect("honest delivery reaches transport boundary before timeout")
@@ -2235,7 +2352,9 @@ mod tests {
         let user = UserKey::generate();
         let a = agent(&user, "worker");
         let a_fp = a.fingerprint();
-        let bus = Bus::bind(&user, a, 0).await.expect("bind");
+        let bus = Bus::bind(&user, a, 0, RevocationGuard::in_memory(&user))
+            .await
+            .expect("bind");
         assert!(bus.local_port() > 0);
         assert_eq!(bus.user_fingerprint(), user.fingerprint());
         assert_eq!(bus.agent_fingerprint(), a_fp);
@@ -2246,7 +2365,9 @@ mod tests {
     async fn request_to_unknown_peer_errors_unreachable() {
         let user = UserKey::generate();
         let a = agent(&user, "alice");
-        let bus = Bus::bind(&user, a, 0).await.expect("bind");
+        let bus = Bus::bind(&user, a, 0, RevocationGuard::in_memory(&user))
+            .await
+            .expect("bind");
         let topic = Topic::new(user.fingerprint(), "echo");
         let phantom_fp = Fingerprint([0xfeu8; 32]);
         let res = bus
@@ -2548,6 +2669,7 @@ mod tests {
             host_agent.clone(),
             0,
             Posture::OutboundOnly,
+            RevocationGuard::in_memory(&user),
         )
         .await
         .expect("bind host");
@@ -2557,6 +2679,7 @@ mod tests {
             hub_agent.clone(),
             0,
             BusOptions { announce: false },
+            RevocationGuard::in_memory(&user),
         )
         .await
         .expect("bind hub");
@@ -2594,6 +2717,7 @@ mod tests {
         send_env_on_conn(
             &conn,
             hub_agent.cert(),
+            &RevocationGuard::in_memory(&user),
             host_fp,
             &note(&hub_agent, host_fp, 1, b"first"),
         )
@@ -2613,6 +2737,7 @@ mod tests {
             send_env_on_conn(
                 &conn,
                 hub_agent.cert(),
+                &RevocationGuard::in_memory(&user),
                 host_fp,
                 &note(&hub_agent, host_fp, 2, b"second"),
             ),

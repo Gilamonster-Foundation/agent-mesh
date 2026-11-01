@@ -29,6 +29,7 @@
 //! envelope framing module.
 
 use crate::error::{Result, TransportError};
+use crate::revocation::RevocationGuard;
 use agent_mesh_protocol::CertChain;
 use iroh::endpoint::{RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
@@ -48,8 +49,8 @@ pub struct HelloMsg {
 /// "Reject" frame: handshake refused.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RejectMsg {
-    /// Machine-readable reason. Currently only `"DifferentUser"` and
-    /// `"BadCertChain"` are produced; future versions may add more.
+    /// Machine-readable reason. Currently `"DifferentUser"`, `"BadCertChain"`,
+    /// `"Revoked"` and `"RevocationUnavailable"` are produced; future versions may add more.
     pub reason: String,
 }
 
@@ -60,6 +61,10 @@ pub struct RejectMsg {
 /// * `send` / `recv` — the bidi stream just opened over QUIC.
 /// * `is_dialer` — whether we initiated the connection. The dialer
 ///   sends first; the acceptor sends second (or rejects).
+/// * `revocation` — the local user's revocation log. The peer's chain is
+///   checked against it with `CertChain::verify_with`; a revoked link, or a
+///   log that is missing, invalid or does not extend what was last seen,
+///   refuses the peer (fail closed).
 ///
 /// On success returns the peer's verified `CertChain`. On failure
 /// returns a `TransportError` whose variant tells callers whether
@@ -70,6 +75,7 @@ pub async fn do_handshake(
     send: &mut SendStream,
     recv: &mut RecvStream,
     is_dialer: bool,
+    revocation: &RevocationGuard,
 ) -> Result<CertChain> {
     let our_user_fp = our_cert.user_fingerprint();
     let hello = HelloMsg {
@@ -79,13 +85,13 @@ pub async fn do_handshake(
     if is_dialer {
         write_frame(send, &hello).await?;
         let peer_cert = read_peer_hello_or_reject(recv).await?;
-        ensure_trustable(&peer_cert, &our_user_fp)?;
+        ensure_trustable(&peer_cert, &our_user_fp, revocation)?;
         Ok(peer_cert)
     } else {
         // Acceptor: read first, decide, respond.
         let peer_hello: HelloMsg = read_frame(recv).await?;
         let peer_cert = peer_hello.cert_chain;
-        match ensure_trustable(&peer_cert, &our_user_fp) {
+        match ensure_trustable(&peer_cert, &our_user_fp, revocation) {
             Ok(()) => {
                 write_frame(send, &hello).await?;
                 Ok(peer_cert)
@@ -94,6 +100,8 @@ pub async fn do_handshake(
                 let reason = match &e {
                     TransportError::DifferentUser { .. } => "DifferentUser",
                     TransportError::BadCertChain(_) => "BadCertChain",
+                    TransportError::Revoked(_) => "Revoked",
+                    TransportError::RevocationUnavailable(_) => "RevocationUnavailable",
                     _ => "Other",
                 };
                 let _ = write_frame(
@@ -119,10 +127,8 @@ pub async fn do_handshake(
 fn ensure_trustable(
     peer_cert: &CertChain,
     our_user_fp: &agent_mesh_protocol::Fingerprint,
+    revocation: &RevocationGuard,
 ) -> Result<()> {
-    peer_cert
-        .verify()
-        .map_err(|e| TransportError::BadCertChain(e.to_string()))?;
     let peer_user_fp = peer_cert.user_fingerprint();
     if &peer_user_fp != our_user_fp {
         return Err(TransportError::DifferentUser {
@@ -130,7 +136,9 @@ fn ensure_trustable(
             our_user: our_user_fp.hex(),
         });
     }
-    Ok(())
+    // Replaces the bare `verify()`: the chain must also stand against the
+    // local user's revocation log (no revoked link, current generation).
+    revocation.check(peer_cert)
 }
 
 /// Read the dialer-side response — either the peer's Hello (ok) or a
@@ -148,6 +156,10 @@ async fn read_peer_hello_or_reject(recv: &mut RecvStream) -> Result<CertChain> {
                 our_user: "<self>".into(),
             },
             "BadCertChain" => TransportError::BadCertChain("peer rejected our cert".into()),
+            "Revoked" => TransportError::Revoked("peer rejected us as revoked".into()),
+            "RevocationUnavailable" => {
+                TransportError::RevocationUnavailable("peer has no usable revocation log".into())
+            }
             other => TransportError::Handshake(format!("peer rejected: {other}")),
         });
     }
@@ -228,7 +240,7 @@ mod tests {
         let user = UserKey::generate();
         let cert = fixture_cert(&user, "worker");
         let fp = user.fingerprint();
-        assert!(ensure_trustable(&cert, &fp).is_ok());
+        assert!(ensure_trustable(&cert, &fp, &RevocationGuard::in_memory(&user)).is_ok());
     }
 
     #[test]
@@ -236,7 +248,12 @@ mod tests {
         let user_a = UserKey::generate();
         let user_b = UserKey::generate();
         let cert = fixture_cert(&user_a, "worker");
-        let err = ensure_trustable(&cert, &user_b.fingerprint()).unwrap_err();
+        let err = ensure_trustable(
+            &cert,
+            &user_b.fingerprint(),
+            &RevocationGuard::in_memory(&user_b),
+        )
+        .unwrap_err();
         match err {
             TransportError::DifferentUser { .. } => {}
             other => panic!("expected DifferentUser, got {other:?}"),
@@ -248,7 +265,12 @@ mod tests {
         let user = UserKey::generate();
         let mut cert = fixture_cert(&user, "worker");
         cert.metadata.role = "tampered".into();
-        let err = ensure_trustable(&cert, &user.fingerprint()).unwrap_err();
+        let err = ensure_trustable(
+            &cert,
+            &user.fingerprint(),
+            &RevocationGuard::in_memory(&user),
+        )
+        .unwrap_err();
         match err {
             TransportError::BadCertChain(_) => {}
             other => panic!("expected BadCertChain, got {other:?}"),

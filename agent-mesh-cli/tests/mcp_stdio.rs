@@ -22,6 +22,7 @@
 use std::process::Stdio;
 use std::time::Duration;
 
+use agent_mesh_bus::RevocationGuard;
 use agent_mesh_bus::{Bus, BusOptions, Topic};
 use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, UserKey};
 use serde_json::{json, Value};
@@ -143,9 +144,15 @@ async fn mcp_server_direct_addr_round_trips_to_live_responder() {
     let responder_agent = echo_agent(&user);
     let responder_fp = responder_agent.fingerprint();
     let responder_pubkey = responder_agent.public_bytes();
-    let responder = Bus::bind_with(&user, responder_agent, 0, BusOptions { announce: false })
-        .await
-        .expect("bind responder");
+    let responder = Bus::bind_with(
+        &user,
+        responder_agent,
+        0,
+        BusOptions { announce: false },
+        RevocationGuard::in_memory(&user),
+    )
+    .await
+    .expect("bind responder");
     let responder_port = responder.local_port();
     let topic = Topic::new(user.fingerprint(), "echo/v1");
     responder.handle_requests(topic, |body| async move {
@@ -218,9 +225,15 @@ async fn mcp_server_direct_addr_publishes_to_subscriber() {
     //    so the broadcast channel exists to buffer the message.
     let subscriber_agent = echo_agent(&user);
     let subscriber_pubkey = subscriber_agent.public_bytes();
-    let subscriber = Bus::bind_with(&user, subscriber_agent, 0, BusOptions { announce: false })
-        .await
-        .expect("bind subscriber");
+    let subscriber = Bus::bind_with(
+        &user,
+        subscriber_agent,
+        0,
+        BusOptions { announce: false },
+        RevocationGuard::in_memory(&user),
+    )
+    .await
+    .expect("bind subscriber");
     let subscriber_port = subscriber.local_port();
     let topic = Topic::new(user.fingerprint(), "notes/v1");
     let mut sub_rx = subscriber.subscribe(&topic).await;
@@ -321,7 +334,7 @@ async fn mcp_server_round_trips_request_to_live_responder() {
     //    it announces, so the server's resolver can discover it.
     let responder_agent = echo_agent(&user);
     let responder_fp = responder_agent.fingerprint();
-    let responder = Bus::bind(&user, responder_agent, 0)
+    let responder = Bus::bind(&user, responder_agent, 0, RevocationGuard::in_memory(&user))
         .await
         .expect("bind responder");
     let topic = Topic::new(user.fingerprint(), "echo/v1");

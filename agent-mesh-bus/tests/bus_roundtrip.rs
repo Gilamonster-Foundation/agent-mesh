@@ -16,6 +16,7 @@
 //!   already provided by the deterministic tests above; what they uniquely
 //!   touch is the real multicast-discovery path.
 
+use agent_mesh_bus::RevocationGuard;
 use agent_mesh_bus::{
     Bus, BusError, BusMessage, BusOptions, IrohTransport, PeerEndpoint, Topic, Transport,
 };
@@ -52,8 +53,12 @@ async fn request_reply_roundtrip() {
     let bob = agent(&user, "bob");
     let bob_fp = bob.fingerprint();
 
-    let alice_bus = Bus::bind(&user, alice, 0).await.unwrap();
-    let bob_bus = Bus::bind(&user, bob, 0).await.unwrap();
+    let alice_bus = Bus::bind(&user, alice, 0, RevocationGuard::in_memory(&user))
+        .await
+        .unwrap();
+    let bob_bus = Bus::bind(&user, bob, 0, RevocationGuard::in_memory(&user))
+        .await
+        .unwrap();
 
     let topic = Topic::new(user.fingerprint(), "echo");
     bob_bus.handle_requests(topic.clone(), |body| async move {
@@ -97,10 +102,18 @@ async fn reply_reaches_quiet_asker_via_dial_back() {
 
     // Quiet bind: alice never announces, so mDNS resolution of her
     // fingerprint is impossible by construction.
-    let alice_bus = Bus::bind_with(&user, alice, 0, BusOptions { announce: false })
+    let alice_bus = Bus::bind_with(
+        &user,
+        alice,
+        0,
+        BusOptions { announce: false },
+        RevocationGuard::in_memory(&user),
+    )
+    .await
+    .unwrap();
+    let bob_bus = Bus::bind(&user, bob, 0, RevocationGuard::in_memory(&user))
         .await
         .unwrap();
-    let bob_bus = Bus::bind(&user, bob, 0).await.unwrap();
 
     let topic = Topic::new(user.fingerprint(), "echo");
     bob_bus.handle_requests(topic.clone(), |body| async move {
@@ -143,12 +156,24 @@ async fn request_reply_roundtrip_via_direct_dial_no_mdns() {
     let bob_pubkey = bob.public_bytes();
 
     // Quiet binds: NO mDNS announcement on either side.
-    let alice_bus = Bus::bind_with(&user, alice, 0, BusOptions { announce: false })
-        .await
-        .unwrap();
-    let bob_bus = Bus::bind_with(&user, bob, 0, BusOptions { announce: false })
-        .await
-        .unwrap();
+    let alice_bus = Bus::bind_with(
+        &user,
+        alice,
+        0,
+        BusOptions { announce: false },
+        RevocationGuard::in_memory(&user),
+    )
+    .await
+    .unwrap();
+    let bob_bus = Bus::bind_with(
+        &user,
+        bob,
+        0,
+        BusOptions { announce: false },
+        RevocationGuard::in_memory(&user),
+    )
+    .await
+    .unwrap();
 
     let topic = Topic::new(user.fingerprint(), "echo");
     bob_bus.handle_requests(topic.clone(), |body| async move {
@@ -206,14 +231,25 @@ async fn outbound_only_bus_refuses_an_inbound_dial() {
     let (host, host_pk) = {
         let a = agent(&user, "host");
         let pk = a.public_bytes();
-        (Bus::bind_outbound_only(&user, a).await.unwrap(), pk)
+        (
+            Bus::bind_outbound_only(&user, a, RevocationGuard::in_memory(&user))
+                .await
+                .unwrap(),
+            pk,
+        )
     };
     let (quiet, quiet_pk) = {
         let a = agent(&user, "quiet");
         let pk = a.public_bytes();
-        let bus = Bus::bind_with(&user, a, 0, BusOptions { announce: false })
-            .await
-            .unwrap();
+        let bus = Bus::bind_with(
+            &user,
+            a,
+            0,
+            BusOptions { announce: false },
+            RevocationGuard::in_memory(&user),
+        )
+        .await
+        .unwrap();
         (bus, pk)
     };
     let hub = Bus::bind_with(
@@ -221,6 +257,7 @@ async fn outbound_only_bus_refuses_an_inbound_dial() {
         agent(&user, "hub"),
         0,
         BusOptions { announce: false },
+        RevocationGuard::in_memory(&user),
     )
     .await
     .unwrap();
@@ -263,14 +300,24 @@ async fn outbound_only_bus_refuses_an_inbound_dial() {
 #[tokio::test(flavor = "multi_thread")]
 async fn outbound_only_bus_gets_replies_on_its_own_connection() {
     let user = UserKey::generate();
-    let host = Bus::bind_outbound_only(&user, agent(&user, "host"))
-        .await
-        .unwrap();
+    let host = Bus::bind_outbound_only(
+        &user,
+        agent(&user, "host"),
+        RevocationGuard::in_memory(&user),
+    )
+    .await
+    .unwrap();
     let hub_agent = agent(&user, "hub");
     let hub_pk = hub_agent.public_bytes();
-    let hub = Bus::bind_with(&user, hub_agent, 0, BusOptions { announce: false })
-        .await
-        .unwrap();
+    let hub = Bus::bind_with(
+        &user,
+        hub_agent,
+        0,
+        BusOptions { announce: false },
+        RevocationGuard::in_memory(&user),
+    )
+    .await
+    .unwrap();
     let topic = Topic::new(user.fingerprint(), "held");
     hub.handle_requests(topic.clone(), |body| async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -332,7 +379,11 @@ async fn peer_dialed_by_an_outbound_only_bus_can_send_a_request_back() {
     let user = UserKey::generate();
     let host_agent = agent(&user, "host");
     let host_fp = host_agent.fingerprint();
-    let host = Arc::new(Bus::bind_outbound_only(&user, host_agent).await.unwrap());
+    let host = Arc::new(
+        Bus::bind_outbound_only(&user, host_agent, RevocationGuard::in_memory(&user))
+            .await
+            .unwrap(),
+    );
     let ping = Topic::new(user.fingerprint(), "ping");
     host.handle_requests(ping.clone(), |body| async move {
         Ok([b"pong: ".as_slice(), &body].concat())
@@ -343,6 +394,7 @@ async fn peer_dialed_by_an_outbound_only_bus_can_send_a_request_back() {
         hub_agent.clone(),
         0,
         BusOptions { announce: false },
+        RevocationGuard::in_memory(&user),
     )
     .await
     .unwrap();
@@ -410,9 +462,15 @@ async fn reply_falls_back_to_dial_back_when_the_asker_closed_its_connection() {
     let responder_agent = agent(&user, "responder");
     let responder_pk = responder_agent.public_bytes();
     let responder_fp = responder_agent.fingerprint();
-    let responder = Bus::bind_with(&user, responder_agent, 0, BusOptions { announce: false })
-        .await
-        .unwrap();
+    let responder = Bus::bind_with(
+        &user,
+        responder_agent,
+        0,
+        BusOptions { announce: false },
+        RevocationGuard::in_memory(&user),
+    )
+    .await
+    .unwrap();
     let topic = Topic::new(user.fingerprint(), "echo");
     echo(&responder, &topic);
     let asker_agent = Arc::new(agent(&user, "old-asker"));
@@ -421,6 +479,7 @@ async fn reply_falls_back_to_dial_back_when_the_asker_closed_its_connection() {
         asker_agent.clone(),
         0,
         BusOptions { announce: false },
+        RevocationGuard::in_memory(&user),
     )
     .await
     .unwrap();
@@ -481,6 +540,7 @@ async fn closing_a_bus_releases_its_port_while_a_reply_is_awaited() {
             asker_agent.clone(),
             0,
             BusOptions { announce: false },
+            RevocationGuard::in_memory(&user),
         )
         .await
         .unwrap(),
@@ -491,9 +551,15 @@ async fn closing_a_bus_releases_its_port_while_a_reply_is_awaited() {
         responder_agent.public_bytes(),
         responder_agent.fingerprint(),
     );
-    let responder = Bus::bind_with(&user, responder_agent, 0, BusOptions { announce: false })
-        .await
-        .unwrap();
+    let responder = Bus::bind_with(
+        &user,
+        responder_agent,
+        0,
+        BusOptions { announce: false },
+        RevocationGuard::in_memory(&user),
+    )
+    .await
+    .unwrap();
     let topic = Topic::new(user.fingerprint(), "never");
     let (taken_tx, mut taken) = tokio::sync::mpsc::unbounded_channel();
     responder.handle_requests(topic.clone(), move |_body| {
@@ -540,6 +606,7 @@ async fn closing_a_bus_releases_its_port_while_a_reply_is_awaited() {
         agent(&user, "asker"),
         port,
         BusOptions { announce: false },
+        RevocationGuard::in_memory(&user),
     )
     .await
     .expect("a replacement bus binds the closed bus's port");

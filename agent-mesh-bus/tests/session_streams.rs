@@ -4,6 +4,7 @@
 //! ground that pipe against a QUIC bidi stream — its handover from the accept
 //! loop, its flow control, and its teardown when a bus closes.
 
+use agent_mesh_bus::RevocationGuard;
 use agent_mesh_bus::{Bus, BusError, BusOptions, MeshNet, PeerEndpoint, Topic};
 use agent_mesh_protocol::{AgentKey, UserKey};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -18,9 +19,15 @@ impl Fabric for Iroh {
     fn node<'a>(&'a self, user: &'a UserKey, agent: AgentKey) -> Boxed<'a, Node> {
         Box::pin(async move {
             let pubkey = agent.public_bytes();
-            let bus = Bus::bind_with(user, agent, 0, BusOptions { announce: false })
-                .await
-                .unwrap();
+            let bus = Bus::bind_with(
+                user,
+                agent,
+                0,
+                BusOptions { announce: false },
+                RevocationGuard::in_memory(user),
+            )
+            .await
+            .unwrap();
             let at = PeerEndpoint::new(
                 pubkey,
                 SocketAddr::new(Ipv4Addr::LOCALHOST.into(), bus.local_port()),

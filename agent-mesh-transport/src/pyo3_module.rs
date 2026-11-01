@@ -15,9 +15,12 @@ use crate::endpoint::Endpoint;
 use crate::handshake::do_handshake;
 use crate::identity::agent_pubkey_to_iroh;
 use crate::resolver::{PeerResolver, ResolverHandle};
+use crate::revocation::RevocationGuard;
 use crate::stream::{recv_envelope, send_envelope};
 use agent_mesh_discovery::pyo3_module::PyPeerInfo;
-use agent_mesh_protocol::pyo3_module::{PyAgentKey, PyCertChain, PyFingerprint, PySignedEnvelope};
+use agent_mesh_protocol::pyo3_module::{
+    PyAgentKey, PyCertChain, PyFingerprint, PySignedEnvelope, PyUserKey,
+};
 use agent_mesh_protocol::{AgentKey, Fingerprint};
 use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
@@ -27,6 +30,40 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+
+/// The local user's revocation log, as a verifier of peer chains. Every
+/// handshake takes one; a missing or invalid log refuses every peer.
+#[pyclass(
+    name = "RevocationGuard",
+    module = "agent_mesh._agent_mesh.transport",
+    skip_from_py_object
+)]
+#[derive(Clone)]
+pub struct PyRevocationGuard {
+    /// The wrapped guard.
+    pub inner: RevocationGuard,
+}
+
+#[pymethods]
+impl PyRevocationGuard {
+    /// Open the log file at `path` for the user `user_fp`. Raises
+    /// `RuntimeError` if it is missing, invalid, another user's, or does not
+    /// extend what was last seen.
+    #[staticmethod]
+    fn open(path: &str, user_fp: &PyFingerprint) -> PyResult<Self> {
+        let inner = RevocationGuard::open(path, user_fp.inner)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self { inner })
+    }
+
+    /// A guard over an empty, unpersisted log owned by `user`. For tests.
+    #[staticmethod]
+    fn in_memory(user: &PyUserKey) -> Self {
+        Self {
+            inner: RevocationGuard::in_memory(&user.inner),
+        }
+    }
+}
 
 /// A bound QUIC endpoint backed by an agent's ed25519 key.
 #[pyclass(
@@ -124,6 +161,7 @@ impl PyEndpoint {
         peer_pubkey: Vec<u8>,
         addrs: Vec<String>,
         envelope: &PySignedEnvelope,
+        revocation: &PyRevocationGuard,
     ) -> PyResult<Bound<'py, PyAny>> {
         if peer_pubkey.len() != 32 {
             return Err(PyValueError::new_err(format!(
@@ -146,6 +184,7 @@ impl PyEndpoint {
         let inner = self.inner.clone();
         let our_cert = our_cert.inner.clone();
         let env = envelope.inner.clone();
+        let revocation = revocation.inner.clone();
         future_into_py(py, async move {
             let guard = inner.lock().await;
             let ep = guard
@@ -159,7 +198,7 @@ impl PyEndpoint {
                 .open_bi()
                 .await
                 .map_err(|e| PyRuntimeError::new_err(format!("open bidi: {e}")))?;
-            let peer_cert = do_handshake(&our_cert, &mut send, &mut recv, true)
+            let peer_cert = do_handshake(&our_cert, &mut send, &mut recv, true, &revocation)
                 .await
                 .map_err(|e| PyRuntimeError::new_err(format!("handshake: {e}")))?;
             send_envelope(&mut send, &env)
@@ -186,9 +225,11 @@ impl PyEndpoint {
         py: Python<'py>,
         our_cert: &PyCertChain,
         timeout_ms: u64,
+        revocation: &PyRevocationGuard,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let our_cert = our_cert.inner.clone();
+        let revocation = revocation.inner.clone();
         future_into_py(py, async move {
             let guard = inner.lock().await;
             let ep = match guard.as_ref() {
@@ -213,7 +254,7 @@ impl PyEndpoint {
                 .map_err(|e| PyRuntimeError::new_err(format!("accept bidi: {e}")))?;
             let peer_cert = match tokio::time::timeout(
                 Duration::from_secs(5),
-                do_handshake(&our_cert, &mut send, &mut recv, false),
+                do_handshake(&our_cert, &mut send, &mut recv, false, &revocation),
             )
             .await
             {
@@ -402,6 +443,7 @@ fn fingerprint_from_pubkey(bytes: &[u8]) -> PyResult<PyFingerprint> {
 pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let m = PyModule::new(py, "transport")?;
     m.add_class::<PyEndpoint>()?;
+    m.add_class::<PyRevocationGuard>()?;
     m.add_class::<AcceptedEnvelope>()?;
     m.add_class::<PyPeerResolver>()?;
     m.add_function(wrap_pyfunction!(parse_socket_addr, &m)?)?;

@@ -104,7 +104,11 @@ impl RevocationGuard {
     pub fn state(&self) -> Result<Arc<RevocationState>> {
         let mut cache = lock(&self.inner.cache);
         let Some(file) = &self.inner.file else {
-            return Ok(cache.as_ref().expect("in-memory state is set").state.clone());
+            return Ok(cache
+                .as_ref()
+                .expect("in-memory state is set")
+                .state
+                .clone());
         };
         let stamp = stamp(&file.log);
         if let (Some(cached), Some(now)) = (cache.as_ref(), stamp) {
