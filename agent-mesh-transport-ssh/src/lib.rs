@@ -27,3 +27,6 @@ pub use session::{
     MAX_ENVELOPE_BYTES, MAX_HANDSHAKE_BYTES,
 };
 pub use transport::{SshTransport, SshTransportOptions};
+
+#[cfg(test)]
+mod test_log;

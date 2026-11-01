@@ -2054,4 +2054,65 @@ mod tests {
             .expect("task lock")
             .is_empty());
     }
+
+    fn plain(signer: &AgentKey, to: Fingerprint, seq: u64, payload: Vec<u8>) -> SignedEnvelope {
+        SignedEnvelope::new(signer, Recipient::Direct { agent_fp: to }, seq, payload)
+    }
+
+    /// Two SSH transports of one user; bob enforces the persisted log `f`.
+    async fn revocable_pair(
+        f: &crate::test_log::LogFixture,
+    ) -> (Arc<AgentKey>, Arc<AgentKey>, SshTransport, SshTransport) {
+        let alice = agent(&f.user, "alice");
+        let bob = agent(&f.user, "bob");
+        let alice_transport = SshTransport::bind_loopback_for_test(
+            alice.clone(),
+            SshTransportOptions::new(agent_mesh_transport::RevocationGuard::in_memory(&f.user)),
+        )
+        .await
+        .unwrap();
+        let bob_transport =
+            SshTransport::bind_loopback_for_test(bob.clone(), SshTransportOptions::new(f.guard()))
+                .await
+                .unwrap();
+        let bob_target = target(bob_transport.local_port());
+        alice_transport.add_target(bob.fingerprint(), bob_target.target.clone());
+        std::mem::forget(bob_target); // keeps its temp files for the test's life
+        (alice, bob, alice_transport, bob_transport)
+    }
+
+    /// Regression (PR 185 round 3): a message the SSH transport admitted and
+    /// queued is not handed to the bus once its carrier has been revoked.
+    #[tokio::test]
+    async fn a_queued_message_is_not_delivered_once_its_carrier_is_revoked() {
+        let f = crate::test_log::LogFixture::new();
+        let (alice, bob, alice_transport, bob_transport) = revocable_pair(&f).await;
+        let env = plain(&alice, bob.fingerprint(), 0, b"queued".to_vec());
+        alice_transport.send_to(bob.fingerprint(), env).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        f.revoke(&alice);
+        let got = tokio::time::timeout(Duration::from_secs(1), bob_transport.recv()).await;
+        assert!(got.is_err(), "a revoked carrier's queued message was delivered");
+    }
+
+    /// Regression (PR 185 round 3): session frames already in the bridge's
+    /// pipe when the carrier is revoked are refused at the bus reader.
+    #[tokio::test]
+    async fn buffered_session_frames_are_refused_once_the_carrier_is_revoked() {
+        let f = crate::test_log::LogFixture::new();
+        let (alice, bob, alice_transport, bob_transport) = revocable_pair(&f).await;
+        let (_, mut out) = alice_transport.open_stream_to(bob.fingerprint()).await.unwrap();
+        for seq in 0..3 {
+            let env = plain(&alice, bob.fingerprint(), seq, vec![seq as u8]);
+            write_frame(&mut out.send, &env).await.unwrap();
+        }
+        let inbound = bob_transport.recv().await.unwrap();
+        let theirs = inbound.stream.expect("a session stream");
+        // the two frames behind the open arrive in bob's pipe, unread
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        f.revoke(&alice);
+        let mut reader = EnvelopeReader::unchecked(theirs.recv);
+        let next = reader.next().await;
+        assert!(next.is_err(), "a buffered frame of a revoked carrier was read: {next:?}");
+    }
 }

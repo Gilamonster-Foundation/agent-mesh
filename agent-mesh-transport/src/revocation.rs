@@ -696,4 +696,48 @@ mod tests {
             "the buffered envelope of a revoked peer is refused"
         );
     }
+
+    /// Regression (PR 185 round 3): a guard that cached L1 must not accept a
+    /// peer on L1's bytes once another guard has persisted a `Seen` that L1
+    /// does not extend: restoring the old file is a rollback, cache or not.
+    #[test]
+    fn a_cached_guard_refuses_a_rollback_to_its_cached_log() {
+        let f = Fixture::new();
+        let (a, victim) = (agent(&f.user), agent(&f.user));
+        let l1 = fs::read(f.path()).unwrap();
+        let guard_a = f.open().unwrap();
+        guard_a.check(victim.cert()).unwrap();
+
+        f.revoke(&victim);
+        let _guard_b = f.open().unwrap(); // persists Seen = L2
+        fs::write(f.path(), &l1).unwrap(); // the exact L1 bytes come back
+        assert!(
+            guard_a.check(victim.cert()).is_err(),
+            "a rollback to L1 must be refused even though A cached L1"
+        );
+        let _ = a;
+    }
+
+    /// Regression (PR 185 round 3): the `Seen` record is published through a
+    /// fresh exclusive temp file; a symlink planted at any guessable temp
+    /// name is never followed or truncated.
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_tmp_symlink_is_never_followed_when_seen_is_written() {
+        let f = Fixture::new();
+        let victim = f.dir.path().join("victim");
+        fs::write(&victim, "precious").unwrap();
+        let seen = f.path().with_extension("seen.json");
+        for name in [
+            format!("{}.tmp", std::process::id()),
+            "tmp".to_string(),
+            "seen.tmp".to_string(),
+        ] {
+            let planted = seen.with_extension(name);
+            let _ = std::os::unix::fs::symlink(&victim, planted);
+        }
+        f.open().unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+        assert!(fs::metadata(&seen).is_ok(), "Seen was still written");
+    }
 }
