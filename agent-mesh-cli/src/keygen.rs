@@ -17,11 +17,17 @@ pub fn run(home: PathBuf, path: Option<PathBuf>) -> Result<()> {
             key_path.display()
         );
     }
+    crate::revocation::preflight_new_key(&key_path)?;
     let key = UserKey::generate();
     key.save(&key_path)
         .with_context(|| format!("save key to {}", key_path.display()))?;
     let fp = key.fingerprint();
     println!("generated user key at {}", key_path.display());
+    if let Err(e) = crate::revocation::init_beside(&key_path, &key) {
+        // Roll back only the key this invocation created.
+        let _ = std::fs::remove_file(&key_path);
+        return Err(e);
+    }
     println!("fingerprint: {}", fp.hex());
     println!("short:       {}", fp.short());
     Ok(())
