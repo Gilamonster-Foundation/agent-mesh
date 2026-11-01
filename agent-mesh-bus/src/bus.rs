@@ -50,7 +50,7 @@ use agent_mesh_transport::{
 use async_trait::async_trait;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex, Notify};
 use tokio::task::{JoinHandle, JoinSet};
@@ -952,23 +952,26 @@ async fn open_session_stream(
 ) -> Result<(AuthenticatedPeer, SessionStream)> {
     let (peer, peer_cert, send, recv) =
         open_bound_stream(conn, our_cert, revocation, expected_peer_fp).await?;
-    Ok((peer, session_stream(send, recv, revocation, peer_cert)?))
+    let live = LiveCheck::new(revocation.clone(), peer_cert)?;
+    Ok((peer, session_stream(send, recv, live)))
 }
 
 /// The two halves of a session stream, each ending with an error as soon as
 /// the local revocation log revokes `peer_cert` (checked on every read and
 /// write, so before the next envelope of the session is dispatched).
-fn session_stream(
-    send: SendStream,
-    recv: RecvStream,
-    revocation: &RevocationGuard,
-    peer_cert: CertChain,
-) -> Result<SessionStream> {
-    let live = Arc::new(Mutex::new(LiveCheck::new(revocation.clone(), peer_cert)?));
-    Ok(SessionStream {
+fn session_stream(send: SendStream, recv: RecvStream, live: LiveCheck) -> SessionStream {
+    SessionStream {
         send: Box::new(Revocable::new(send, live.clone())),
-        recv: Box::new(Revocable::new(recv, live)),
-    })
+        recv: Box::new(Revocable::new(recv, live.clone())),
+        live: Some(live),
+    }
+}
+
+/// An envelope the transport admitted and has queued for the bus, with the
+/// check that must still pass when the bus takes it.
+struct Queued {
+    inbound: Inbound,
+    live: LiveCheck,
 }
 
 /// The bus-level receive loop, transport-agnostic: pull each inbound envelope
@@ -1150,9 +1153,9 @@ pub struct IrohTransport {
     /// Keeps the mDNS announcer alive; `None` for a quiet ([`BusOptions`]
     /// `announce = false`) bind.
     _announcer: Option<AnnouncerHandle>,
-    inbound: AsyncMutex<mpsc::UnboundedReceiver<Inbound>>,
+    inbound: AsyncMutex<mpsc::UnboundedReceiver<Queued>>,
     /// Feeds replies read off connections this transport dialed.
-    inbound_tx: mpsc::UnboundedSender<Inbound>,
+    inbound_tx: mpsc::UnboundedSender<Queued>,
     /// Asks the accept loop to stop; it aborts and awaits its connection tasks.
     stop: Arc<Notify>,
     accept_task: std::sync::Mutex<Option<JoinHandle<()>>>,
@@ -1339,7 +1342,16 @@ impl Transport for IrohTransport {
     }
 
     async fn recv(&self) -> Option<Inbound> {
-        self.inbound.lock().await.recv().await
+        let mut queue = self.inbound.lock().await;
+        loop {
+            let Queued { inbound, live } = queue.recv().await?;
+            // admitted earlier, possibly long ago: the sender may have been
+            // revoked while the envelope waited
+            match live.admit() {
+                Ok(()) => return Some(inbound),
+                Err(e) => tracing::warn!(error = %e, "iroh transport: dropped a queued envelope"),
+            }
+        }
     }
 
     fn local_port(&self) -> u16 {
@@ -1405,13 +1417,18 @@ impl IrohTransport {
             });
             let first =
                 tokio::time::timeout(window, next_envelope(&conn, &agent, &revocation)).await;
-            if let Ok(Some((provenance, envelope, _stream))) = first {
-                let _ = inbound_tx.send(Inbound {
-                    envelope,
-                    provenance,
-                    reply_route: route,
-                    stream: None,
-                });
+            if let Ok(Some((provenance, envelope, stream))) = first {
+                if let Some(live) = stream.live {
+                    let _ = inbound_tx.send(Queued {
+                        inbound: Inbound {
+                            envelope,
+                            provenance,
+                            reply_route: route,
+                            stream: None,
+                        },
+                        live,
+                    });
+                }
             }
         });
     }
@@ -1425,7 +1442,7 @@ fn spawn_iroh_accept_loop(
     endpoint: Arc<Endpoint>,
     agent: Arc<AgentKey>,
     revocation: RevocationGuard,
-    inbound_tx: mpsc::UnboundedSender<Inbound>,
+    inbound_tx: mpsc::UnboundedSender<Queued>,
     posture: Posture,
     stop: Arc<Notify>,
 ) -> JoinHandle<()> {
@@ -1469,7 +1486,7 @@ async fn accept_conn(
     incoming: Incoming,
     agent: Arc<AgentKey>,
     revocation: RevocationGuard,
-    inbound_tx: mpsc::UnboundedSender<Inbound>,
+    inbound_tx: mpsc::UnboundedSender<Queued>,
 ) -> Result<()> {
     // The UDP source the connection physically arrived from. QUIC uses one
     // socket for both directions, so this is also where the peer can be
@@ -1492,13 +1509,16 @@ async fn accept_conn(
     });
     while let Some((provenance, envelope, stream)) = next_envelope(&conn, &agent, &revocation).await
     {
+        let Some(live) = stream.live.clone() else {
+            continue;
+        };
         let inbound = Inbound {
             envelope,
             provenance,
             reply_route: reply_route.clone(),
             stream: Some(stream),
         };
-        if inbound_tx.send(inbound).is_err() {
+        if inbound_tx.send(Queued { inbound, live }).is_err() {
             tracing::debug!("iroh transport: bus receiver dropped; stopping");
             break;
         }
@@ -1550,13 +1570,18 @@ async fn next_envelope(
                 continue;
             }
         };
-        match recv_envelope(&mut recv).await {
-            Ok(env) => match session_stream(send, recv, revocation, peer_cert) {
-                Ok(stream) => {
-                    return Some((DeliveryProvenance::Direct { carrier }, env, stream));
-                }
-                Err(e) => tracing::warn!(error = %e, "iroh transport: peer revoked"),
-            },
+        let live = match LiveCheck::new(revocation.clone(), peer_cert) {
+            Ok(live) => live,
+            Err(e) => {
+                tracing::warn!(error = %e, "iroh transport: peer revoked");
+                continue;
+            }
+        };
+        match recv_envelope(&mut recv, &live).await {
+            Ok(env) => {
+                let stream = session_stream(send, recv, live);
+                return Some((DeliveryProvenance::Direct { carrier }, env, stream));
+            }
             Err(e) => tracing::warn!(error = %e, "iroh transport: envelope read failed"),
         }
     }
@@ -1900,7 +1925,9 @@ mod tests {
         };
         let env = SignedEnvelope::new(
             &sender,
-            Recipient::Direct { agent_fp: recipient_fp },
+            Recipient::Direct {
+                agent_fp: recipient_fp,
+            },
             1,
             serde_json::to_vec(&msg).unwrap(),
         );
@@ -1915,11 +1942,19 @@ mod tests {
         .unwrap();
         // it is queued in the transport; nothing has asked for it yet
         tokio::time::sleep(Duration::from_millis(300)).await;
-        log.append(&user, RevocationEntry::Revoke { agent: sender.fingerprint() })
-            .unwrap();
+        log.append(
+            &user,
+            RevocationEntry::Revoke {
+                agent: sender.fingerprint(),
+            },
+        )
+        .unwrap();
         std::fs::write(&path, serde_json::to_vec(&log).unwrap()).unwrap();
         let got = tokio::time::timeout(Duration::from_secs(1), transport.recv()).await;
-        assert!(got.is_err(), "a revoked sender's queued envelope was delivered");
+        assert!(
+            got.is_err(),
+            "a revoked sender's queued envelope was delivered"
+        );
     }
 
     /// Real-boundary regression: a valid envelope signed by A but carried over

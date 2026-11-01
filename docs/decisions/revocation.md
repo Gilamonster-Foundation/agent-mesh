@@ -68,26 +68,35 @@ transport takes one and nothing is checked without it.
   runs. If the file turns bad while running, every peer is refused until it is
   fixed. `RevocationGuard::in_memory(&UserKey)` (an empty log, nothing
   persisted) exists for tests and callers that keep no log.
-- **`Seen` is persisted** beside the log as `revocation.seen.json` (temp file +
-  rename). It is written the first time a log is opened and rewritten when the
-  head advances; `extends` runs on every load, so a log rolled back to an older
-  copy, or forked, is refused at startup and while running.
+- **`Seen` is persisted** beside the log as `revocation.seen.json`, and only
+  ever advances. Read of the log, `extends` against the persisted `Seen`, and
+  the write of a strictly longer head happen under one exclusive lock
+  (`revocation.seen.lock`, `File::lock`), so guards and processes sharing a home
+  cannot interleave and move it backwards; the temp file is renamed into place.
+  A log rolled back to an older copy, or forked, is refused at startup and while
+  running.
 - **Handshakes.** The iroh handshake (`handshake.rs::ensure_trustable`) and the
   SSH session handshake (`session.rs::validate_peer_hello`, and the local cert in
   `validate_local_identity`) call `verify_with` with the guard's state instead
   of `verify` / `verify_at`. The refusing side reports `Revoked` and says why
   to the peer; a dialer that refuses its acceptor just closes.
-- **Live sessions.** A `LiveCheck` holds the peer's chain and the last log head
-  it passed. Before each read or write it fetches the guard's state (a file
-  `stat` while the log is unchanged), and re-verifies the chain only when the
-  head moved. Iroh session streams wrap both halves in `Revocable`, so no byte
-  from a revoked peer is handed to the session handler; SSH records are checked
-  right after the record is read, before the envelope is returned for dispatch,
-  and before one is written. A refusal poisons the half. Descendants go with
-  their revoked ancestor because `verify_with` checks every link.
-- **Change detection** is the log file's mtime and length, then a parse; it does
-  not poll on a clock. A rewrite with identical length and mtime is not seen
-  until the next start, which re-verifies against `Seen`.
+- **Live sessions and the admission point.** A `LiveCheck` holds the peer's
+  chain and the last log head it passed; once it refuses, it refuses for good.
+  Every received envelope passes `LiveCheck::admit` in one place, the
+  transport crate's envelope decode (`recv_envelope`, and `EnvelopeReader::next`
+  as each envelope leaves its buffer), so envelopes read ahead of a revocation
+  are refused too, and so are `amesh listen` and the PyO3 `accept_envelope`
+  (both call `recv_envelope`; there is no unchecked variant on an iroh path).
+  The iroh transport also re-checks an admitted envelope when the bus takes it
+  off its queue. `Revocable` additionally ends the stream's reads and writes.
+  SSH records are checked right after the record is read, before the envelope
+  is returned for dispatch, and before one is written. A refusal poisons the
+  half. Descendants go with their revoked ancestor because `verify_with` checks
+  every link.
+- **Change detection** reads the log file on every check and compares its bytes
+  with the ones last verified: identical bytes are the same head, anything else
+  is verified afresh (signatures, parents, `Seen`), and an unreadable or
+  non-extending file refuses every peer. File metadata is never trusted.
 - **SSH generation.** The log's generation is the session's causal generation
   (`SessionParameters.current_generation` is overwritten), so two peers on
   different log states fail with a parameter mismatch rather than apply different

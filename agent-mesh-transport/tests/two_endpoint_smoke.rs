@@ -12,7 +12,7 @@ use agent_mesh_protocol::{
 };
 use agent_mesh_transport::{
     do_handshake, identity::agent_pubkey_to_iroh, recv_envelope, send_envelope, Endpoint,
-    RevocationGuard, TransportError,
+    LiveCheck, RevocationGuard, TransportError,
 };
 
 /// Issue a deterministic-metadata agent key for tests.
@@ -91,7 +91,10 @@ async fn two_endpoints_same_user_can_exchange_envelope() {
             let peer_cert = do_handshake(&bob_cert, &mut send, &mut recv, false, &bob_guard)
                 .await
                 .expect("bob handshake");
-            let env = recv_envelope(&mut recv).await.expect("bob recv envelope");
+            let live = LiveCheck::new(bob_guard.clone(), peer_cert.clone()).unwrap();
+            let env = recv_envelope(&mut recv, &live)
+                .await
+                .expect("bob recv envelope");
             (peer_cert, env)
         });
 
@@ -239,10 +242,11 @@ async fn tampered_payload_is_rejected_on_receipt() {
             let incoming = bob_ep.accept().await.expect("incoming");
             let conn = incoming.await.expect("connect");
             let (mut send, mut recv) = conn.accept_bi().await.expect("accept_bi");
-            do_handshake(&bob_cert, &mut send, &mut recv, false, &bob_guard)
+            let peer = do_handshake(&bob_cert, &mut send, &mut recv, false, &bob_guard)
                 .await
                 .expect("handshake");
-            recv_envelope(&mut recv).await
+            let live = LiveCheck::new(bob_guard.clone(), peer).unwrap();
+            recv_envelope(&mut recv, &live).await
         });
 
         let conn = alice_ep.dial(bob_pubkey, bob_addrs).await.expect("dial");

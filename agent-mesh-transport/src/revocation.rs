@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
-use std::time::SystemTime;
 
 use agent_mesh_protocol::{
     CertChain, Fingerprint, MeshError, RevocationLog, RevocationState, Seen, UserKey,
@@ -41,16 +40,17 @@ struct Inner {
 struct LogFile {
     log: PathBuf,
     seen: PathBuf,
+    /// Held exclusively across read, check and write of `seen`.
+    lock: PathBuf,
 }
 
 #[derive(Debug)]
 struct Cached {
     state: Arc<RevocationState>,
-    /// Metadata of the log file when `state` was read: while it is unchanged,
-    /// the head cannot have moved, so no re-read is needed.
-    // ponytail: mtime+len stamp, not a re-parse per call; a same-size rewrite
-    // within one mtime tick is picked up at the next restart, which re-checks.
-    stamp: Option<(SystemTime, u64)>,
+    /// The exact bytes `state` was verified from. The file is read on every
+    /// call and compared with these: identical bytes are the same log (same
+    /// head), anything else is verified afresh. Metadata is never trusted.
+    bytes: Vec<u8>,
 }
 
 impl RevocationGuard {
@@ -67,10 +67,11 @@ impl RevocationGuard {
     pub fn open(log: impl Into<PathBuf>, local_user: Fingerprint) -> Result<Self> {
         let log = log.into();
         let seen = log.with_extension("seen.json");
+        let lock = log.with_extension("seen.lock");
         let guard = Self {
             inner: Arc::new(Inner {
                 local_user,
-                file: Some(LogFile { log, seen }),
+                file: Some(LogFile { log, seen, lock }),
                 cache: Mutex::new(None),
             }),
         };
@@ -91,7 +92,7 @@ impl RevocationGuard {
                 file: None,
                 cache: Mutex::new(Some(Cached {
                     state: Arc::new(state),
-                    stamp: None,
+                    bytes: Vec::new(),
                 })),
             }),
         }
@@ -110,18 +111,24 @@ impl RevocationGuard {
                 .state
                 .clone());
         };
-        let stamp = stamp(&file.log);
-        if let (Some(cached), Some(now)) = (cache.as_ref(), stamp) {
-            if cached.stamp == Some(now) {
-                return Ok(cached.state.clone());
+        match fs::read(&file.log) {
+            Ok(now) => {
+                if let Some(cached) = cache.as_ref().filter(|c| c.bytes == now) {
+                    return Ok(cached.state.clone());
+                }
+            }
+            Err(e) => {
+                *cache = None;
+                return Err(unavailable("read revocation log", &e));
             }
         }
         // Refused until fixed: forget the old view so a failure is not masked.
         *cache = None;
-        let state = Arc::new(self.load(file)?);
+        let (state, bytes) = self.load(file)?;
+        let state = Arc::new(state);
         *cache = Some(Cached {
             state: state.clone(),
-            stamp,
+            bytes,
         });
         Ok(state)
     }
@@ -138,10 +145,18 @@ impl RevocationGuard {
         verify_with(peer, &state)
     }
 
-    fn load(&self, file: &LogFile) -> Result<RevocationState> {
-        let unavailable = |what: &str, e: &dyn std::fmt::Display| {
-            TransportError::RevocationUnavailable(format!("{what}: {e}"))
-        };
+    /// Verify the log and advance `Seen` as one transaction under an
+    /// exclusive lock, so independent guards and processes sharing a home
+    /// cannot interleave a read of `Seen` with another's write of it. `Seen`
+    /// is only ever written with a head that strictly extends the one on disk.
+    fn load(&self, file: &LogFile) -> Result<(RevocationState, Vec<u8>)> {
+        let _lock = fs::File::options()
+            .create(true)
+            .append(true)
+            .open(&file.lock)
+            .and_then(|f| f.lock().map(|()| f))
+            .map_err(|e| unavailable("lock seen record", &e))?;
+        // read inside the lock: the bytes verified are the bytes cached
         let bytes = fs::read(&file.log).map_err(|e| unavailable("read revocation log", &e))?;
         let log: RevocationLog =
             serde_json::from_slice(&bytes).map_err(|e| unavailable("parse revocation log", &e))?;
@@ -154,22 +169,26 @@ impl RevocationGuard {
                 &"belongs to a different user than the local identity",
             ));
         }
-        match fs::read(&file.seen) {
-            Ok(bytes) => {
-                let seen: Seen = serde_json::from_slice(&bytes)
+        let advance = match fs::read(&file.seen) {
+            Ok(raw) => {
+                let seen: Seen = serde_json::from_slice(&raw)
                     .map_err(|e| unavailable("parse seen record", &e))?;
                 log.extends(&seen)
                     .map_err(|e| unavailable("revocation log", &e))?;
-                if seen == state.seen() {
-                    return Ok(state);
-                }
+                state.len > seen.len
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => true,
             Err(e) => return Err(unavailable("read seen record", &e)),
+        };
+        if advance {
+            persist_seen(&file.seen, &state.seen()).map_err(|e| unavailable("persist seen", &e))?;
         }
-        persist_seen(&file.seen, &state.seen()).map_err(|e| unavailable("persist seen", &e))?;
-        Ok(state)
+        Ok((state, bytes))
     }
+}
+
+fn unavailable(what: &str, e: &dyn std::fmt::Display) -> TransportError {
+    TransportError::RevocationUnavailable(format!("{what}: {e}"))
 }
 
 fn verify_with(peer: &CertChain, state: &RevocationState) -> Result<()> {
@@ -183,27 +202,26 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
-    let m = fs::metadata(path).ok()?;
-    Some((m.modified().ok()?, m.len()))
-}
-
 /// Write `seen` beside the log by temp file + rename, so a crash leaves the
 /// old record or the new one, never half of one.
 fn persist_seen(path: &Path, seen: &Seen) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
+    // the seen lock is held, so one writer at a time; pid keeps processes apart
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
     fs::write(&tmp, serde_json::to_vec(seen).map_err(io::Error::other)?)?;
     fs::rename(&tmp, path)
 }
 
 /// A peer's chain, re-checked whenever the log's head moves.
 ///
-/// An established session holds one. Calling [`Self::admit`] before dispatching
-/// each inbound envelope costs a file stat while the log is unchanged.
+/// An established session holds one, and every envelope it delivers passes
+/// [`Self::admit`] first (see [`crate::recv_envelope`]). The log file is read
+/// and compared on each call, never trusted from a cache. Cheap to clone;
+/// clones share one verdict, and once the peer is refused it stays refused.
+#[derive(Clone)]
 pub struct LiveCheck {
     guard: RevocationGuard,
-    peer: CertChain,
-    state: Arc<RevocationState>,
+    peer: Arc<CertChain>,
+    state: Arc<Mutex<Option<Arc<RevocationState>>>>,
 }
 
 impl LiveCheck {
@@ -214,7 +232,11 @@ impl LiveCheck {
     pub fn new(guard: RevocationGuard, peer: CertChain) -> Result<Self> {
         let state = guard.state()?;
         verify_with(&peer, &state)?;
-        Ok(Self { guard, peer, state })
+        Ok(Self {
+            guard,
+            peer: Arc::new(peer),
+            state: Arc::new(Mutex::new(Some(state))),
+        })
     }
 
     /// Fail if the peer is no longer acceptable. Re-verifies the chain only
@@ -222,11 +244,24 @@ impl LiveCheck {
     ///
     /// # Errors
     /// As [`RevocationGuard::check`]; the session must then be torn down.
-    pub fn admit(&mut self) -> Result<()> {
-        let state = self.guard.state()?;
-        if state.head != self.state.head {
-            verify_with(&self.peer, &state)?;
-            self.state = state;
+    pub fn admit(&self) -> Result<()> {
+        let mut passed = lock(&self.state);
+        let Some(last) = passed.clone() else {
+            return Err(TransportError::Revoked("session already refused".into()));
+        };
+        let refused = |passed: &mut Option<Arc<RevocationState>>, e| {
+            *passed = None;
+            Err(e)
+        };
+        let state = match self.guard.state() {
+            Ok(state) => state,
+            Err(e) => return refused(&mut passed, e),
+        };
+        if state.head != last.head {
+            if let Err(e) = verify_with(&self.peer, &state) {
+                return refused(&mut passed, e);
+            }
+            *passed = Some(state);
         }
         Ok(())
     }
@@ -236,21 +271,22 @@ impl LiveCheck {
 ///
 /// Wraps one half of a session stream; the check runs on every read and write
 /// attempt, so no byte from, or to, a revoked peer is handed on after the log
-/// learns of the revocation.
+/// learns of the revocation. (Envelopes already buffered above this are
+/// caught by the envelope reader's own admission check.)
 pub struct Revocable<T> {
     inner: T,
-    live: Arc<Mutex<LiveCheck>>,
+    live: LiveCheck,
 }
 
 impl<T> Revocable<T> {
     /// Wrap `inner`, sharing `live` with the stream's other half.
     #[must_use]
-    pub fn new(inner: T, live: Arc<Mutex<LiveCheck>>) -> Self {
+    pub fn new(inner: T, live: LiveCheck) -> Self {
         Self { inner, live }
     }
 
     fn admit(&self) -> io::Result<()> {
-        lock(&self.live)
+        self.live
             .admit()
             .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()))
     }
@@ -294,6 +330,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for Revocable<T> {
 mod tests {
     use super::*;
     use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, RevocationEntry};
+    use std::time::SystemTime;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn agent(user: &UserKey) -> AgentKey {
@@ -455,7 +492,7 @@ mod tests {
     fn live_check_admits_until_the_log_revokes_the_peer() {
         let f = Fixture::new();
         let a = agent(&f.user);
-        let mut live = LiveCheck::new(f.open().unwrap(), a.cert().clone()).unwrap();
+        let live = LiveCheck::new(f.open().unwrap(), a.cert().clone()).unwrap();
         live.admit().unwrap();
         f.revoke(&a);
         assert!(matches!(live.admit(), Err(TransportError::Revoked(_))));
@@ -465,7 +502,7 @@ mod tests {
     fn live_check_ignores_a_head_move_that_leaves_the_peer_standing() {
         let f = Fixture::new();
         let (a, b) = (agent(&f.user), agent(&f.user));
-        let mut live = LiveCheck::new(f.open().unwrap(), a.cert().clone()).unwrap();
+        let live = LiveCheck::new(f.open().unwrap(), a.cert().clone()).unwrap();
         f.revoke(&b);
         live.admit().unwrap();
     }
@@ -484,7 +521,7 @@ mod tests {
                 caveats: Caveats::top(),
             })
             .unwrap();
-        let mut live = LiveCheck::new(f.open().unwrap(), child.cert().clone()).unwrap();
+        let live = LiveCheck::new(f.open().unwrap(), child.cert().clone()).unwrap();
         f.revoke(&parent);
         assert!(matches!(live.admit(), Err(TransportError::Revoked(_))));
     }
@@ -495,7 +532,7 @@ mod tests {
         let a = agent(&f.user);
         let live = LiveCheck::new(f.open().unwrap(), a.cert().clone()).unwrap();
         let (near, mut far) = tokio::io::duplex(64);
-        let mut near = Revocable::new(near, Arc::new(Mutex::new(live)));
+        let mut near = Revocable::new(near, live);
         far.write_all(b"one").await.unwrap();
         let mut buf = [0u8; 3];
         near.read_exact(&mut buf).await.unwrap();
@@ -530,12 +567,25 @@ mod tests {
         let f = Fixture::new();
         let (a, b) = (agent(&f.user), agent(&f.user));
         let mut old = f.read();
-        old.append(&f.user, RevocationEntry::Revoke { agent: b.fingerprint() })
-            .unwrap();
+        old.append(
+            &f.user,
+            RevocationEntry::Revoke {
+                agent: b.fingerprint(),
+            },
+        )
+        .unwrap();
         let mut new = old.clone();
-        new.append(&f.user, RevocationEntry::Revoke { agent: a.fingerprint() })
-            .unwrap();
-        let (old, new) = (serde_json::to_vec(&old).unwrap(), serde_json::to_vec(&new).unwrap());
+        new.append(
+            &f.user,
+            RevocationEntry::Revoke {
+                agent: a.fingerprint(),
+            },
+        )
+        .unwrap();
+        let (old, new) = (
+            serde_json::to_vec(&old).unwrap(),
+            serde_json::to_vec(&new).unwrap(),
+        );
         let len = old.len().max(new.len());
         fs::write(f.path(), padded(old, len)).unwrap();
         let stamp = fs::metadata(f.path()).unwrap().modified().unwrap();
@@ -619,14 +669,16 @@ mod tests {
         let a = agent(&f.user);
         let live = LiveCheck::new(f.open().unwrap(), a.cert().clone()).unwrap();
         let (near, mut far) = tokio::io::duplex(1 << 16);
-        let mut reader = EnvelopeReader::new(Revocable::new(near, Arc::new(Mutex::new(live))));
+        let mut reader = EnvelopeReader::new(near, live);
         // A large first frame leaves the reader's buffer large, so its next
         // read takes the two small frames behind it in one go.
         let mut all = Vec::new();
         for (n, size) in [2000usize, 10, 10].into_iter().enumerate() {
             let env = SignedEnvelope::new(
                 &a,
-                Recipient::Direct { agent_fp: Fingerprint::of_bytes(b"r") },
+                Recipient::Direct {
+                    agent_fp: Fingerprint::of_bytes(b"r"),
+                },
                 n as u64,
                 vec![n as u8; size],
             );
@@ -639,6 +691,9 @@ mod tests {
         assert_eq!(reader.next().await.unwrap().unwrap().sequence, 1);
         f.revoke(&a);
         let third = reader.next().await;
-        assert!(third.is_err(), "the buffered envelope of a revoked peer is refused");
+        assert!(
+            third.is_err(),
+            "the buffered envelope of a revoked peer is refused"
+        );
     }
 }

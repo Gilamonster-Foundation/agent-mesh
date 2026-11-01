@@ -15,7 +15,7 @@ use crate::endpoint::Endpoint;
 use crate::handshake::do_handshake;
 use crate::identity::agent_pubkey_to_iroh;
 use crate::resolver::{PeerResolver, ResolverHandle};
-use crate::revocation::RevocationGuard;
+use crate::revocation::{LiveCheck, RevocationGuard};
 use crate::stream::{recv_envelope, send_envelope};
 use agent_mesh_discovery::pyo3_module::PyPeerInfo;
 use agent_mesh_protocol::pyo3_module::{
@@ -266,7 +266,10 @@ impl PyEndpoint {
                     return Err(PyTimeoutError::new_err("handshake timed out after 5s"));
                 }
             };
-            let env = recv_envelope(&mut recv)
+            // the envelope is admitted only while the peer still stands
+            let live = LiveCheck::new(revocation.clone(), peer_cert.clone())
+                .map_err(|e| PyRuntimeError::new_err(format!("peer refused: {e}")))?;
+            let env = recv_envelope(&mut recv, &live)
                 .await
                 .map_err(|e| PyRuntimeError::new_err(format!("recv envelope: {e}")))?;
             let _ = send.finish();

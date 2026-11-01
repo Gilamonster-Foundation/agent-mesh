@@ -8,7 +8,7 @@
 //! [`AuthenticatedMeshSession`] wraps every envelope in a fresh-session,
 //! direction, and counter-bound carrier signature before exposing it.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use agent_mesh_bus::AuthenticatedPeer;
@@ -408,7 +408,7 @@ where
             writer: self.writer,
             local_agent: self.local_agent,
             role: self.role,
-            live: Arc::new(Mutex::new(live)),
+            live,
             peer: outcome.peer,
             peer_cert: outcome.peer_cert,
             peer_verifying_key: outcome.peer_verifying_key,
@@ -508,7 +508,7 @@ pub struct AuthenticatedMeshSession<R, W> {
     local_agent: Arc<AgentKey>,
     role: SessionRole,
     /// Re-checks the peer against the revocation log on every record.
-    live: Arc<Mutex<LiveCheck>>,
+    live: LiveCheck,
     peer: AuthenticatedPeer,
     peer_cert: CertChain,
     peer_verifying_key: VerifyingKey,
@@ -630,7 +630,7 @@ where
 /// Receive half of a split authenticated session.
 pub struct AuthenticatedSessionReader<R> {
     reader: R,
-    live: Arc<Mutex<LiveCheck>>,
+    live: LiveCheck,
     role: SessionRole,
     peer: AuthenticatedPeer,
     peer_cert: CertChain,
@@ -694,7 +694,7 @@ where
 /// Send half of a split authenticated session.
 pub struct AuthenticatedSessionWriter<W> {
     writer: W,
-    live: Arc<Mutex<LiveCheck>>,
+    live: LiveCheck,
     local_agent: Arc<AgentKey>,
     role: SessionRole,
     peer: AuthenticatedPeer,
@@ -972,15 +972,11 @@ fn random_nonce() -> [u8; 32] {
 
 /// Re-check the peer against the revocation log; a failure poisons the half,
 /// so the session stays down.
-fn admit(live: &Mutex<LiveCheck>, poisoned: &mut bool) -> Result<(), SessionError> {
+fn admit(live: &LiveCheck, poisoned: &mut bool) -> Result<(), SessionError> {
     if *poisoned {
         return Err(SessionError::Poisoned);
     }
-    let checked = live
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .admit();
-    checked.map_err(|error| {
+    live.admit().map_err(|error| {
         *poisoned = true;
         revocation_error(error)
     })

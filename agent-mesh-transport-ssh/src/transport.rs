@@ -1001,7 +1001,8 @@ fn bridge_stream(
             // A clean EOF from the bus ends only this pump: a split session
             // may close its sender and still await the peer's final reply.
             let outbound = async {
-                let mut frames = EnvelopeReader::new(&mut to_peer);
+                // local bus frames bound for the peer: the SSH writer checks each record
+                let mut frames = EnvelopeReader::unchecked(&mut to_peer);
                 loop {
                     let env = tokio::select! {
                         _ = route.dead() => return,
@@ -1072,6 +1073,8 @@ fn bridge_stream(
     Some(SessionStream {
         send: Box::new(bus_send),
         recv: Box::new(bus_recv),
+        // every record already passed the SSH session's own revocation check
+        live: None,
     })
 }
 

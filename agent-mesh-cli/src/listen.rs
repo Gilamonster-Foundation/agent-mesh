@@ -16,7 +16,7 @@ use crate::util;
 use agent_mesh_discovery::{AnnounceConfig, Announcer};
 use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, CertChain, UserKey};
 use agent_mesh_transport::{
-    do_handshake, iroh_reexports::Incoming, recv_envelope, Endpoint, RevocationGuard,
+    do_handshake, iroh_reexports::Incoming, recv_envelope, Endpoint, LiveCheck, RevocationGuard,
 };
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -183,7 +183,14 @@ async fn handle_one(
         };
         // Now drain one envelope (Phase 2 ships one-shot envelopes
         // per stream; multi-message streams come later).
-        match recv_envelope(&mut recv).await {
+        let live = match LiveCheck::new(revocation.clone(), peer_cert.clone()) {
+            Ok(live) => live,
+            Err(e) => {
+                eprintln!("rejected peer: {e}");
+                continue;
+            }
+        };
+        match recv_envelope(&mut recv, &live).await {
             Ok(env) => {
                 let record = ReceivedRecord {
                     sender_agent_fp: env.sender_agent_fp().hex(),

@@ -409,7 +409,10 @@ fn halves(
         _keepalive: keepalive.clone(),
     };
     let rx = SessionReceiver {
-        reader: EnvelopeReader::new(stream.recv),
+        reader: match stream.live {
+            Some(live) => EnvelopeReader::new(stream.recv, live),
+            None => EnvelopeReader::unchecked(stream.recv),
+        },
         link,
         next_seq: rx_seq,
         idle: timing.idle,
@@ -623,7 +626,6 @@ mod tests {
     use super::*;
     use crate::BusMessage;
     use agent_mesh_protocol::{AgentMetadata, Caveats, UserKey};
-    use agent_mesh_transport::recv_envelope;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::DuplexStream;
     use tokio::task::JoinHandle;
@@ -651,6 +653,7 @@ mod tests {
         SessionStream {
             send: Box::new(send),
             recv: Box::new(recv),
+            live: None,
         }
     }
 
@@ -717,7 +720,11 @@ mod tests {
             let opening = tokio::spawn(async move {
                 Session::initiate(alice, bob_peer, a, &topic, timing, shutdown).await
             });
-            let open = recv_envelope(&mut b.recv).await.unwrap();
+            let open = EnvelopeReader::unchecked(&mut b.recv)
+                .next()
+                .await
+                .unwrap()
+                .unwrap();
             let provenance = DeliveryProvenance::Direct {
                 carrier: carrier(&self.alice),
             };
