@@ -144,6 +144,7 @@ jobs:
           # in the chain.
           for crate in \
               agent-mesh-protocol \
+              agent-mesh-ratchet \
               agent-mesh-discovery \
               agent-mesh-transport \
               agent-mesh-bus \
