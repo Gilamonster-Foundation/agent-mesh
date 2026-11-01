@@ -45,18 +45,33 @@ pub fn run(home: &Path, command: RevocationCommand) -> Result<()> {
 /// Write the genesis log next to `key_path` (used by `amesh keygen`).
 pub fn init_beside(key_path: &Path, key: &UserKey) -> Result<()> {
     let path = key_path.with_file_name(LOG_FILE);
-    save(&path, &RevocationLog::genesis(key)?)?;
+    locked(&path, || save(&path, &RevocationLog::genesis(key)?))?;
     println!("revocation log:   {}", path.display());
+    Ok(())
+}
+
+/// Refuse early if a log already sits where a fresh key's log would go: a new
+/// key can never own it, so `amesh keygen` must fail before it writes the key.
+pub fn preflight_new_key(key_path: &Path) -> Result<()> {
+    let path = key_path.with_file_name(LOG_FILE);
+    if path.exists() {
+        bail!(
+            "revocation log already exists at {} — move it aside before generating a new key",
+            path.display()
+        );
+    }
     Ok(())
 }
 
 fn init(home: &Path) -> Result<()> {
     let path = home.join(LOG_FILE);
-    if path.exists() {
-        bail!("revocation log already exists at {}", path.display());
-    }
     let key = load_key(home)?;
-    save(&path, &RevocationLog::genesis(&key)?)?;
+    locked(&path, || {
+        if path.exists() {
+            bail!("revocation log already exists at {}", path.display());
+        }
+        save(&path, &RevocationLog::genesis(&key)?)
+    })?;
     println!("created revocation log at {}", path.display());
     Ok(())
 }
@@ -67,29 +82,35 @@ pub fn revoke(home: &Path, agent: &str) -> Result<()> {
         .parse()
         .map_err(|e| anyhow!("bad agent fingerprint: {e}"))?;
     let key = load_key(home)?;
-    let (path, mut log, state) = load_log(home)?;
-    if state.revoked.contains(&agent) {
-        println!("already revoked: {}", agent.hex());
-        return Ok(());
-    }
-    log.append(&key, RevocationEntry::Revoke { agent })?;
-    save(&path, &log)?;
-    println!("revoked {}", agent.hex());
-    Ok(())
+    let path = home.join(LOG_FILE);
+    locked(&path, || {
+        let (mut log, state) = load_log(&path)?;
+        if state.revoked.contains(&agent) {
+            println!("already revoked: {}", agent.hex());
+            return Ok(());
+        }
+        log.append(&key, RevocationEntry::Revoke { agent })?;
+        save(&path, &log)?;
+        println!("revoked {}", agent.hex());
+        Ok(())
+    })
 }
 
 fn bump(home: &Path) -> Result<()> {
     let key = load_key(home)?;
-    let (path, mut log, state) = load_log(home)?;
-    let current = state.generation + 1;
-    log.append(&key, RevocationEntry::Generation { current })?;
-    save(&path, &log)?;
-    println!("generation {current}");
-    Ok(())
+    let path = home.join(LOG_FILE);
+    locked(&path, || {
+        let (mut log, state) = load_log(&path)?;
+        let current = state.generation + 1;
+        log.append(&key, RevocationEntry::Generation { current })?;
+        save(&path, &log)?;
+        println!("generation {current}");
+        Ok(())
+    })
 }
 
 fn show(home: &Path) -> Result<()> {
-    let (_, _, st) = load_log(home)?;
+    let (_, st) = load_log(&home.join(LOG_FILE))?;
     println!("user:       {}", st.user.hex());
     println!("length:     {}", st.len);
     println!("head:       {}", st.head);
@@ -102,8 +123,8 @@ fn show(home: &Path) -> Result<()> {
 }
 
 fn export(home: &Path, dest: &Path) -> Result<()> {
-    let (_, log, _) = load_log(home)?;
-    save(dest, &log)?;
+    let (log, _) = load_log(&home.join(LOG_FILE))?;
+    locked(dest, || save(dest, &log))?;
     println!("exported to {}", dest.display());
     Ok(())
 }
@@ -114,9 +135,8 @@ fn load_key(home: &Path) -> Result<UserKey> {
 }
 
 /// Read and verify the log; a log that fails `verify()` stops the command.
-fn load_log(home: &Path) -> Result<(PathBuf, RevocationLog, RevocationState)> {
-    let path = home.join(LOG_FILE);
-    let log = read(&path)?.with_context(|| {
+fn load_log(path: &Path) -> Result<(RevocationLog, RevocationState)> {
+    let log = read(path)?.with_context(|| {
         format!(
             "no revocation log at {} — run `amesh revocation init`",
             path.display()
@@ -125,7 +145,7 @@ fn load_log(home: &Path) -> Result<(PathBuf, RevocationLog, RevocationState)> {
     let state = log
         .verify()
         .with_context(|| format!("{} failed verification; refusing", path.display()))?;
-    Ok((path, log, state))
+    Ok((log, state))
 }
 
 fn read(path: &Path) -> Result<Option<RevocationLog>> {
@@ -153,18 +173,88 @@ fn save(path: &Path, log: &RevocationLog) -> Result<()> {
             return Ok(());
         }
     }
-    let dir = match path.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d,
-        _ => Path::new("."),
-    };
+    let dir = dir_of(path);
     std::fs::create_dir_all(dir)?;
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    let mut f = std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
-    f.write_all(serde_json::to_string_pretty(log)?.as_bytes())?;
-    f.sync_all()?;
-    drop(f);
-    std::fs::rename(&tmp, path)?;
+    let (tmp, mut f) = create_tmp(dir, path)?;
+    let written = f
+        .write_all(serde_json::to_string_pretty(log)?.as_bytes())
+        .and_then(|()| f.sync_all())
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("write {}", path.display()));
+    }
     #[cfg(unix)]
     std::fs::File::open(dir)?.sync_all()?;
     Ok(())
+}
+
+fn dir_of(path: &Path) -> &Path {
+    match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    }
+}
+
+/// A fresh temp file beside `dest`: `create_new` (never follows or truncates an
+/// existing path) under an unpredictable name, mode 0600 on Unix.
+fn create_tmp(dir: &Path, dest: &Path) -> Result<(PathBuf, std::fs::File)> {
+    let name = dest
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    for _ in 0..8 {
+        let tmp = dir.join(format!(".{name}.{:032x}.tmp", rand::random::<u128>()));
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        match o.open(&tmp) {
+            Ok(f) => return Ok((tmp, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e).with_context(|| format!("create {}", tmp.display())),
+        }
+    }
+    bail!("could not create a temp file in {}", dir.display())
+}
+
+/// Run `f` holding an exclusive lock on `<path>.lock`, so read → extends-check
+/// → rename is one step across processes. The lock file is never truncated and
+/// is released when the handle drops.
+fn locked<T>(path: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let dir = dir_of(path);
+    std::fs::create_dir_all(dir)?;
+    let name = path
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let lock_path = dir.join(format!("{name}.lock"));
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("open {}", lock_path.display()))?;
+    lock.lock()
+        .with_context(|| format!("lock {}", lock_path.display()))?;
+    f()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// A pre-planted symlink at the old predictable temp name (`<stem>.tmp.<pid>`)
+    /// must not be followed: its target stays byte-for-byte as it was.
+    #[test]
+    fn a_planted_tmp_symlink_is_never_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("user.key");
+        std::fs::write(&victim, "precious").unwrap();
+        let dest = dir.path().join("export.json");
+        let planted = dest.with_extension(format!("tmp.{}", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+        let log = RevocationLog::genesis(&UserKey::generate()).unwrap();
+        save(&dest, &log).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+        assert_eq!(read(&dest).unwrap().unwrap(), log);
+    }
 }

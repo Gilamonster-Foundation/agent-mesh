@@ -158,3 +158,72 @@ fn export_writes_a_verifying_copy_and_refuses_a_log_that_does_not_extend() {
         3
     );
 }
+
+#[test]
+fn a_writer_waits_for_the_lock_and_then_builds_on_the_new_head() {
+    let home = keygen();
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(home.path().join("revocation.json.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("amesh"))
+        .args(["--home", home.path().to_str().unwrap(), "revoke", AGENT])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(child.try_wait().unwrap().is_none(), "ran without the lock");
+    assert_eq!(log_of(&home).verify().unwrap().len, 1);
+    lock.unlock().unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(log_of(&home).verify().unwrap().len, 2);
+}
+
+#[test]
+fn concurrent_revokes_never_drop_an_acknowledged_entry() {
+    let home = keygen();
+    let agents: Vec<String> = (0..8)
+        .map(|i| format!("{i:02x}{}", "11".repeat(31)))
+        .collect();
+    let kids: Vec<_> = agents
+        .iter()
+        .map(|a| {
+            std::process::Command::new(assert_cmd::cargo::cargo_bin("amesh"))
+                .args(["--home", home.path().to_str().unwrap(), "revoke", a])
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for mut k in kids {
+        assert!(k.wait().unwrap().success());
+    }
+    let st = log_of(&home).verify().unwrap();
+    assert_eq!(st.len, 9);
+    for a in &agents {
+        assert!(st.revoked.contains(&a.parse().unwrap()), "lost {a}");
+    }
+}
+
+#[test]
+fn keygen_beside_an_existing_log_creates_no_key() {
+    let home = TempDir::new().unwrap();
+    std::fs::write(home.path().join("revocation.json"), "not a log").unwrap();
+    amesh(&home, &["keygen"])
+        .assert()
+        .failure()
+        .stderr(contains("revocation log already exists"));
+    assert!(!home.path().join("user.key").exists());
+
+    // Another user's valid log is just as incompatible with a fresh key.
+    let other = keygen();
+    std::fs::copy(
+        other.path().join("revocation.json"),
+        home.path().join("revocation.json"),
+    )
+    .unwrap();
+    amesh(&home, &["keygen"]).assert().failure();
+    assert!(!home.path().join("user.key").exists());
+}
