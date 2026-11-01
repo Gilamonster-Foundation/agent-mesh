@@ -67,6 +67,21 @@ def build_parser() -> argparse.ArgumentParser:
     # whoami
     sub.add_parser("whoami", help="Print the local user identity.")
 
+    # revoke / revocation
+    p = sub.add_parser(
+        "revoke", help="Revoke an agent in your signed revocation log."
+    )
+    p.add_argument("agent", help="Agent public-key fingerprint (64-char hex).")
+    p = sub.add_parser(
+        "revocation", help="Inspect and manage your revocation log."
+    )
+    rev_sub = p.add_subparsers(dest="rev_cmd", required=True)
+    rev_sub.add_parser("init", help="Write a genesis log for an existing key.")
+    rev_sub.add_parser("bump", help="Raise the generation by one.")
+    rev_sub.add_parser("show", help="Print the verified log.")
+    p_ex = rev_sub.add_parser("export", help="Write a copy of the verified log.")
+    p_ex.add_argument("path", type=Path)
+
     # verify
     p = sub.add_parser(
         "verify", help="Verify a peer's GitHub binding."
@@ -149,6 +164,18 @@ def _dispatch(args: argparse.Namespace, home: Path) -> int:
         raise ValueError(f"unknown bind target {args.bind_target!r}")
     if cmd == "whoami":
         return _commands.whoami.run(home)
+    if cmd == "revoke":
+        rev = _commands.revocation
+        return rev.run(lambda: rev.revoke(home, args.agent))
+    if cmd == "revocation":
+        rev = _commands.revocation
+        handlers = {
+            "init": lambda: rev.init(home),
+            "bump": lambda: rev.bump(home),
+            "show": lambda: rev.show(home),
+            "export": lambda: rev.export(home, args.path),
+        }
+        return rev.run(handlers[args.rev_cmd])
     if cmd == "verify":
         return asyncio.run(
             _commands.verify.run(args.binding, args.github_user)
