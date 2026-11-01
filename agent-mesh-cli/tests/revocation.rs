@@ -7,6 +7,7 @@ use predicates::str::contains;
 use tempfile::TempDir;
 
 const AGENT: &str = "ab00000000000000000000000000000000000000000000000000000000000001";
+const OTHER: &str = "cd00000000000000000000000000000000000000000000000000000000000002";
 
 fn amesh(home: &TempDir, args: &[&str]) -> Command {
     let mut c = Command::cargo_bin("amesh").unwrap();
@@ -106,14 +107,16 @@ fn corrupted_log_blocks_every_command() {
     let home = keygen();
     amesh(&home, &["revoke", AGENT]).assert().success();
     let path = home.path().join("revocation.json");
-    let tampered = std::fs::read_to_string(&path)
-        .unwrap()
-        .replacen(&AGENT[..8], "ffffffff", 1);
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    // Flip the revoked agent's last byte: the node's id no longer matches its signature.
+    v["entries"][1]["node"]["payload"]["Revoke"]["agent"][31] = 9.into();
+    let tampered = serde_json::to_string(&v).unwrap();
     assert_ne!(tampered, std::fs::read_to_string(&path).unwrap());
     std::fs::write(&path, &tampered).unwrap();
     let out = home.path().join("out.json");
     for args in [
-        vec!["revoke", &AGENT[..62]],
+        vec!["revoke", OTHER],
         vec!["revocation", "bump"],
         vec!["revocation", "show"],
         vec!["revocation", "export", out.to_str().unwrap()],
@@ -136,8 +139,8 @@ fn export_writes_a_verifying_copy_and_refuses_a_log_that_does_not_extend() {
         serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
     assert_eq!(exported, log_of(&home));
 
-    // A longer log already sits at the destination: exporting a shorter one
-    // over it would roll history back, so it is refused.
+    // The destination already holds this user's log: re-exporting a longer one
+    // extends it, but another user's log does not and is refused.
     amesh(&home, &["revocation", "bump"]).assert().success();
     amesh(&home, &["revocation", "export", out.to_str().unwrap()])
         .assert()
