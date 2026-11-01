@@ -162,6 +162,20 @@ only source of `AuthenticatedPeer` provenance; neither the SSH account nor a
 [SSH transport decision record](docs/decisions/ssh_transport.md) for the trust
 model and its explicit relay limitations.
 
+## Revocation
+
+`amesh keygen` also writes `revocation.json` beside `user.key`: a signed, append-only log (see `docs/decisions/revocation.md`).
+
+```bash
+amesh revoke <agent-fingerprint>     # revoke an agent (may be on another machine)
+amesh revocation bump                # raise the generation; older-scoped certs lapse
+amesh revocation show                # user, length, head, generation, revoked set
+amesh revocation export <path>       # atomic copy of the verified log
+amesh revocation init                # genesis log for a user key that has none
+```
+
+Every write verifies the log first and refuses one that fails `verify()`.
+
 ## Python Usage
 
 Install the wheel:
