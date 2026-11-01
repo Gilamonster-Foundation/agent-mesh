@@ -22,6 +22,7 @@ pub fn run(home: PathBuf, path: Option<PathBuf>) -> Result<()> {
         .with_context(|| format!("save key to {}", key_path.display()))?;
     let fp = key.fingerprint();
     println!("generated user key at {}", key_path.display());
+    crate::revocation::init_beside(&key_path, &key)?;
     println!("fingerprint: {}", fp.hex());
     println!("short:       {}", fp.short());
     Ok(())
