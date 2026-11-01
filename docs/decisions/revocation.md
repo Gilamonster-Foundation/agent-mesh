@@ -1,6 +1,6 @@
 # Revocation: a user-signed log and `CertChain::verify_with`
 
-**Status:** protocol slice implemented (agent-mesh#180); CLI is #181, transports #182.
+**Status:** protocol slice implemented (agent-mesh#180); CLI is #181, transports #182 (implemented).
 **Date:** 2026-10-26
 
 ## Decision
@@ -55,4 +55,44 @@ revoked per agent (`Revoke`), not by bump. Only certs issued with a bounded
 2. **Re-check live sessions.** `verify_with` is a point-in-time check. A
    session admitted before a revocation stays open until the consumer
    re-verifies it against the newer state.
-3. Distribution of the log is out of scope here (#182).
+3. Distribution of the log is out of scope here.
+
+## Transports (#182)
+
+`agent-mesh-transport::RevocationGuard` is the one consumer of the log; every
+transport takes one and nothing is checked without it.
+
+- **Fail closed.** `RevocationGuard::open(<home>/revocation.json, user)` reads,
+  verifies and checks the log at startup; a missing, unreadable, invalid or
+  other user's log is an error, so no bus or transport binds and no handshake
+  runs. If the file turns bad while running, every peer is refused until it is
+  fixed. `RevocationGuard::in_memory(&UserKey)` (an empty log, nothing
+  persisted) exists for tests and callers that keep no log.
+- **`Seen` is persisted** beside the log as `revocation.seen.json` (temp file +
+  rename). It is written the first time a log is opened and rewritten when the
+  head advances; `extends` runs on every load, so a log rolled back to an older
+  copy, or forked, is refused at startup and while running.
+- **Handshakes.** The iroh handshake (`handshake.rs::ensure_trustable`) and the
+  SSH session handshake (`session.rs::validate_peer_hello`, and the local cert in
+  `validate_local_identity`) call `verify_with` with the guard's state instead
+  of `verify` / `verify_at`. The refusing side reports `Revoked` and says why
+  to the peer; a dialer that refuses its acceptor just closes.
+- **Live sessions.** A `LiveCheck` holds the peer's chain and the last log head
+  it passed. Before each read or write it fetches the guard's state (a file
+  `stat` while the log is unchanged), and re-verifies the chain only when the
+  head moved. Iroh session streams wrap both halves in `Revocable`, so no byte
+  from a revoked peer is handed to the session handler; SSH records are checked
+  right after the record is read, before the envelope is returned for dispatch,
+  and before one is written. A refusal poisons the half. Descendants go with
+  their revoked ancestor because `verify_with` checks every link.
+- **Change detection** is the log file's mtime and length, then a parse; it does
+  not poll on a clock. A rewrite with identical length and mtime is not seen
+  until the next start, which re-verifies against `Seen`.
+- **SSH generation.** The log's generation is the session's causal generation
+  (`SessionParameters.current_generation` is overwritten), so two peers on
+  different log states fail with a parameter mismatch rather than apply different
+  views.
+- **Not covered:** a connection that is idle when the revocation lands ends at its
+  next read or write, not at once; envelope-level admission in the bus is still
+  context-free (unchanged).
+

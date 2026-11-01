@@ -19,6 +19,8 @@
 //!   `cargo test -- --ignored`. What it uniquely exercises is the real
 //!   multicast-discovery path.
 
+mod revocation_log;
+
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -131,6 +133,7 @@ async fn mcp_server_direct_addr_round_trips_to_live_responder() {
         .await
         .expect("run keygen");
     assert!(status.success(), "keygen must succeed");
+    revocation_log::ensure_log(home.path());
     let user = UserKey::load(&home.path().join("user.key")).expect("load generated key");
 
     // 2. Start the MCP server (quiet bind) and complete the handshake.
@@ -214,6 +217,7 @@ async fn mcp_server_direct_addr_publishes_to_subscriber() {
         .await
         .expect("run keygen");
     assert!(status.success(), "keygen must succeed");
+    revocation_log::ensure_log(home.path());
     let user = UserKey::load(&home.path().join("user.key")).expect("load generated key");
 
     let mut client = McpClient::spawn(home.path());
@@ -293,6 +297,7 @@ async fn mcp_server_round_trips_request_to_live_responder() {
         .await
         .expect("run keygen");
     assert!(status.success(), "keygen must succeed");
+    revocation_log::ensure_log(home.path());
     let user = UserKey::load(&home.path().join("user.key")).expect("load generated key");
 
     // 2. Start the MCP server (quiet bind: replies reach it via the

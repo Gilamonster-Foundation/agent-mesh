@@ -3,6 +3,8 @@
 //! Each test gets an isolated tempdir as `$AMESH_HOME` (passed via
 //! `--home`) so it never touches the user's real `~/.agent-mesh`.
 
+mod revocation_log;
+
 use assert_cmd::Command;
 use predicates::str::contains;
 use ssh_key::{Algorithm, LineEnding, PrivateKey};
@@ -430,6 +432,7 @@ fn listen_send_direct_addr_roundtrip_delivers_payload() {
         .args(["--home", dir.path().to_str().unwrap(), "keygen"])
         .assert()
         .success();
+    revocation_log::ensure_log(dir.path());
 
     let bin = assert_cmd::cargo::cargo_bin("amesh");
     let mut listener = std::process::Command::new(&bin)
@@ -549,6 +552,7 @@ fn listen_send_roundtrip_delivers_payload_before_sender_exits() {
         .args(["--home", dir.path().to_str().unwrap(), "keygen"])
         .assert()
         .success();
+    revocation_log::ensure_log(dir.path());
 
     let bin = assert_cmd::cargo::cargo_bin("amesh");
     let mut listener = std::process::Command::new(&bin)
@@ -716,4 +720,29 @@ fn verify_fails_on_garbage_binding_file() {
         ])
         .assert()
         .failure();
+}
+
+/// Fail closed: with no `revocation.json` there is no peer to talk to, so a
+/// listener does not start. Red before the CLI opened the user's log.
+#[test]
+fn listen_without_a_revocation_log_fails_closed() {
+    let dir = TempDir::new().unwrap();
+    Command::cargo_bin("amesh")
+        .unwrap()
+        .args(["--home", dir.path().to_str().unwrap(), "keygen"])
+        .assert()
+        .success();
+    std::fs::remove_file(dir.path().join("revocation.json")).ok();
+    Command::cargo_bin("amesh")
+        .unwrap()
+        .args([
+            "--home",
+            dir.path().to_str().unwrap(),
+            "listen",
+            "--duration",
+            "1s",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("revocation log is required"));
 }

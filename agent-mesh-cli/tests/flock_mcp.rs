@@ -3,6 +3,8 @@
 //! session signs, admission decides, and a refusal is the tool's error.
 #![cfg(unix)]
 
+mod revocation_log;
+
 use agent_mesh_flock::{Body, EndReason, HandoffApproval};
 use agent_mesh_protocol::{AgentKey, AgentMetadata, Assertion, Caveats, UserKey};
 use assert_cmd::cargo::cargo_bin;
@@ -36,6 +38,7 @@ struct Flock {
 fn flock() -> Flock {
     let home = TempDir::new().unwrap();
     assert!(amesh(home.path()).arg("keygen").status().unwrap().success());
+    revocation_log::ensure_log(home.path());
     let mut init = amesh(home.path());
     init.args(["flock", "init", "--name", "f"]);
     for m in ["shep:shepherd", "h1:helper", "h2:helper"] {
