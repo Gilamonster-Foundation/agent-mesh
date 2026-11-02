@@ -1,6 +1,6 @@
 # Revocation: a user-signed log and `CertChain::verify_with`
 
-**Status:** protocol slice implemented (agent-mesh#180); CLI is #181, transports #182 (implemented).
+**Status:** implemented: protocol (#180), CLI (#181) and transports (#182). `RevocationGuard` lives in `agent-mesh-protocol` since 0.8.3 (#187).
 **Date:** 2026-10-26
 
 ## Decision
