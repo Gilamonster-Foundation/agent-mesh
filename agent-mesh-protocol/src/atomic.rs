@@ -38,8 +38,10 @@ pub fn create_tmp(dir: &Path, dest: &Path) -> io::Result<(PathBuf, File)> {
 }
 
 /// Replace `dest` with `bytes` atomically and durably: temp file, `sync_all`,
-/// rename, then `sync_all` on the directory (Unix). On failure the temp file
-/// is removed and `dest` is untouched.
+/// rename, then `sync_all` on the directory (Unix). If writing, syncing or the
+/// rename fails, the temp file is removed and `dest` is untouched. If the
+/// directory `sync_all` fails, the rename has already happened: `dest` holds the
+/// new bytes but durability across a crash is unconfirmed, and `Err` is returned.
 ///
 /// # Errors
 /// Any I/O error along the way.
