@@ -17,7 +17,7 @@ for which keys may use which models.
 |---|---|---|
 | iroh QUIC transport | every connection is encrypted (QUIC carries TLS 1.3) and authenticated by cert chain at the handshake, checked against the user's revocation log (a revoked agent is refused; no log, no connection) | `agent-mesh-transport`, `RevocationGuard` in `agent-mesh-protocol`, `docs/decisions/revocation.md` |
 | Signed envelopes | every message is signed by the sender's `AgentKey`, certified by its `UserKey` | `agent-mesh-protocol` |
-| Session streams | a long-lived, full-duplex conversation on one QUIC stream, authorized at open from the opener's certificate | `agent-mesh-bus` (#84), `docs/decisions/session_streams.md` |
+| Session streams | a long-lived, full-duplex conversation on one QUIC stream, opener authenticated at open; its certificate chain is handed to the handler, which authorizes | `agent-mesh-bus` (#84), `docs/decisions/session_streams.md` |
 | SSH carriage | the same bus traffic, session streams included, over system `ssh -W`, with an inner AgentKey handshake | `agent-mesh-transport-ssh` (#112), `docs/decisions/ssh_transport.md` |
 | newt-mesh | single-turn inference over bus request/reply: `InferenceRequest { prompt, model }` → `InferenceReply { model_id, … }`, no streaming | newt-agent `newt-mesh` |
 
@@ -27,16 +27,15 @@ flowchart TB
         direction TB
         P["payload<br/>(e.g. an inference request)"]
         E["SignedEnvelope<br/>signed by the sender's AgentKey"]
-        S["session stream<br/>sequence-numbered, authorized at open"]
+        S["session stream<br/>sequence-numbered, opener authenticated at open"]
         T["QUIC (TLS 1.3) via iroh<br/>or SSH via ssh -W"]
         P --> E --> S --> T
     end
 ```
 
 Each layer adds one guarantee. The transport hides the bytes from the network.
-The envelope proves who wrote each message. The session refuses an opener
-whose certificate does not allow the topic, and dies on a sequence gap or a
-bad signature. A revocation the log learns later ends an established session
+The envelope proves who wrote each message. The session hands the handler the opener's verified certificate before any
+data flows, and dies on a sequence gap or a bad signature. A revocation the log learns later ends an established session
 too: every received envelope is re-checked against the log, so revoking a key
 cuts off its inference stream.
 
@@ -98,7 +97,7 @@ sequenceDiagram
 
     H->>L: POST /v1/chat/completions (stream: true)
     L->>RP: open_session("inference/v1")
-    Note over L,RP: refused at open unless the opener's<br/>certificate allows this topic (and model)
+    Note over L,RP: refused at open unless the relay's handler<br/>finds the opener's certificate allows this topic (and model)
     L->>RP: request head + body (signed envelope)
     RP->>EN: POST /v1/chat/completions (localhost)
     loop each SSE chunk
@@ -120,8 +119,9 @@ the engine request instead of leaving it to finish unseen.
    streaming) onto session messages, and a relay that maps them back. No new
    cryptography and no new transport: it is framing over `Bus::open_session`
    and `Bus::handle_sessions`.
-2. **An inference authorization rule.** Session streams already check the
-   opener's certificate against the topic. Inference also needs *which
+2. **An inference authorization rule.** The bus authenticates the opener and
+   hands the handler its certificate, but main has no topic-to-capability
+   rule: the relay's handler must check the topic before accepting. It also needs *which
    models* a key may use and *which inference host* the certificate is for (a
    models axis and an audience on agent-mesh certificates). Prior-art
    research on an inference gateway reached the same conclusion: no new
