@@ -19,6 +19,7 @@
 use crate::{bus::Bus, reply::CorrelationId, topic::Topic, BusError, Result as BusResult};
 use agent_mesh_protocol::pyo3_module::{PyAgentKey, PyFingerprint, PyUserKey};
 use agent_mesh_protocol::AgentKey;
+use agent_mesh_transport::pyo3_module::PyRevocationGuard;
 use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule, PyType};
@@ -189,7 +190,9 @@ impl PyBus {
         user: &PyUserKey,
         agent: &PyAgentKey,
         port: u16,
+        revocation: &PyRevocationGuard,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let revocation = revocation.inner.clone();
         // The `user` key is needed to derive a UserKey reference for
         // Bus::bind. UserKey doesn't impl Clone — but we only need
         // the user's fingerprint + public key, both of which are
@@ -223,7 +226,9 @@ impl PyBus {
                 .map_err(|e| PyRuntimeError::new_err(format!("user load: {e}")))?;
             let agent = AgentKey::from_seed_and_cert(&agent_seed, agent_cert)
                 .map_err(|e| PyRuntimeError::new_err(format!("agent rebuild: {e}")))?;
-            let bus = Bus::bind(&user, agent, port).await.map_err(bus_err_to_py)?;
+            let bus = Bus::bind(&user, agent, port, revocation)
+                .await
+                .map_err(bus_err_to_py)?;
             // Keep the tempdir alive at least until bind returned.
             drop(user_dir);
             Ok(Self {

@@ -15,7 +15,9 @@ use std::time::Duration;
 use crate::util;
 use agent_mesh_discovery::{AnnounceConfig, Announcer};
 use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, CertChain, UserKey};
-use agent_mesh_transport::{do_handshake, iroh_reexports::Incoming, recv_envelope, Endpoint};
+use agent_mesh_transport::{
+    do_handshake, iroh_reexports::Incoming, recv_envelope, Endpoint, LiveCheck, RevocationGuard,
+};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
@@ -102,6 +104,7 @@ pub async fn run(home: PathBuf, duration: Option<String>) -> Result<()> {
     };
 
     let cert = agent.cert().clone();
+    let revocation = util::revocation_guard(&home, &user)?;
 
     loop {
         let accept_fut = endpoint.accept();
@@ -133,8 +136,9 @@ pub async fn run(home: PathBuf, duration: Option<String>) -> Result<()> {
             break;
         };
         let cert = cert.clone();
+        let revocation = revocation.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_one(incoming, &cert).await {
+            if let Err(e) = handle_one(incoming, &cert, &revocation).await {
                 tracing::warn!(error = %e, "listener: connection error");
                 eprintln!("connection error: {e}");
             }
@@ -144,7 +148,11 @@ pub async fn run(home: PathBuf, duration: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn handle_one(incoming: Incoming, our_cert: &CertChain) -> Result<()> {
+async fn handle_one(
+    incoming: Incoming,
+    our_cert: &CertChain,
+    revocation: &RevocationGuard,
+) -> Result<()> {
     let conn = incoming.await.context("await QUIC handshake")?;
     // First (and for now only) bidi stream per connection. Keep
     // accepting until the peer closes its send side.
@@ -159,7 +167,7 @@ async fn handle_one(incoming: Incoming, our_cert: &CertChain) -> Result<()> {
         // Use a deadline so a stalled handshake can't pin a stream.
         let peer_cert = match tokio::time::timeout(
             Duration::from_secs(5),
-            do_handshake(our_cert, &mut send, &mut recv, false),
+            do_handshake(our_cert, &mut send, &mut recv, false, revocation),
         )
         .await
         {
@@ -175,7 +183,14 @@ async fn handle_one(incoming: Incoming, our_cert: &CertChain) -> Result<()> {
         };
         // Now drain one envelope (Phase 2 ships one-shot envelopes
         // per stream; multi-message streams come later).
-        match recv_envelope(&mut recv).await {
+        let live = match LiveCheck::new(revocation.clone(), peer_cert.clone()) {
+            Ok(live) => live,
+            Err(e) => {
+                eprintln!("rejected peer: {e}");
+                continue;
+            }
+        };
+        match recv_envelope(&mut recv, &live).await {
             Ok(env) => {
                 let record = ReceivedRecord {
                     sender_agent_fp: env.sender_agent_fp().hex(),

@@ -177,7 +177,23 @@ impl<F: Fs> Reader<F> {
         once: bool,
         seen: &mut dyn FnMut(Seen<'_>),
     ) -> Result<String, ReaderError> {
-        let mut w = Watch::open(serve, prove, self.follower.head().cloned())?;
+        self.follow_on(UnixStream::connect(serve)?, prove, once, seen)
+    }
+
+    /// [`Self::follow`] over a connection the caller made and keeps a clone
+    /// of: shutting that clone down ends a read the server never answers,
+    /// and this returns the error.
+    ///
+    /// # Errors
+    /// As [`Self::follow`], and I/O when the caller closes the connection.
+    pub fn follow_on(
+        &mut self,
+        conn: UnixStream,
+        prove: Prover<'_>,
+        once: bool,
+        seen: &mut dyn FnMut(Seen<'_>),
+    ) -> Result<String, ReaderError> {
+        let mut w = Watch::open_on(conn, prove, self.follower.head().cloned())?;
         loop {
             match w.next_event()? {
                 WatchEvent::Frame(f) => {
@@ -235,7 +251,19 @@ impl Watch {
     /// Refused, or [`ReaderError::Rollback`] when the server is behind
     /// `from`.
     pub fn open(serve: &Path, prove: Prover<'_>, from: Option<Head>) -> Result<Self, ReaderError> {
-        let mut conn = UnixStream::connect(serve)?;
+        Self::open_on(UnixStream::connect(serve)?, prove, from)
+    }
+
+    /// [`Self::open`] on a connection the caller made, so it can keep a
+    /// clone and shut it down to stop a blocked read.
+    ///
+    /// # Errors
+    /// As [`Self::open`].
+    pub fn open_on(
+        mut conn: UnixStream,
+        prove: Prover<'_>,
+        from: Option<Head>,
+    ) -> Result<Self, ReaderError> {
         write_msg(&mut conn, &Req::WatchBegin)?;
         let Some(Resp::StreamChallenge(ch)) = read_msg::<Resp>(&mut conn)? else {
             return Err(ReaderError::Stream("no challenge".into()));

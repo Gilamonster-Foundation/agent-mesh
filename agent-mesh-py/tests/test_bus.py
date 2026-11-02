@@ -22,6 +22,7 @@ import pytest
 
 import agent_mesh.bus as bus
 import agent_mesh.core as core
+import agent_mesh.transport as transport
 
 
 def _meta(role: str) -> core.AgentMetadata:
@@ -58,8 +59,8 @@ async def test_bus_request_reply_roundtrip() -> None:
     bob = core.AgentKey.issue(user, _meta("bob"))
     bob_fp = bob.fingerprint()
 
-    alice_bus = await bus.Bus.bind(user, alice, 0)
-    bob_bus = await bus.Bus.bind(user, bob, 0)
+    alice_bus = await bus.Bus.bind(user, alice, 0, transport.RevocationGuard.in_memory(user))
+    bob_bus = await bus.Bus.bind(user, bob, 0, transport.RevocationGuard.in_memory(user))
 
     topic = bus.Topic(user.fingerprint(), "echo")
 
@@ -94,8 +95,8 @@ async def test_bus_async_handler_is_rejected_clearly() -> None:
     bob = core.AgentKey.issue(user, _meta("bob"))
     bob_fp = bob.fingerprint()
 
-    alice_bus = await bus.Bus.bind(user, alice, 0)
-    bob_bus = await bus.Bus.bind(user, bob, 0)
+    alice_bus = await bus.Bus.bind(user, alice, 0, transport.RevocationGuard.in_memory(user))
+    bob_bus = await bus.Bus.bind(user, bob, 0, transport.RevocationGuard.in_memory(user))
 
     topic = bus.Topic(user.fingerprint(), "async-echo")
 

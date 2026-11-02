@@ -15,6 +15,12 @@ Key subcommands:
 - `amesh verify` — verify a peer's GitHub binding by fetching their public keys
 - `amesh mcp` — serve the mesh over MCP (stdio JSON-RPC) so MCP-capable
   agents can drive it as tool calls
+- `amesh flock …` (Unix) — run and take part in a flock: `init`, `serve`,
+  `attach`, `invite`, `session`, `join`; work through the signed log with
+  `brief`, `review`, `take`, `result`, `verdict`, `inbox`, `status`, `log`,
+  `run`, `watch`; the operator's answer signer `device-init`,
+  `device-register`, `sign`, `answer`; and the herdr adapter `nudge`, `panes`.
+  See `skills/flock/SKILL.md`.
 
 ## MCP server
 

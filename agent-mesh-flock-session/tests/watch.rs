@@ -998,3 +998,45 @@ fn a_reader_that_cannot_make_its_loaded_checkpoint_durable_does_not_open() {
     fs.heal();
     Reader::open(r.genesis(), dir, fs.clone()).unwrap();
 }
+
+/// A caller that owns the connection can stop a read the server never answers:
+/// it shuts its clone down and `follow_on` returns an error instead of hanging.
+#[test]
+fn a_caller_can_stop_a_follow_whose_server_never_replies() {
+    use std::os::unix::net::UnixListener;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let r = rig();
+    let sock = r.tmp.path().join("run").join("stalled.sock");
+    let listener = UnixListener::bind(&sock).unwrap();
+    let (asked_tx, asked_rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        // take the request, then say nothing until the caller hangs up
+        let _ = read_msg::<Req>(&mut conn).unwrap();
+        asked_tx.send(()).unwrap();
+        let mut rest = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut conn, &mut rest);
+    });
+
+    let conn = UnixStream::connect(&sock).unwrap();
+    let stop = conn.try_clone().unwrap();
+    let stopper = std::thread::spawn(move || {
+        asked_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        stop.shutdown(std::net::Shutdown::Both).unwrap();
+    });
+
+    let dir = TempDir::new().unwrap();
+    let mut reader = Reader::open(r.genesis(), dir.path(), RealFs).unwrap();
+    // the server never sends a challenge, so the prover is never asked
+    let prove = |_: &agent_mesh_flock_server::wire::StreamChallenge| {
+        Err(ReaderError::Stream(
+            "asked to prove with no challenge".into(),
+        ))
+    };
+    let out = reader.follow_on(conn, &prove, false, &mut |_| {});
+    assert!(out.is_err(), "a stopped read is an error, not a result");
+    stopper.join().unwrap();
+    server.join().unwrap();
+}

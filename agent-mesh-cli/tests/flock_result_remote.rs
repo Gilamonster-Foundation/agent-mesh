@@ -4,6 +4,8 @@
 #![cfg(unix)]
 mod harness;
 
+mod revocation_log;
+
 use harness::{amesh, Proc};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -53,6 +55,7 @@ fn session(cfg: &Path, dir: &Path, home: &Path, member: &str, procs: &mut Vec<Pr
 fn rig() -> (Rig, PathBuf, PathBuf, PathBuf) {
     let home = TempDir::new().unwrap();
     assert!(amesh(home.path()).arg("keygen").status().unwrap().success());
+    revocation_log::ensure_log(home.path());
     let init = amesh(home.path())
         .args(["flock", "init", "--name", "f"])
         .args(["--member", "shep:shepherd", "--member", "h1:helper"])
@@ -90,6 +93,7 @@ fn rig() -> (Rig, PathBuf, PathBuf, PathBuf) {
 
     let far = TempDir::new().unwrap();
     std::fs::copy(home.path().join("user.key"), far.path().join("user.key")).unwrap();
+    revocation_log::copy_log(home.path(), far.path());
     let fdir = far.path().join("flocks").join("f");
     let mut attach = amesh(far.path())
         .args(["flock", "attach", "--id", &id, "--peer", &peer, "--dir"])

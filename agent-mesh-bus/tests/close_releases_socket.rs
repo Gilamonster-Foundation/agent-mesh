@@ -4,6 +4,7 @@
 //! returns holds the per-inbound task, which holds the transport, which holds
 //! the endpoint, until `close` aborts and awaits it.
 
+use agent_mesh_bus::RevocationGuard;
 use agent_mesh_bus::{Bus, BusOptions, PeerEndpoint, Topic};
 use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, UserKey};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -32,8 +33,14 @@ async fn a_bus_whose_handler_is_still_running_releases_its_port_when_close_retur
     let user = UserKey::generate();
     let (alice, bob) = (agent(&user, "alice"), agent(&user, "bob"));
     let bob_pub = bob.public_bytes();
-    let alice_bus = Arc::new(Bus::bind_with(&user, alice, 0, QUIET).await.unwrap());
-    let bob_bus = Bus::bind_with(&user, bob, 0, QUIET).await.unwrap();
+    let alice_bus = Arc::new(
+        Bus::bind_with(&user, alice, 0, QUIET, RevocationGuard::in_memory(&user))
+            .await
+            .unwrap(),
+    );
+    let bob_bus = Bus::bind_with(&user, bob, 0, QUIET, RevocationGuard::in_memory(&user))
+        .await
+        .unwrap();
     let port = bob_bus.local_port();
 
     // a handler that has started and never finishes
@@ -62,9 +69,15 @@ async fn a_bus_whose_handler_is_still_running_releases_its_port_when_close_retur
     bob_bus.close().await.unwrap();
 
     // the very next bind on the same port: no retry, no sleep
-    let again = Bus::bind_with(&user, agent(&user, "bob2"), port, QUIET)
-        .await
-        .expect("the port is free the moment close returns");
+    let again = Bus::bind_with(
+        &user,
+        agent(&user, "bob2"),
+        port,
+        QUIET,
+        RevocationGuard::in_memory(&user),
+    )
+    .await
+    .expect("the port is free the moment close returns");
     assert_eq!(again.local_port(), port);
     again.close().await.unwrap();
     ask.abort();
@@ -75,8 +88,12 @@ async fn a_bus_that_has_served_a_connection_releases_its_port_when_close_returns
     let user = UserKey::generate();
     let (alice, bob) = (agent(&user, "alice"), agent(&user, "bob"));
     let bob_pub = bob.public_bytes();
-    let alice_bus = Bus::bind_with(&user, alice, 0, QUIET).await.unwrap();
-    let bob_bus = Bus::bind_with(&user, bob, 0, QUIET).await.unwrap();
+    let alice_bus = Bus::bind_with(&user, alice, 0, QUIET, RevocationGuard::in_memory(&user))
+        .await
+        .unwrap();
+    let bob_bus = Bus::bind_with(&user, bob, 0, QUIET, RevocationGuard::in_memory(&user))
+        .await
+        .unwrap();
     let port = bob_bus.local_port();
     let topic = Topic::new(user.fingerprint(), "echo");
     bob_bus.handle_requests(topic.clone(), |b| async move { Ok(b) });
@@ -89,9 +106,15 @@ async fn a_bus_that_has_served_a_connection_releases_its_port_when_close_returns
 
     bob_bus.close().await.unwrap();
 
-    let again = Bus::bind_with(&user, agent(&user, "bob2"), port, QUIET)
-        .await
-        .expect("the port is free the moment close returns");
+    let again = Bus::bind_with(
+        &user,
+        agent(&user, "bob2"),
+        port,
+        QUIET,
+        RevocationGuard::in_memory(&user),
+    )
+    .await
+    .expect("the port is free the moment close returns");
     again.close().await.unwrap();
     alice_bus.close().await.unwrap();
 }
@@ -112,8 +135,10 @@ where
     let user = UserKey::generate();
     let (alice, bob) = (agent(&user, "alice"), agent(&user, "bob"));
     let bob_pub = bob.public_bytes();
-    let alice_bus = Bus::bind_with(&user, alice, 0, QUIET).await.unwrap();
-    let bob_bus = Bus::bind_with(&user, bob, 0, QUIET)
+    let alice_bus = Bus::bind_with(&user, alice, 0, QUIET, RevocationGuard::in_memory(&user))
+        .await
+        .unwrap();
+    let bob_bus = Bus::bind_with(&user, bob, 0, QUIET, RevocationGuard::in_memory(&user))
         .await
         .unwrap()
         .with_session_shutdown_grace(Duration::ZERO);
@@ -134,9 +159,15 @@ where
         .expect("close must not wait on application code")
         .unwrap();
 
-    let again = Bus::bind_with(&user, agent(&user, "bob2"), port, QUIET)
-        .await
-        .expect("the port is free the moment close returns");
+    let again = Bus::bind_with(
+        &user,
+        agent(&user, "bob2"),
+        port,
+        QUIET,
+        RevocationGuard::in_memory(&user),
+    )
+    .await
+    .expect("the port is free the moment close returns");
     again.close().await.unwrap();
     alice_bus.close().await.unwrap();
 }

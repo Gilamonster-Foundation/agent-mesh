@@ -409,7 +409,7 @@ fn halves(
         _keepalive: keepalive.clone(),
     };
     let rx = SessionReceiver {
-        reader: EnvelopeReader::new(stream.recv),
+        reader: EnvelopeReader::new(stream.recv, stream.live),
         link,
         next_seq: rx_seq,
         idle: timing.idle,
@@ -623,7 +623,6 @@ mod tests {
     use super::*;
     use crate::BusMessage;
     use agent_mesh_protocol::{AgentMetadata, Caveats, UserKey};
-    use agent_mesh_transport::recv_envelope;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::DuplexStream;
     use tokio::task::JoinHandle;
@@ -651,7 +650,19 @@ mod tests {
         SessionStream {
             send: Box::new(send),
             recv: Box::new(recv),
+            live: test_live(),
         }
+    }
+
+    /// A live check over an empty in-memory log: nothing is revoked.
+    fn test_live() -> agent_mesh_transport::LiveCheck {
+        let user = UserKey::generate();
+        let agent = agent(&user, "live");
+        agent_mesh_transport::LiveCheck::new(
+            agent_mesh_transport::RevocationGuard::in_memory(&user),
+            agent.cert().clone(),
+        )
+        .unwrap()
     }
 
     fn pipe(capacity: usize) -> (SessionStream, SessionStream) {
@@ -717,7 +728,11 @@ mod tests {
             let opening = tokio::spawn(async move {
                 Session::initiate(alice, bob_peer, a, &topic, timing, shutdown).await
             });
-            let open = recv_envelope(&mut b.recv).await.unwrap();
+            let open = EnvelopeReader::new(&mut b.recv, b.live.clone())
+                .next()
+                .await
+                .unwrap()
+                .unwrap();
             let provenance = DeliveryProvenance::Direct {
                 carrier: carrier(&self.alice),
             };

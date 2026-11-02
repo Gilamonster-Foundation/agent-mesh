@@ -20,6 +20,7 @@ mod mcp;
 #[cfg(unix)]
 pub mod operator;
 mod peers;
+mod revocation;
 mod send;
 mod util;
 mod verify;
@@ -58,6 +59,17 @@ pub enum Command {
     },
     /// Print the local user identity.
     Whoami,
+    /// Revoke an agent: append its fingerprint to your signed revocation log.
+    Revoke {
+        /// Agent public-key fingerprint (64-char hex). It need not be known
+        /// on this machine.
+        agent: String,
+    },
+    /// Inspect and manage your revocation log (`<home>/revocation.json`).
+    Revocation {
+        #[command(subcommand)]
+        command: revocation::RevocationCommand,
+    },
     /// Verify a peer's GitHub binding by fetching their public keys.
     Verify {
         /// Path to the binding JSON file to verify.
@@ -179,6 +191,8 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         },
         Command::Flock { command } => flock::run(home, command).await,
         Command::Whoami => whoami::run(home),
+        Command::Revoke { agent } => revocation::revoke(&home, &agent),
+        Command::Revocation { command } => revocation::run(&home, command),
         Command::Verify {
             binding,
             github_user,

@@ -323,13 +323,14 @@ and its context-free generation rules. It does **not** enforce
 wall-clock admission control. Option A must not document or rely on automatic
 expiry until a clock policy is implemented and tested.
 
-Generation-scoped session identities require an explicit current generation
-and `verify_at(current_generation)`. In context-free mode, a bounded generation
-is rejected rather than ignored. A production transport that receives
-generation state binds the accepted generation into session policy and must
-close or reauthenticate affected live sessions when the generation advances.
-The current transport takes generation policy at bind time; callers must close
-and rebind it when that policy advances.
+Both certs are checked with `CertChain::verify_with` against the local user's
+revocation log ([revocation.md](revocation.md)), which carries the current
+generation: the log's generation replaces whatever generation the caller put in
+`SessionParameters`, and two peers on different generations fail the parameter
+comparison. A revocation the log learns later ends an established session at
+its next record read or write (`LiveCheck` in `session.rs`); the half is
+poisoned so the session stays down. A missing or invalid log refuses every
+peer.
 
 The current common bus envelope verifier remains context-free. It therefore
 rejects generation-scoped envelope certs even when the SSH session handshake
@@ -349,8 +350,8 @@ Option A deliberately records these residuals:
   cross-session injection, but not a relay that keeps both real endpoints live.
 - SSH confidentiality ends at `sshd`; the loopback hop is plaintext.
 - `expires_at` is not currently enforced.
-- Generation revocation needs supplied generation state plus live-session
-  teardown; static cert verification alone is insufficient.
+- Revocation follows the local log file only; nothing distributes it, and an
+  idle session ends at its next record rather than at the moment of revocation.
 - `request_direct(PeerEndpoint)` is shaped around the iroh endpoint model. An
   SSH backend must use a preconfigured fingerprint-to-SSH-target registry or
   reject that route rather than interpreting its socket address as SSH.

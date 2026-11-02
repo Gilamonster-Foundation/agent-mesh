@@ -59,10 +59,11 @@ The library crates are on crates.io:
 ```toml
 # Cargo.toml
 [dependencies]
-agent-mesh-protocol = "0.7"   # ed25519 identity, signed envelopes
-agent-mesh-discovery = "0.7"  # mDNS LAN discovery
-agent-mesh-transport = "0.7"  # authenticated QUIC via iroh
-agent-mesh-bus = "0.7"        # high-level pub/sub + request/reply
+agent-mesh-protocol = "0.8"   # ed25519 identity, signed envelopes
+agent-mesh-discovery = "0.8"  # mDNS LAN discovery
+agent-mesh-transport = "0.8"  # authenticated QUIC via iroh
+agent-mesh-bus = "0.8"        # high-level pub/sub + request/reply
+agent-mesh-flock = "0.8"      # a flock's signed, verified work log
 ```
 
 The `amesh` CLI:
@@ -160,6 +161,20 @@ only source of `AuthenticatedPeer` provenance; neither the SSH account nor a
 `SignedEnvelope` is treated as carrier identity. See the
 [SSH transport decision record](docs/decisions/ssh_transport.md) for the trust
 model and its explicit relay limitations.
+
+## Revocation
+
+`amesh keygen` also writes `revocation.json` beside `user.key`: a signed, append-only log (see `docs/decisions/revocation.md`).
+
+```bash
+amesh revoke <agent-fingerprint>     # revoke an agent (may be on another machine)
+amesh revocation bump                # raise the generation; older-scoped certs lapse
+amesh revocation show                # user, length, head, generation, revoked set
+amesh revocation export <path>       # atomic copy of the verified log
+amesh revocation init                # genesis log for a user key that has none
+```
+
+Every write holds a lock on `revocation.json.lock`, verifies the log first and refuses one that fails `verify()`. The pip-installed `amesh` has the same commands.
 
 ## Python Usage
 

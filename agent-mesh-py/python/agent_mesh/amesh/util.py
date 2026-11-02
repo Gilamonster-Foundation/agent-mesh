@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import datetime as _dt
 import socket as _socket
-from typing import Final
+from pathlib import Path
+from typing import Any, Final
 
 _BAD_DURATION: Final = (
     "invalid duration {s!r} — expected e.g. '5s', '2m', '1h', '500ms'"
@@ -44,6 +45,23 @@ def parse_duration(s: str) -> float:
         return float(int(s))
     except ValueError as e:
         raise ValueError(_BAD_DURATION.format(s=s)) from e
+
+
+def revocation_guard(home: Path, user: Any) -> Any:
+    """The user's revocation log, ``<home>/revocation.json``, as the guard
+    every handshake checks peers against. Raises ``RuntimeError`` when there
+    is no usable log: with none there is no peer to talk to (fail closed).
+    """
+    from agent_mesh.transport import RevocationGuard
+
+    path = home / "revocation.json"
+    try:
+        return RevocationGuard.open(str(path), user.fingerprint())
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"open {path} — a revocation log is required "
+            f"(`amesh revocation init`): {e}"
+        ) from e
 
 
 def current_hostname() -> str:

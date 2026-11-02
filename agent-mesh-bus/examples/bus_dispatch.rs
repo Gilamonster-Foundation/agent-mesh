@@ -10,6 +10,7 @@
 //! in one process, same user fingerprint → auto-team trust →
 //! request/reply round-trip.
 
+use agent_mesh_bus::RevocationGuard;
 use agent_mesh_bus::{Bus, Topic};
 use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, UserKey};
 use anyhow::Result;
@@ -54,8 +55,8 @@ async fn main() -> Result<()> {
     let worker = agent(&user, "dispatch-worker");
     let worker_fp = worker.fingerprint();
 
-    let foreman_bus = Bus::bind(&user, foreman, 0).await?;
-    let worker_bus = Bus::bind(&user, worker, 0).await?;
+    let foreman_bus = Bus::bind(&user, foreman, 0, RevocationGuard::in_memory(&user)).await?;
+    let worker_bus = Bus::bind(&user, worker, 0, RevocationGuard::in_memory(&user)).await?;
 
     let topic = Topic::new(user.fingerprint(), "dispatch/jobs");
 

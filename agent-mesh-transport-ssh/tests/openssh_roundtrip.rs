@@ -2,6 +2,7 @@
 
 use agent_mesh_bus::{Bus, BusError, Topic, Transport};
 use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, Fingerprint, UserKey};
+use agent_mesh_transport::RevocationGuard;
 use agent_mesh_transport_ssh::{
     HostKeyPolicy, OpenSshClient, SessionTimeouts, SshTarget, SshTransport, SshTransportOptions,
 };
@@ -236,7 +237,7 @@ async fn run_smoke_test() -> TestResult<()> {
         SshTransport::bind(
             hub_agent.clone(),
             "127.0.0.1:0".parse()?,
-            transport_options(),
+            transport_options(guard_for(&hub_agent)),
         )
         .await?,
     );
@@ -408,7 +409,7 @@ async fn bind_spoke(
         SshTransport::bind_with_client(
             agent.clone(),
             "127.0.0.1:0".parse()?,
-            transport_options(),
+            transport_options(guard_for(&agent)),
             OpenSshClient::new(SSH)?,
         )
         .await?,
@@ -469,17 +470,33 @@ async fn close_bus(bus: Bus, label: &str) -> TestResult<()> {
     Ok(())
 }
 
-fn transport_options() -> SshTransportOptions {
+/// One in-memory revocation guard per test user, so a helper holding only an
+/// agent can find its user's.
+static GUARDS: std::sync::Mutex<Vec<(Fingerprint, RevocationGuard)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn guard_for(agent: &AgentKey) -> RevocationGuard {
+    let fp = agent.cert().user_fingerprint();
+    let guards = GUARDS.lock().unwrap();
+    let found = guards.iter().find(|(f, _)| *f == fp);
+    found.expect("agent from agent()").1.clone()
+}
+
+fn transport_options(guard: RevocationGuard) -> SshTransportOptions {
     SshTransportOptions {
         session_timeouts: SessionTimeouts {
             authentication: Duration::from_secs(5),
             record: Duration::from_secs(8),
         },
-        ..SshTransportOptions::default()
+        ..SshTransportOptions::new(guard)
     }
 }
 
 fn agent(user: &UserKey, role: &str) -> Arc<AgentKey> {
+    GUARDS
+        .lock()
+        .unwrap()
+        .push((user.fingerprint(), RevocationGuard::in_memory(user)));
     Arc::new(AgentKey::issue(
         user,
         AgentMetadata {

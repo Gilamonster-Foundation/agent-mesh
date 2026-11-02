@@ -11,6 +11,7 @@
 //! pipe in tests.
 
 use crate::error::{Result, TransportError};
+use crate::revocation::LiveCheck;
 use agent_mesh_protocol::SignedEnvelope;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -55,9 +56,15 @@ pub async fn send_envelope<W: AsyncWrite + Unpin>(
 /// 2. payload CID matches `BLAKE3(payload)`
 /// 3. agent signature over `(recipient, nonce, sequence, payload_cid)`
 ///
+/// Then the sending peer is re-checked with `live` (so a peer revoked since
+/// its Hello is refused here, before the envelope is returned).
+///
 /// A failing envelope yields [`TransportError::BadEnvelope`] without
 /// surfacing the verifier internals.
-pub async fn recv_envelope<R: AsyncRead + Unpin>(recv: &mut R) -> Result<SignedEnvelope> {
+pub async fn recv_envelope<R: AsyncRead + Unpin>(
+    recv: &mut R,
+    live: &LiveCheck,
+) -> Result<SignedEnvelope> {
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf)
         .await
@@ -66,7 +73,7 @@ pub async fn recv_envelope<R: AsyncRead + Unpin>(recv: &mut R) -> Result<SignedE
     recv.read_exact(&mut buf)
         .await
         .map_err(|e| TransportError::Iroh(format!("read body: {e}")))?;
-    decode_envelope(&buf)
+    decode_envelope(&buf, live)
 }
 
 /// The body length a 4-byte prefix announces, refused past
@@ -81,11 +88,15 @@ fn body_len(prefix: [u8; 4]) -> Result<usize> {
     Ok(len as usize)
 }
 
-fn decode_envelope(body: &[u8]) -> Result<SignedEnvelope> {
+/// The one place a received envelope is decoded and admitted: signature
+/// verified, then the peer that sent it re-checked against the revocation log
+/// (`live`).
+fn decode_envelope(body: &[u8], live: &LiveCheck) -> Result<SignedEnvelope> {
     let env: SignedEnvelope = serde_json::from_slice(body)
         .map_err(|e| TransportError::BadEnvelope(format!("deserialize: {e}")))?;
     env.verify()
         .map_err(|e| TransportError::BadEnvelope(e.to_string()))?;
+    live.admit()?;
     Ok(env)
 }
 
@@ -99,14 +110,18 @@ fn decode_envelope(body: &[u8]) -> Result<SignedEnvelope> {
 pub struct EnvelopeReader<R> {
     inner: R,
     buf: Vec<u8>,
+    live: LiveCheck,
 }
 
 impl<R: AsyncRead + Unpin> EnvelopeReader<R> {
-    /// Read envelopes from `inner`.
-    pub fn new(inner: R) -> Self {
+    /// Read envelopes from `inner`, each admitted only while `live` still
+    /// accepts the peer: the check runs as each envelope leaves the buffer,
+    /// so envelopes read ahead of a revocation are refused too.
+    pub fn new(inner: R, live: LiveCheck) -> Self {
         Self {
             inner,
             buf: Vec::new(),
+            live,
         }
     }
 
@@ -123,7 +138,7 @@ impl<R: AsyncRead + Unpin> EnvelopeReader<R> {
             if let Ok(prefix) = <[u8; 4]>::try_from(self.buf.get(..4).unwrap_or_default()) {
                 let end = 4 + body_len(prefix)?;
                 if self.buf.len() >= end {
-                    let env = decode_envelope(&self.buf[4..end]);
+                    let env = decode_envelope(&self.buf[4..end], &self.live);
                     self.buf.drain(..end);
                     return env.map(Some);
                 }
@@ -148,6 +163,27 @@ impl<R: AsyncRead + Unpin> EnvelopeReader<R> {
 mod tests {
     use super::*;
     use agent_mesh_protocol::{AgentKey, AgentMetadata, Caveats, Fingerprint, Recipient, UserKey};
+
+    /// A live check over an empty in-memory log, for streams under test.
+    fn test_live() -> LiveCheck {
+        let user = UserKey::generate();
+        let agent = AgentKey::issue(
+            &user,
+            AgentMetadata {
+                role: "w".into(),
+                host: "h".into(),
+                capabilities: vec![],
+                issued_at: "2026-05-28T00:00:00Z".into(),
+                expires_at: None,
+                caveats: Caveats::top(),
+            },
+        );
+        LiveCheck::new(
+            crate::RevocationGuard::in_memory(&user),
+            agent.cert().clone(),
+        )
+        .unwrap()
+    }
 
     fn fixture_envelope() -> SignedEnvelope {
         envelope_of(b"hello".to_vec())
@@ -195,7 +231,7 @@ mod tests {
     async fn reader_is_cancel_safe_and_tells_a_clean_end_from_a_cut_one() {
         let env = fixture_envelope();
         let (mut a, b) = tokio::io::duplex(1 << 16);
-        let mut reader = EnvelopeReader::new(b);
+        let mut reader = EnvelopeReader::new(b, test_live());
         send_envelope(&mut a, &env).await.unwrap();
         let bytes = serde_json::to_vec(&env).unwrap();
         let prefix = u32::try_from(bytes.len()).unwrap().to_be_bytes();
@@ -215,7 +251,7 @@ mod tests {
         a.write_all(&bytes[..10]).await.unwrap();
         drop(a);
         assert!(matches!(
-            EnvelopeReader::new(b).next().await,
+            EnvelopeReader::new(b, test_live()).next().await,
             Err(TransportError::PeerClosed)
         ));
     }
@@ -227,13 +263,13 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            recv_envelope(&mut b).await,
+            recv_envelope(&mut b, &test_live()).await,
             Err(TransportError::BadEnvelope(_))
         ));
         a.write_all(&(MAX_ENVELOPE_BYTES + 1).to_be_bytes())
             .await
             .unwrap();
-        let mut reader = EnvelopeReader::new(b);
+        let mut reader = EnvelopeReader::new(b, test_live());
         let read = tokio::time::timeout(std::time::Duration::from_secs(1), reader.next());
         assert!(matches!(
             read.await,
@@ -248,7 +284,7 @@ mod tests {
         let big = envelope_of(vec![9; 8192]);
         let (small, other) = (fixture_envelope(), envelope_of(b"second".to_vec()));
         let (mut a, b) = tokio::io::duplex(1 << 20);
-        let mut reader = EnvelopeReader::new(b);
+        let mut reader = EnvelopeReader::new(b, test_live());
         send_envelope(&mut a, &big).await.unwrap();
         assert_eq!(reader.next().await.unwrap(), Some(big));
         send_envelope(&mut a, &small).await.unwrap();

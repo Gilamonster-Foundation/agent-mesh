@@ -644,7 +644,9 @@ mod unix {
             Some((port, announce)) => {
                 let (user, agent) = bus_identity(home, "amesh-flock-bridge")?;
                 let (fp, pubkey) = (agent.fingerprint(), agent.public_bytes());
-                let bus = Bus::bind_with(&user, agent, port, BusOptions { announce }).await?;
+                let revocation = crate::util::revocation_guard(home, &user)?;
+                let bus =
+                    Bus::bind_with(&user, agent, port, BusOptions { announce }, revocation).await?;
                 flock_bridge::serve_home(
                     &bus,
                     flock_bridge::topic(user.fingerprint(), &id),
@@ -683,7 +685,8 @@ mod unix {
             ),
         };
         let (user, agent) = bus_identity(home, "amesh-flock-attach")?;
-        let bus = std::sync::Arc::new(Bus::bind_outbound_only(&user, agent).await?);
+        let revocation = crate::util::revocation_guard(home, &user)?;
+        let bus = std::sync::Arc::new(Bus::bind_outbound_only(&user, agent, revocation).await?);
         let topic = flock_bridge::topic(user.fingerprint(), &id);
         let signed = flock_bridge::fetch_genesis(&bus, &peer, &topic).await?;
         // the directory is ours (private, locked) for as long as this runs

@@ -3,6 +3,7 @@
 //! scenario with it.
 #![allow(dead_code)]
 
+use agent_mesh_bus::RevocationGuard;
 use agent_mesh_bus::{Bus, BusOptions, PeerEndpoint};
 use agent_mesh_cli::flock_bridge::{
     fetch_genesis, pin_genesis, serve_home, serve_proxy, topic, Attachment, Gate, Limits, Peer,
@@ -41,9 +42,15 @@ pub fn agent(user: &UserKey, role: &str) -> AgentKey {
 pub async fn node(user: &UserKey, role: &str) -> (Arc<Bus>, PeerEndpoint) {
     let key = agent(user, role);
     let pubkey = key.public_bytes();
-    let bus = Bus::bind_with(user, key, 0, BusOptions { announce: false })
-        .await
-        .unwrap();
+    let bus = Bus::bind_with(
+        user,
+        key,
+        0,
+        BusOptions { announce: false },
+        RevocationGuard::in_memory(user),
+    )
+    .await
+    .unwrap();
     let at = PeerEndpoint::new(
         pubkey,
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), bus.local_port()),

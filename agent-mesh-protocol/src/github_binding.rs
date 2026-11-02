@@ -207,6 +207,28 @@ mod tests {
         assert_eq!(bytes.len(), 32);
     }
 
+    /// GitHub `.keys` lists every key a user has, ECDSA ones included.
+    /// Bindings are ed25519-only, so an `ecdsa-sha2-nistp256` line must
+    /// never yield a candidate key, whether ssh-key refuses to parse it
+    /// (built without its `ecdsa` feature, which pulled crypto-bigint 0.5,
+    /// RUSTSEC-2026-0387) or parses it and the extractor rejects it.
+    #[test]
+    fn ecdsa_keys_line_yields_no_candidate() {
+        const ECDSA: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBJdkhX98Id3/C+oRFZ6OggOipglS8hTRM6cgqYj1cFHCt8sMErT1xAlXxf3+zPeTn0c2s7w8hl/7XNp0JPeBVN4=";
+        if let Ok(parsed) = SshPublicKey::from_openssh(ECDSA) {
+            assert!(ssh_pubkey_ed25519_bytes(&parsed).is_err());
+        }
+        // The ed25519 line next to it still parses and verifies.
+        let user = UserKey::generate();
+        let ssh = fresh_ssh();
+        let binding = GitHubBinding::sign(&user.public(), &ssh, None).unwrap();
+        let line = ssh.public_key().to_openssh().unwrap();
+        let parsed = SshPublicKey::from_openssh(&line).unwrap();
+        binding
+            .verify(&ssh_pubkey_ed25519_bytes(&parsed).unwrap())
+            .expect("ed25519 line verifies");
+    }
+
     #[test]
     fn serde_roundtrip_binding() {
         let user = UserKey::generate();

@@ -26,8 +26,10 @@
 #
 # PIPELINE PARITY: This hook mirrors the lint and test jobs of
 # .github/workflows/ci.yml (scoped) and the `check` recipe in justfile;
-# coverage and the macOS job are CI-only. When editing this hook, audit the
-# workflow + justfile in the same PR. Scope logic: .githooks/test-pre-push.sh.
+# coverage and the macOS job are CI-only. .github/workflows/release.yml
+# (tag-only: wheels, PyPI, the crates.io chain) is CI-only too; it runs no
+# check this hook could mirror. When editing this hook, audit the
+# workflows + justfile in the same PR. Scope logic: .githooks/test-pre-push.sh.
 #
 # Install: `just install-hooks` (or `git config core.hooksPath .githooks`)
 # Do NOT skip this hook with `--no-verify`. If a check fails, fix the issue.

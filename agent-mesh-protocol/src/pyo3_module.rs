@@ -15,6 +15,7 @@ use crate::{
     envelope::{Recipient, SignedEnvelope},
     fingerprint::Fingerprint,
     github_binding::{ssh_pubkey_ed25519_bytes, GitHubBinding},
+    revocation::{RevocationEntry, RevocationLog, RevocationState, Seen},
     user_key::{UserKey, UserPublic},
     MeshError,
 };
@@ -475,6 +476,12 @@ impl PyCertChain {
         self.inner.verify().map_err(mesh_err_to_py)
     }
 
+    /// Verify the chain against a verified revocation state: same user, no
+    /// revoked link, valid at the state's generation. Raises `MeshError`.
+    fn verify_with(&self, state: &PyRevocationState) -> PyResult<()> {
+        self.inner.verify_with(&state.inner).map_err(mesh_err_to_py)
+    }
+
     /// Fingerprint of the agent's public key.
     fn agent_fingerprint(&self) -> PyFingerprint {
         PyFingerprint {
@@ -487,6 +494,129 @@ impl PyCertChain {
         PyFingerprint {
             inner: self.inner.user_fingerprint(),
         }
+    }
+}
+
+// ---- Revocation ----
+
+/// What a verified revocation log says: owner, head, length, generation, revoked set.
+#[pyclass(
+    name = "RevocationState",
+    module = "agent_mesh._agent_mesh.core",
+    frozen,
+    skip_from_py_object
+)]
+#[derive(Clone)]
+pub struct PyRevocationState {
+    pub inner: RevocationState,
+}
+
+#[pymethods]
+impl PyRevocationState {
+    /// Fingerprint of the user that signed the log.
+    #[getter]
+    fn user(&self) -> PyFingerprint {
+        PyFingerprint {
+            inner: self.inner.user,
+        }
+    }
+
+    /// Id of the last node, as a multibase string.
+    #[getter]
+    fn head(&self) -> String {
+        self.inner.head.to_string()
+    }
+
+    /// Number of nodes, genesis included.
+    #[getter]
+    fn len(&self) -> u64 {
+        self.inner.len
+    }
+
+    /// Current generation (0 before any bump).
+    #[getter]
+    fn generation(&self) -> u64 {
+        self.inner.generation
+    }
+
+    /// Fingerprints of the revoked agents.
+    #[getter]
+    fn revoked(&self) -> Vec<PyFingerprint> {
+        self.inner
+            .revoked
+            .iter()
+            .map(|f| PyFingerprint { inner: *f })
+            .collect()
+    }
+
+    /// JSON string of the `Seen` record to persist after accepting this state.
+    fn seen_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner.seen())
+            .map_err(|e| PyMeshError::new_err(format!("encode seen: {e}")))
+    }
+}
+
+/// A user-signed, append-only revocation log.
+#[pyclass(
+    name = "RevocationLog",
+    module = "agent_mesh._agent_mesh.core",
+    skip_from_py_object
+)]
+#[derive(Clone)]
+pub struct PyRevocationLog {
+    pub inner: RevocationLog,
+}
+
+#[pymethods]
+impl PyRevocationLog {
+    /// A new log owned by `user`.
+    #[classmethod]
+    fn genesis(_cls: &Bound<'_, PyType>, user: &PyUserKey) -> PyResult<Self> {
+        let inner = RevocationLog::genesis(&user.inner).map_err(mesh_err_to_py)?;
+        Ok(Self { inner })
+    }
+
+    /// Append a signed revocation of `agent`.
+    fn revoke(&mut self, user: &PyUserKey, agent: &PyFingerprint) -> PyResult<()> {
+        let entry = RevocationEntry::Revoke { agent: agent.inner };
+        self.inner
+            .append(&user.inner, entry)
+            .map_err(mesh_err_to_py)
+    }
+
+    /// Append a signed generation bump to `current`.
+    fn bump_generation(&mut self, user: &PyUserKey, current: u64) -> PyResult<()> {
+        let entry = RevocationEntry::Generation { current };
+        self.inner
+            .append(&user.inner, entry)
+            .map_err(mesh_err_to_py)
+    }
+
+    /// Check the whole log and return its state. Raises `MeshError`.
+    fn verify(&self) -> PyResult<PyRevocationState> {
+        let inner = self.inner.verify().map_err(mesh_err_to_py)?;
+        Ok(PyRevocationState { inner })
+    }
+
+    /// Refuse a rolled-back or forked log; `seen_json` is `RevocationState.seen_json()`.
+    fn extends(&self, seen_json: &str) -> PyResult<()> {
+        let seen: Seen = serde_json::from_str(seen_json)
+            .map_err(|e| PyMeshError::new_err(format!("decode seen: {e}")))?;
+        self.inner.extends(&seen).map_err(mesh_err_to_py)
+    }
+
+    /// The log as a JSON string (a container; verify before trusting).
+    fn to_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner)
+            .map_err(|e| PyMeshError::new_err(format!("encode log: {e}")))
+    }
+
+    /// Parse a log from its JSON string. Not verified: call `verify()`.
+    #[classmethod]
+    fn from_json(_cls: &Bound<'_, PyType>, data: &str) -> PyResult<Self> {
+        let inner = serde_json::from_str(data)
+            .map_err(|e| PyMeshError::new_err(format!("decode log: {e}")))?;
+        Ok(Self { inner })
     }
 }
 
@@ -788,6 +918,8 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRecipient>()?;
     m.add_class::<PySignedEnvelope>()?;
     m.add_class::<PyGitHubBinding>()?;
+    m.add_class::<PyRevocationLog>()?;
+    m.add_class::<PyRevocationState>()?;
     m.add_function(wrap_pyfunction!(ssh_authorized_key_to_ed25519_bytes, &m)?)?;
     m.add("MeshError", py.get_type::<PyMeshError>())?;
     parent.add_submodule(&m)?;

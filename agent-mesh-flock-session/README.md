@@ -29,3 +29,5 @@ injectable), extended by `Watch` from its own head; it refuses any history that
 does not extend that head, and a `Caught` marker that disagrees with its own
 verified head. One `Reader` per state directory (an exclusive lock held for
 its life).
+`Reader::follow_on` takes a connection the caller owns, so a caller can stop a
+blocked read by shutting its clone of that connection down.

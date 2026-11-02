@@ -107,6 +107,12 @@ async def run(
         )
         return 1
 
+    try:
+        revocation = util.revocation_guard(home, user)
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
     local_ep = await Endpoint.bind(agent, 0)
     socket_addrs = [f"{ip}:{peer.port}" for ip in peer.addrs]
     print(f"dialing peer at {socket_addrs} (alpn agent-mesh/v1)...")
@@ -124,6 +130,7 @@ async def run(
             bytes(pubkey),
             socket_addrs,
             envelope,
+            revocation,
         )
     except Exception as e:  # noqa: BLE001 — handshake / dial failures
         await local_ep.close()

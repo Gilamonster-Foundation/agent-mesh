@@ -4,6 +4,8 @@
 #![cfg(unix)]
 mod harness;
 
+mod revocation_log;
+
 use harness::{amesh, Proc};
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
@@ -20,6 +22,7 @@ fn a_flock_served_at_one_host_is_attached_enrolled_and_used_from_another() {
     // home host: a flock, served with its attach socket and a bridge
     let home = TempDir::new().unwrap();
     assert!(amesh(home.path()).arg("keygen").status().unwrap().success());
+    revocation_log::ensure_log(home.path());
     let init = amesh(home.path())
         .args(["flock", "init", "--name", "f"])
         .args(["--member", "shep:shepherd", "--member", "h1:helper"])
@@ -57,6 +60,7 @@ fn a_flock_served_at_one_host_is_attached_enrolled_and_used_from_another() {
     // the other host: the same user, its own config dir and flock directory
     let far = TempDir::new().unwrap();
     std::fs::copy(home.path().join("user.key"), far.path().join("user.key")).unwrap();
+    revocation_log::copy_log(home.path(), far.path());
     let fdir = far.path().join("flocks").join("f");
 
     // a wrong id is refused and nothing is written
