@@ -425,7 +425,10 @@ where
     async fn authenticate_inner(&mut self) -> Result<HandshakeOutcome, SessionError> {
         // The local log decides the generation; peers on different ones
         // fail the parameter comparison instead of applying different views.
-        let state = self.revocation.state().map_err(revocation_error)?;
+        let state = self
+            .revocation
+            .state()
+            .map_err(|e| revocation_error(e.into()))?;
         self.parameters.current_generation = Some(state.generation);
         self.parameters.validate()?;
         validate_local_identity(&self.local_agent, &state)?;

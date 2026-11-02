@@ -138,7 +138,7 @@ fn ensure_trustable(
     }
     // Replaces the bare `verify()`: the chain must also stand against the
     // local user's revocation log (no revoked link, current generation).
-    revocation.check(peer_cert)
+    Ok(revocation.check(peer_cert)?)
 }
 
 /// Read the dialer-side response — either the peer's Hello (ok) or a

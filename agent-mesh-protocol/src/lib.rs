@@ -20,12 +20,14 @@
 
 pub mod agent_key;
 pub mod assertion;
+pub mod atomic;
 pub mod authority;
 pub mod caveats;
 pub mod envelope;
 pub mod error;
 pub mod fingerprint;
 pub mod github_binding;
+pub mod guard;
 pub mod revocation;
 pub mod signer;
 pub mod user_key;
@@ -35,6 +37,7 @@ pub mod pyo3_module;
 
 pub use agent_key::{AgentKey, AgentMetadata, CertChain, Issuer, SerdeSig};
 pub use assertion::Assertion;
+pub use atomic::atomic_write;
 pub use authority::{
     admit, check_derivation, empty_closure, relate, verify_chain, AdmissionDecision,
     AdmissionReject, AttestationId, AttestationVerifier, Authority, AuthorityId, AuthorityMismatch,
@@ -47,6 +50,7 @@ pub use envelope::{Recipient, SignedEnvelope};
 pub use error::{MeshError, Result};
 pub use fingerprint::Fingerprint;
 pub use github_binding::{ssh_pubkey_ed25519_bytes, GitHubBinding};
+pub use guard::{GuardError, RevocationGuard};
 pub use revocation::{RevocationEntry, RevocationLog, RevocationState, Seen, SignedEntry};
 pub use signer::MeshSigner;
 pub use user_key::{UserKey, UserPublic};

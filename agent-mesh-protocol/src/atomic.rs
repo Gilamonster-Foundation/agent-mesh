@@ -4,7 +4,7 @@
 //! The temp file is created with `create_new` under an unpredictable name and
 //! mode 0600, so a symlink or file planted at a guessable path is never
 //! followed or truncated. One helper for the revocation log (`amesh`) and the
-//! `Seen` record (this crate), so there is a single copy of the dance.
+//! `Seen` record ([`crate::RevocationGuard`]), so there is a single copy of the dance.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
