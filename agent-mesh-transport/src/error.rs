@@ -71,6 +71,17 @@ pub enum TransportError {
     Core(#[from] agent_mesh_protocol::MeshError),
 }
 
+impl From<agent_mesh_protocol::GuardError> for TransportError {
+    fn from(e: agent_mesh_protocol::GuardError) -> Self {
+        use agent_mesh_protocol::GuardError as G;
+        match e {
+            G::Revoked(a) => Self::Revoked(a),
+            G::BadCertChain(m) => Self::BadCertChain(m),
+            G::Unavailable(m) => Self::RevocationUnavailable(m),
+        }
+    }
+}
+
 /// Convenience alias for the crate's `Result` type.
 pub type Result<T> = std::result::Result<T, TransportError>;
 

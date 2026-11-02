@@ -174,7 +174,7 @@ fn save(path: &Path, log: &RevocationLog) -> Result<()> {
     }
     let dir = dir_of(path);
     std::fs::create_dir_all(dir)?;
-    agent_mesh_transport::atomic_write(path, serde_json::to_string_pretty(log)?.as_bytes())
+    agent_mesh_protocol::atomic_write(path, serde_json::to_string_pretty(log)?.as_bytes())
         .with_context(|| format!("write {}", path.display()))
 }
 

@@ -871,7 +871,7 @@ fn authenticated_iroh_peer(
     // used on either side of a connection: the evidence is derived only from a
     // cert that stands against the revocation log and whose leaf key is
     // byte-for-byte the QUIC/TLS session identity.
-    revocation.check(peer_cert)?;
+    revocation.check(peer_cert).map_err(TransportError::from)?;
     if &peer_cert.agent_pubkey != session_id.as_bytes() {
         return Err(BusError::Transport(TransportError::Handshake(format!(
             "peer Hello certificate agent {} is not bound to QUIC session {}",
@@ -1193,7 +1193,7 @@ impl IrohTransport {
         let certified_user_fp = verified_local_user(&agent)?;
         ensure_local_user(user_fp, certified_user_fp)?;
         // Fail closed at bind: no usable log of this user, no transport.
-        let log_user = revocation.state()?.user;
+        let log_user = revocation.state().map_err(TransportError::from)?.user;
         ensure_local_user(log_user, certified_user_fp)?;
         let endpoint = Endpoint::bind(&agent, port).await?;
         let local_port = endpoint.port();
