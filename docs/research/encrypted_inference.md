@@ -15,7 +15,7 @@ for which keys may use which models.
 
 | Piece | What it gives | Where |
 |---|---|---|
-| iroh QUIC transport | every connection is encrypted (QUIC carries TLS 1.3) and authenticated by cert chain at the handshake | `agent-mesh-transport` |
+| iroh QUIC transport | every connection is encrypted (QUIC carries TLS 1.3) and authenticated by cert chain at the handshake, checked against the user's revocation log (a revoked agent is refused; no log, no connection) | `agent-mesh-transport`, `RevocationGuard` in `agent-mesh-protocol`, `docs/decisions/revocation.md` |
 | Signed envelopes | every message is signed by the sender's `AgentKey`, certified by its `UserKey` | `agent-mesh-protocol` |
 | Session streams | a long-lived, full-duplex conversation on one QUIC stream, authorized at open from the opener's certificate | `agent-mesh-bus` (#84), `docs/decisions/session_streams.md` |
 | SSH carriage | the same bus traffic, session streams included, over system `ssh -W`, with an inner AgentKey handshake | `agent-mesh-transport-ssh` (#112), `docs/decisions/ssh_transport.md` |
@@ -36,7 +36,9 @@ flowchart TB
 Each layer adds one guarantee. The transport hides the bytes from the network.
 The envelope proves who wrote each message. The session refuses an opener
 whose certificate does not allow the topic, and dies on a sequence gap or a
-bad signature.
+bad signature. A revocation the log learns later ends an established session
+too: every received envelope is re-checked against the log, so revoking a key
+cuts off its inference stream.
 
 ## Today: newt-mesh request/reply
 
