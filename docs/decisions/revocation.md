@@ -59,8 +59,8 @@ revoked per agent (`Revoke`), not by bump. Only certs issued with a bounded
 
 ## Transports (#182)
 
-`agent-mesh-transport::RevocationGuard` is the one consumer of the log; every
-transport takes one and nothing is checked without it.
+`agent-mesh-protocol::RevocationGuard` (re-exported by `agent-mesh-transport`) is
+the one consumer of the log; every transport takes one and nothing is checked without it.
 
 - **Fail closed.** `RevocationGuard::open(<home>/revocation.json, user)` reads,
   verifies and checks the log at startup; a missing, unreadable, invalid or
@@ -73,7 +73,7 @@ transport takes one and nothing is checked without it.
   the write of a strictly longer head happen under one exclusive lock
   (`revocation.seen.lock`, `File::lock`), so guards and processes sharing a home
   cannot interleave and move it backwards. It is published through the shared
-  `atomic_write` helper (exclusive `create_new` temp file with a random name and
+  `agent-mesh-protocol::atomic_write` helper (exclusive `create_new` temp file with a random name and
   mode 0600, `sync_all`, rename, directory `sync_all`), also used by `amesh`.
   A log rolled back to an older copy, or forked, is refused at startup and while
   running.
